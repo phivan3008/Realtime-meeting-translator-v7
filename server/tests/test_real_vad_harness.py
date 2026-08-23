@@ -175,6 +175,76 @@ def test_checks_fail_loudly_when_silence_triggers_a_segment(tmp_path):
     ]
 
 
+# ---------------------------------------------------------------------------
+# Latency reporting
+# ---------------------------------------------------------------------------
+class FixedLatencyVAD(ScriptedVAD):
+    """A stub whose per-frame timings are dictated, not measured."""
+
+    def __init__(self, latencies_ms):
+        super().__init__([0.02])
+        self.latencies_ms = list(latencies_ms)
+
+    def probability(self, frame: np.ndarray) -> float:
+        self.calls += 1
+        return 0.02
+
+
+def latency_report(latencies_ms) -> harness.Report:
+    report = harness.Report()
+    harness.check_latency(FixedLatencyVAD(latencies_ms), report)
+    return report
+
+
+def test_percentile_uses_nearest_rank():
+    values = [float(i) for i in range(1, 101)]
+    assert harness.percentile(values, 0.95) == 95.0
+    assert harness.percentile(values, 0.99) == 99.0
+    assert harness.percentile([], 0.5) == 0.0
+    assert harness.percentile([7.0], 0.99) == 7.0
+
+
+def test_latency_check_passes_on_a_healthy_run():
+    assert latency_report([0.3] * 1000).failed == []
+
+
+def test_a_single_warmup_spike_does_not_fail_the_run():
+    """The first inference allocates buffers; 140 ms once is not a stall."""
+    report = latency_report([138.0] + [0.3] * 999)
+    assert report.failed == []
+
+
+def test_a_stall_longer_than_a_client_chunk_fails():
+    report = latency_report([0.3] * 500 + [250.0] + [0.3] * 499)
+    assert [c.name for c in report.failed] == ["No stall longer than one client chunk"]
+
+
+def test_persistently_slow_frames_fail_even_when_none_is_a_stall():
+    """40 ms per frame never stalls, but it cannot keep up with 32 ms of audio."""
+    report = latency_report([40.0] * 1000)
+    names = [c.name for c in report.failed]
+    assert "Steady-state frames stay inside the frame budget" in names
+    assert "VAD is faster than real time (mean)" in names
+
+
+def test_latency_check_reports_the_slowest_frame_position(capsys):
+    latency_report([0.3] * 400 + [50.0] + [0.3] * 599)
+    out = capsys.readouterr().out
+    assert "slowest frame is #400" in out
+    assert "mid-stream" in out
+
+
+def test_latency_check_calls_a_first_frame_spike_warm_up(capsys):
+    latency_report([138.0] + [0.3] * 999)
+    assert "model warm-up" in capsys.readouterr().out
+
+
+def test_latency_check_handles_a_run_with_no_frames():
+    report = harness.Report()
+    harness.check_latency(FixedLatencyVAD([]), report)
+    assert [c.name for c in report.failed] == ["VAD inference latency measured"]
+
+
 def test_describe_prints_without_crashing(tmp_path, capsys):
     path = write_wav(tmp_path / "speech.wav", 3.0)
     result = harness.replay(path, ScriptedVAD([0.9] * 31 + [0.02]))

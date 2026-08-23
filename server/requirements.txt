@@ -15,8 +15,9 @@ scipy==1.14.1
 soundfile==0.12.1
 
 # --- Torch stack (install the CUDA 12.1 build on the pod) ---
-torch==2.4.1
-torchaudio==2.4.1
+# Pinned to 2.4.0 because vllm 0.6.3 requires exactly that; 2.4.1 conflicts.
+torch==2.4.0
+torchaudio==2.4.0
 
 # --- 1. Voice Activity Detection (moved here from the client) ---
 silero-vad==5.1.2
@@ -39,6 +40,9 @@ speechbrain==1.0.1
 faster-whisper==1.0.3
 
 # --- 7. Translation LLM ---
+# datasets and pyarrow are pinned to versions vllm 0.6.3 accepts.
+datasets==3.0.1
+pyarrow==17.0.0
 vllm==0.6.3
 
 # --- Utilities ---

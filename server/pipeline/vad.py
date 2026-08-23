@@ -236,7 +236,14 @@ class SpeechStateMachine:
 class SileroVAD:
     """Per-frame speech probability from the Silero VAD model."""
 
-    def __init__(self, onnx: bool = False, num_threads: int = 1) -> None:
+    #: Dummy frames pushed through the model at construction time. The first
+    #: real inference otherwise costs ~140 ms while torch allocates buffers and
+    #: specialises the traced graph, and that spike would land on the first
+    #: word of the meeting instead of on startup.
+    WARMUP_FRAMES = 8
+
+    def __init__(self, onnx: bool = False, num_threads: int = 1,
+                 warmup_frames: int = WARMUP_FRAMES) -> None:
         try:
             import torch
             from silero_vad import load_silero_vad
@@ -256,6 +263,16 @@ class SileroVAD:
         except Exception as exc:                        # pragma: no cover
             raise VADError(f"Could not load the Silero VAD model: {exc}") from exc
         self.onnx = onnx
+        self.warmup(warmup_frames)
+
+    def warmup(self, frames: int = WARMUP_FRAMES) -> None:
+        """Pay the first-inference cost now, while nobody is talking."""
+        if frames <= 0:
+            return
+        silence = np.zeros(VAD_FRAME_SAMPLES, dtype=np.float32)
+        for _ in range(frames):
+            self.probability(silence)
+        self.reset()
 
     def probability(self, frame: np.ndarray) -> float:
         """Speech probability in [0, 1] for one 512 sample float32 frame."""

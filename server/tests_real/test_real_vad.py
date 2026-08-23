@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from server.config import (  # noqa: E402
     CHANNELS,
     CHUNK_BYTES,
+    CHUNK_DURATION_MS,
     FINALIZE_PAUSE_MS,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
@@ -65,9 +66,14 @@ from server.pipeline.vad import (  # noqa: E402
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
-# One frame of inference must stay far below the 32 ms of audio it represents.
+# Steady state: one frame of inference must stay far below the 32 ms of audio
+# it represents, or VAD falls behind the stream.
 MAX_MEAN_INFERENCE_MS = VAD_FRAME_MS / 4.0      # 8 ms
-MAX_WORST_INFERENCE_MS = VAD_FRAME_MS           # 32 ms
+MAX_P99_INFERENCE_MS = VAD_FRAME_MS             # 32 ms
+# A single hiccup is survivable as long as it is shorter than the 200 ms chunk
+# the client sends: the queue absorbs it and the stream catches straight back
+# up. Anything longer than a whole chunk is a real stall.
+MAX_WORST_INFERENCE_MS = CHUNK_DURATION_MS      # 200 ms
 
 
 # ---------------------------------------------------------------------------
@@ -204,21 +210,44 @@ def pairs(events: list[SegmentEvent]) -> list[tuple[SegmentEvent, SegmentEvent]]
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
+def percentile(sorted_values: list[float], fraction: float) -> float:
+    """Nearest-rank percentile over an already sorted list."""
+    if not sorted_values:
+        return 0.0
+    rank = max(1, min(len(sorted_values), round(fraction * len(sorted_values))))
+    return sorted_values[rank - 1]
+
+
 def check_latency(vad: TimedVAD, report: Report) -> None:
     if not vad.latencies_ms:
         report.add("VAD inference latency measured", False, "no frames processed")
         return
-    latencies = sorted(vad.latencies_ms)
-    mean = statistics.fmean(latencies)
-    p95 = latencies[int(len(latencies) * 0.95) - 1]
-    worst = latencies[-1]
+    latencies = vad.latencies_ms
+    ordered = sorted(latencies)
+    mean = statistics.fmean(ordered)
+    p95 = percentile(ordered, 0.95)
+    p99 = percentile(ordered, 0.99)
+    worst = ordered[-1]
+    slowest_at = latencies.index(worst)
+
     print(f"\n  Inference over {len(latencies)} frames: mean {mean:.2f} ms, "
-          f"p95 {p95:.2f} ms, max {worst:.2f} ms "
-          f"(budget {VAD_FRAME_MS} ms per frame)")
+          f"p95 {p95:.2f} ms, p99 {p99:.2f} ms, max {worst:.2f} ms")
+    print(f"    slowest frame is #{slowest_at} of {len(latencies)}"
+          + (" - at the very start, model warm-up" if slowest_at < 3
+             else " - mid-stream"))
+    print(f"    budgets: mean < {MAX_MEAN_INFERENCE_MS:.0f} ms, "
+          f"p99 < {MAX_P99_INFERENCE_MS} ms (one frame), "
+          f"max < {MAX_WORST_INFERENCE_MS} ms (one client chunk)")
+
     report.add("VAD is faster than real time (mean)", mean < MAX_MEAN_INFERENCE_MS,
                f"mean {mean:.2f} ms < {MAX_MEAN_INFERENCE_MS:.0f} ms")
-    report.add("No frame blows the real-time budget", worst < MAX_WORST_INFERENCE_MS,
-               f"max {worst:.2f} ms < {MAX_WORST_INFERENCE_MS:.0f} ms")
+    report.add("Steady-state frames stay inside the frame budget",
+               p99 < MAX_P99_INFERENCE_MS,
+               f"p99 {p99:.2f} ms < {MAX_P99_INFERENCE_MS} ms")
+    report.add("No stall longer than one client chunk",
+               worst < MAX_WORST_INFERENCE_MS,
+               f"max {worst:.2f} ms (frame #{slowest_at}) "
+               f"< {MAX_WORST_INFERENCE_MS} ms")
 
 
 def check_silence(result: Replay, report: Report) -> None:
