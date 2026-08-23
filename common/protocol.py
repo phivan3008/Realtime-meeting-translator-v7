@@ -66,6 +66,7 @@ class ClientMessage(str, Enum):
 class ServerMessage(str, Enum):
     READY = "ready"
     VAD = "vad"
+    UTTERANCE = "utterance"
     PARTIAL = "partial"
     FINAL = "final"
     ERROR = "error"
@@ -152,6 +153,26 @@ def make_vad(event: str, at_ms: float, **extra: Any) -> str:
             "event": event,
             "at_ms": round(float(at_ms), 1),
             **extra,
+        }
+    )
+
+
+def make_utterance(index: int, start_ms: float, end_ms: float, reason: str,
+                   continues_previous: bool = False) -> str:
+    """A sentence boundary decided by the Stream Buffer Manager.
+
+    Sent before any transcript exists, so the UI can open a row for the
+    sentence and the client can see why it was cut.
+    """
+    return json.dumps(
+        {
+            "type": ServerMessage.UTTERANCE.value,
+            "index": index,
+            "start_ms": round(float(start_ms), 1),
+            "end_ms": round(float(end_ms), 1),
+            "duration_ms": round(float(end_ms) - float(start_ms), 1),
+            "reason": reason,
+            "continues_previous": bool(continues_previous),
         }
     )
 

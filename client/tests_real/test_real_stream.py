@@ -51,6 +51,11 @@ from common.protocol import (  # noqa: E402
     SAMPLE_RATE,
 )
 
+# Mirrors server/config.py; the client only needs it to sanity check what the
+# server reports.
+MAX_UTTERANCE_MS = 7_000
+UTTERANCE_TOLERANCE_MS = 40
+
 DEFAULT_URL = "ws://127.0.0.1:8000"
 DEFAULT_SECONDS = 25.0
 
@@ -96,6 +101,10 @@ class Collected:
     @property
     def vad_events(self) -> list[tuple[float, dict]]:
         return [(t, m) for t, m in self.messages if m.get("type") == "vad"]
+
+    @property
+    def utterances(self) -> list[dict]:
+        return [m for _, m in self.messages if m.get("type") == "utterance"]
 
     def lags_ms(self) -> list[float]:
         """How late each event arrived, relative to the audio it describes.
@@ -242,6 +251,59 @@ def check_events(collected: Collected, report: Report) -> None:
                    f"smallest lag {min(lags):.0f} ms")
 
 
+def check_utterances(collected: Collected, report: Report) -> None:
+    """The sentence boundaries the Stream Buffer Manager committed."""
+    utterances = collected.utterances
+    print()
+    print("  Utterances committed by the server:")
+    for payload in utterances:
+        print(f"    #{payload['index']:<3} "
+              f"{payload['start_ms'] / 1000:7.2f}s -> "
+              f"{payload['end_ms'] / 1000:7.2f}s "
+              f"({payload['duration_ms'] / 1000:.2f}s)  "
+              f"{payload['reason']}"
+              + ("  [continues]" if payload["continues_previous"] else ""))
+    if not utterances:
+        print("    (none)")
+
+    report.add("The server committed at least one sentence",
+               len(utterances) >= 1, f"{len(utterances)} utterance(s)")
+    if not utterances:
+        return
+
+    report.add(
+        "Utterance indexes are consecutive from zero",
+        [u["index"] for u in utterances] == list(range(len(utterances))),
+        f"indexes {[u['index'] for u in utterances][:6]}",
+    )
+    longest = max(u["duration_ms"] for u in utterances)
+    report.add(
+        "No sentence outstays the max duration",
+        longest <= MAX_UTTERANCE_MS + UTTERANCE_TOLERANCE_MS,
+        f"longest {longest / 1000:.2f} s, limit {MAX_UTTERANCE_MS / 1000:.1f} s",
+    )
+    overlaps = [
+        (a["index"], b["index"])
+        for a, b in zip(utterances, utterances[1:])
+        if b["start_ms"] < a["end_ms"] - 1e-6
+    ]
+    report.add("Sentences never overlap", not overlaps, f"{overlaps[:3]}")
+    report.add(
+        "A continued sentence joins the previous one with no gap",
+        all(abs(b["start_ms"] - a["end_ms"]) < 1.0
+            for a, b in zip(utterances, utterances[1:])
+            if b["continues_previous"]),
+        f"{sum(1 for u in utterances if u['continues_previous'])} continuation(s)",
+    )
+
+    ends = sum(1 for _, m in collected.vad_events if m["event"] == "speech_end")
+    report.add(
+        "Every closed speech segment produced at least one sentence",
+        len(utterances) >= ends,
+        f"{len(utterances)} utterance(s) for {ends} speech_end",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -268,6 +330,7 @@ async def main_async(args) -> int:
 
     check_stream(client, collected, args.seconds, report)
     check_events(collected, report)
+    check_utterances(collected, report)
 
     print("\n" + "=" * 72)
     if report.failed:

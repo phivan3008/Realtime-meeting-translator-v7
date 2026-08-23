@@ -36,3 +36,11 @@ VAD_SPEECH_PAD_MS = 256
 FINALIZE_PAUSE_MS = 400
 # ... or when the segment has simply run too long.
 FINALIZE_MAX_DURATION_MS = 7_000
+# How often the open utterance is handed to the partial ASR pass while the
+# speaker keeps talking. Shorter feels more live but costs GPU on text that is
+# about to be replaced anyway.
+PARTIAL_INTERVAL_MS = 600
+# When a max-duration cut is forced, look back this far for the quietest
+# moment and cut there instead, so the split lands between words rather than
+# through one.
+SPLIT_SEARCH_MS = 500

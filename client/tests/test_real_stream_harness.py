@@ -268,3 +268,95 @@ def test_a_reconnect_during_the_run_is_reported():
     harness.check_stream(FakeClient(chunks_sent=100, connects=2),
                          harness.Collected(), 20.0, report)
     assert [c.name for c in report.failed] == ["The connection survived the run"]
+
+
+# ---------------------------------------------------------------------------
+# Utterance checks
+# ---------------------------------------------------------------------------
+def utterance(index: int, start_ms: float, end_ms: float,
+              reason: str = "pause", continues: bool = False) -> dict:
+    return {
+        "type": "utterance",
+        "index": index,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "duration_ms": end_ms - start_ms,
+        "reason": reason,
+        "continues_previous": continues,
+    }
+
+
+def with_utterances(*payloads, vad_ends: int = 0):
+    collected = harness.Collected(stream_start=0.0)
+    for i in range(vad_ends):
+        collected.messages.append(
+            (0.1, {"type": "vad", "event": "speech_end", "at_ms": float(i)})
+        )
+    for payload in payloads:
+        collected.messages.append((0.1, payload))
+    return collected
+
+
+def test_a_healthy_set_of_utterances_passes():
+    collected = with_utterances(
+        utterance(0, 0, 2_000),
+        utterance(1, 5_000, 6_000),
+        vad_ends=2,
+    )
+    report = harness.Report()
+    harness.check_utterances(collected, report)
+    assert report.failed == []
+
+
+def test_no_utterances_at_all_fails():
+    report = harness.Report()
+    harness.check_utterances(harness.Collected(stream_start=0.0), report)
+    assert [c.name for c in report.failed] == [
+        "The server committed at least one sentence"
+    ]
+
+
+def test_a_gap_in_the_indexes_is_caught():
+    collected = with_utterances(utterance(0, 0, 100), utterance(2, 200, 300))
+    report = harness.Report()
+    harness.check_utterances(collected, report)
+    assert "Utterance indexes are consecutive from zero" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_sentence_longer_than_the_limit_is_caught():
+    collected = with_utterances(utterance(0, 0, 9_000))
+    report = harness.Report()
+    harness.check_utterances(collected, report)
+    assert "No sentence outstays the max duration" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_overlapping_sentences_are_caught():
+    collected = with_utterances(utterance(0, 0, 2_000), utterance(1, 1_000, 3_000))
+    report = harness.Report()
+    harness.check_utterances(collected, report)
+    assert "Sentences never overlap" in [c.name for c in report.failed]
+
+
+def test_a_continuation_with_a_gap_is_caught():
+    collected = with_utterances(
+        utterance(0, 0, 2_000),
+        utterance(1, 4_000, 5_000, "max_duration", continues=True),
+    )
+    report = harness.Report()
+    harness.check_utterances(collected, report)
+    assert "A continued sentence joins the previous one with no gap" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_closed_segment_with_no_sentence_is_caught():
+    collected = with_utterances(utterance(0, 0, 1_000), vad_ends=3)
+    report = harness.Report()
+    harness.check_utterances(collected, report)
+    assert "Every closed speech segment produced at least one sentence" in [
+        c.name for c in report.failed
+    ]

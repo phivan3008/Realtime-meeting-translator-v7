@@ -138,6 +138,34 @@ class SegmentEvent:
     at_ms: float
 
 
+@dataclass(frozen=True)
+class AudioSpan:
+    """A contiguous slice of forwarded audio, tagged with its segment role.
+
+    The buffer manager downstream needs to know which bytes belong to which
+    speech segment.  It could reconstruct that from the event timestamps, but
+    the segmenter already knows it exactly, so it says so instead of leaving
+    the next stage to reverse-engineer it.
+
+    A segment usually spans several chunks, so it produces several spans:
+    the first has ``opens_segment``, the last has ``closes_segment``, and a
+    single-chunk segment has both.
+    """
+
+    pcm: bytes
+    start_ms: float              # stream position of the first sample
+    opens_segment: bool = False
+    closes_segment: bool = False
+
+    @property
+    def duration_ms(self) -> float:
+        return len(self.pcm) / 2 / SAMPLE_RATE * 1000.0
+
+    @property
+    def end_ms(self) -> float:
+        return self.start_ms + self.duration_ms
+
+
 @dataclass
 class FrameDecision:
     """What the state machine concluded about one 32 ms frame."""
@@ -317,15 +345,20 @@ class VADStats:
 class SegmenterOutput:
     """Result of pushing one client chunk through the segmenter."""
 
-    pcm: bytes = b""                                   # speech audio, may be b""
+    spans: list[AudioSpan] = field(default_factory=list)
     events: list[SegmentEvent] = field(default_factory=list)
     probabilities: list[float] = field(default_factory=list)
     is_speech: bool = False
     position_ms: float = 0.0                           # stream time after this chunk
 
     @property
+    def pcm(self) -> bytes:
+        """All the speech audio in this chunk, ignoring segment boundaries."""
+        return b"".join(span.pcm for span in self.spans)
+
+    @property
     def has_audio(self) -> bool:
-        return bool(self.pcm)
+        return any(span.pcm for span in self.spans)
 
     @property
     def max_probability(self) -> float:
@@ -379,6 +412,31 @@ class VADSegmenter:
         out = SegmenterOutput()
         self.stats.bytes_in += len(pcm)
         keep = bytearray()
+        keep_start_ms: Optional[float] = None
+        opens = False
+
+        def flush(closes: bool, at_ms: Optional[float] = None) -> None:
+            """Emit the audio gathered so far as one span.
+
+            ``at_ms`` matters when a segment ends on a chunk that contributed
+            no audio of its own - the hangover ran out on its first frame. The
+            span is then empty, but it still has to carry ``closes_segment``,
+            or the buffer manager never learns the sentence finished.
+            """
+            nonlocal keep, keep_start_ms, opens
+            start = keep_start_ms if keep_start_ms is not None else at_ms
+            if start is not None and (keep or closes or opens):
+                out.spans.append(
+                    AudioSpan(
+                        pcm=bytes(keep),
+                        start_ms=start,
+                        opens_segment=opens,
+                        closes_segment=closes,
+                    )
+                )
+            keep = bytearray()
+            keep_start_ms = None
+            opens = False
 
         for frame in self.splitter.push(pcm):
             frame_start_ms = self._frames_consumed * self.frame_ms
@@ -391,17 +449,19 @@ class VADSegmenter:
                 self.stats.segments += 1
                 # The forwarded audio begins at the oldest pre-roll frame, not
                 # at the frame that convinced the model.
+                segment_start = frame_start_ms - len(self._preroll) * self.frame_ms
                 out.events.append(
-                    SegmentEvent(
-                        kind=VADEvent.SPEECH_START,
-                        at_ms=frame_start_ms - len(self._preroll) * self.frame_ms,
-                    )
+                    SegmentEvent(kind=VADEvent.SPEECH_START, at_ms=segment_start)
                 )
+                keep_start_ms = segment_start
+                opens = True
                 keep.extend(b"".join(self._preroll))
                 self._preroll.clear()
 
             if decision.is_speech:
                 self.stats.frames_speech += 1
+                if keep_start_ms is None:        # segment carried over a chunk
+                    keep_start_ms = frame_start_ms
                 keep.extend(frame.pcm)
             else:
                 # Frames after a SPEECH_END belong to the hangover: they were
@@ -414,11 +474,12 @@ class VADSegmenter:
                 out.events.append(
                     SegmentEvent(kind=VADEvent.SPEECH_END, at_ms=frame_start_ms)
                 )
+                flush(closes=True, at_ms=frame_start_ms)
 
-        out.pcm = bytes(keep)
+        flush(closes=False)
         out.is_speech = self.state.is_speech
         out.position_ms = self.position_ms
-        self.stats.bytes_out += len(out.pcm)
+        self.stats.bytes_out += sum(len(span.pcm) for span in out.spans)
         return out
 
     def close(self) -> SegmenterOutput:

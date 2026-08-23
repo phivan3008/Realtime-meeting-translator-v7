@@ -25,10 +25,12 @@ from common.protocol import (
     ProtocolError,
     make_error,
     make_ready,
+    make_utterance,
     make_vad,
     parse_message,
     validate_audio_chunk,
 )
+from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.vad import VADSegmenter
 
 log = logging.getLogger(__name__)
@@ -55,6 +57,8 @@ class ServerSessionStats:
     bytes_received: int = 0
     speech_segments: int = 0
     events_sent: int = 0
+    utterances: int = 0
+    partials: int = 0
     protocol_errors: int = 0
 
     @property
@@ -68,13 +72,16 @@ class ServerSession:
     def __init__(
         self,
         segmenter_factory: Callable[[], VADSegmenter],
+        buffer_factory: Callable[[], BufferManager] = BufferManager,
         strict_chunk_size: bool = True,
     ) -> None:
         self._segmenter_factory = segmenter_factory
+        self._buffer_factory = buffer_factory
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
         self.segmenter: Optional[VADSegmenter] = None
+        self.buffer: Optional[BufferManager] = None
         self.stats = ServerSessionStats()
 
     @property
@@ -124,6 +131,7 @@ class ServerSession:
         self.hello = hello
         self.segmenter = self._segmenter_factory()
         self.segmenter.reset()
+        self.buffer = self._buffer_factory()
         self.state = SessionState.STREAMING
         log.info("Session %s ready (client=%r)", hello.session_id, hello.client)
         return Response(messages=[make_ready(hello.session_id)])
@@ -143,13 +151,35 @@ class ServerSession:
         self.stats.bytes_received += len(data)
 
         assert self.segmenter is not None       # guaranteed by STREAMING
+        assert self.buffer is not None
         out = self.segmenter.push(data)
         messages = [
             make_vad(event.kind.value, event.at_ms) for event in out.events
         ]
         self.stats.events_sent += len(messages)
         self.stats.speech_segments = self.segmenter.stats.segments
+        messages += self._announce(self.buffer.push(out))
         return Response(messages=messages)
+
+    def _announce(self, result: BufferOutput) -> list[str]:
+        """Turn buffer decisions into wire messages and count them."""
+        messages = [
+            make_utterance(
+                index=utterance.index,
+                start_ms=utterance.start_ms,
+                end_ms=utterance.end_ms,
+                reason=utterance.reason.value,
+                continues_previous=utterance.continues_previous,
+            )
+            for utterance in result.finals
+        ]
+        self.stats.utterances += len(result.finals)
+        self.stats.events_sent += len(messages)
+        if result.partial is not None:
+            # Nothing goes on the wire for a partial yet: it becomes a
+            # `partial` transcript once the ASR stage exists.
+            self.stats.partials += 1
+        return messages
 
     # -- teardown -----------------------------------------------------------
     def finish(self) -> Response:
@@ -163,12 +193,16 @@ class ServerSession:
         return Response(messages=messages)
 
     def _close_segment(self) -> list[str]:
-        """End an in-progress speech segment, if there is one."""
+        """End an in-progress speech segment and commit what it held."""
         if self.state is not SessionState.STREAMING or self.segmenter is None:
             return []
         out = self.segmenter.close()
         messages = [make_vad(event.kind.value, event.at_ms) for event in out.events]
         self.stats.events_sent += len(messages)
+        if self.buffer is not None:
+            messages += self._announce(
+                self.buffer.flush(FinalizeReason.END_OF_STREAM)
+            )
         return messages
 
     # -- helpers ------------------------------------------------------------

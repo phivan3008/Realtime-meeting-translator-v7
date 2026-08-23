@@ -58,6 +58,12 @@ def kinds(response) -> list[str]:
     return [json.loads(m)["type"] for m in response.messages]
 
 
+def of_type(response, wanted: str) -> list[dict]:
+    """One response can now carry both vad and utterance messages."""
+    return [p for p in (json.loads(m) for m in response.messages)
+            if p["type"] == wanted]
+
+
 # ---------------------------------------------------------------------------
 # Handshake
 # ---------------------------------------------------------------------------
@@ -191,7 +197,6 @@ def test_the_session_counts_segments():
     for _ in range(4):
         session.handle_binary(chunk())
     assert session.stats.speech_segments == 2
-    assert session.stats.events_sent == 3       # start, end, start
 
 
 def test_the_model_state_is_reset_for_each_new_session():
@@ -228,8 +233,9 @@ def test_bye_mid_sentence_still_ends_the_segment():
     session.handle_text(Hello(session_id="abc").to_json())
     session.handle_binary(chunk())
     response = session.handle_text(make_bye("client stopped"))
-    payloads = [json.loads(m) for m in response.messages]
-    assert [p["event"] for p in payloads] == [VADEvent.SPEECH_END.value]
+    assert [p["event"] for p in of_type(response, "vad")] == [
+        VADEvent.SPEECH_END.value
+    ]
     assert response.close is True
 
 
@@ -255,10 +261,10 @@ def test_starts_and_ends_balance_over_a_clean_session():
     session.handle_text(Hello(session_id="abc").to_json())
     events = []
     for _ in range(3):
-        events += [json.loads(m) for m in session.handle_binary(chunk()).messages]
-    events += [json.loads(m) for m in session.handle_text(make_bye("done")).messages]
-    kinds = [e["event"] for e in events]
-    assert kinds.count("speech_start") == kinds.count("speech_end") == 1
+        events += of_type(session.handle_binary(chunk()), "vad")
+    events += of_type(session.handle_text(make_bye("done")), "vad")
+    seen = [e["event"] for e in events]
+    assert seen.count("speech_start") == seen.count("speech_end") == 1
 
 
 def test_finish_closes_a_segment_left_open_by_a_dropped_connection():
@@ -267,8 +273,9 @@ def test_finish_closes_a_segment_left_open_by_a_dropped_connection():
     session.handle_text(Hello(session_id="abc").to_json())
     session.handle_binary(chunk())
     response = session.finish()
-    payloads = [json.loads(m) for m in response.messages]
-    assert [p["event"] for p in payloads] == [VADEvent.SPEECH_END.value]
+    assert [p["event"] for p in of_type(response, "vad")] == [
+        VADEvent.SPEECH_END.value
+    ]
     assert session.state is SessionState.CLOSED
 
 
@@ -277,6 +284,66 @@ def test_finish_on_a_silent_session_says_nothing():
     session.handle_text(Hello(session_id="abc").to_json())
     session.handle_binary(chunk())
     assert session.finish().messages == []
+
+
+# ---------------------------------------------------------------------------
+# Utterance boundaries from the buffer manager
+# ---------------------------------------------------------------------------
+def test_a_finished_sentence_is_announced_as_an_utterance():
+    # 4 chunks = 25 frames: loud 0-2 opens, quiet 3-18 closes on frame 18.
+    session = make_session([0.9] * 3 + [0.02] * 16 + [0.02])
+    session.handle_text(Hello(session_id="abc").to_json())
+    seen = []
+    for _ in range(4):
+        seen += of_type(session.handle_binary(chunk()), "utterance")
+    assert len(seen) == 1
+    assert seen[0]["index"] == 0
+    assert seen[0]["reason"] == "pause"
+    assert seen[0]["continues_previous"] is False
+    assert seen[0]["duration_ms"] > 0
+    assert session.stats.utterances == 1
+
+
+def test_the_utterance_span_matches_the_vad_segment():
+    session = make_session([0.9] * 3 + [0.02] * 16 + [0.02])
+    session.handle_text(Hello(session_id="abc").to_json())
+    vad, utterances = [], []
+    for _ in range(4):
+        response = session.handle_binary(chunk())
+        vad += of_type(response, "vad")
+        utterances += of_type(response, "utterance")
+    starts = [e["at_ms"] for e in vad if e["event"] == "speech_start"]
+    ends = [e["at_ms"] for e in vad if e["event"] == "speech_end"]
+    assert utterances[0]["start_ms"] == pytest.approx(starts[0])
+    assert utterances[0]["end_ms"] == pytest.approx(ends[0], abs=1.0)
+
+
+def test_a_long_monologue_is_cut_by_the_buffer_not_by_the_vad():
+    """35 chunks of unbroken speech is 7 s, the max duration."""
+    session = make_session([0.9])
+    session.handle_text(Hello(session_id="abc").to_json())
+    seen = []
+    for _ in range(40):
+        seen += of_type(session.handle_binary(chunk()), "utterance")
+    assert seen, "expected a max_duration cut"
+    assert seen[0]["reason"] == "max_duration"
+    assert seen[0]["duration_ms"] <= 7_000
+
+
+def test_an_open_utterance_is_committed_when_the_session_ends():
+    session = make_session([0.9])
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    seen = of_type(session.finish(), "utterance")
+    assert [u["reason"] for u in seen] == ["end_of_stream"]
+
+
+def test_partials_are_counted_while_a_sentence_is_open():
+    session = make_session([0.9])
+    session.handle_text(Hello(session_id="abc").to_json())
+    for _ in range(10):
+        session.handle_binary(chunk())
+    assert session.stats.partials >= 1
 
 
 def test_finish_on_a_session_that_never_said_hello_is_harmless():

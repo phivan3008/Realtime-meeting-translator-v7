@@ -17,7 +17,7 @@ Chịu trách nhiệm thu thập âm thanh, truyền lên Server và giao tiếp
 ## 3. Server Architecture (GPU Pod)
 Đường ống (Pipeline) xử lý khép kín tuần tự:
 1. **VAD (Voice Activity Detection):** `Silero VAD` (CPU, 512 sample/frame @ 16kHz). Cắt stream thành các segment speech có timestamp, drop khoảng lặng trước khi vào các tầng nặng. Giữ pre-roll 256ms để không cụt âm đầu từ.
-2. **Stream Buffer Manager:** `asyncio` buffer. Gom chunk audio thành cửa sổ trượt (Sliding Window). Kích hoạt "Sự kiện chốt" (Finalize Event) khi: Pause > 400ms, Overlap (đổi người nói), hoặc Max duration (>7s).
+2. **Stream Buffer Manager:** Gom audio speech từ VAD thành các câu (utterance). Kích hoạt "Sự kiện chốt" (Finalize Event) khi: Pause > 400ms, Overlap (đổi người nói — hook đã có, chờ tầng diarization), hoặc Max duration (>7s). Cắt vì quá dài thì lùi về khung 32ms yên tĩnh nhất trong 500ms gần nhất để không cắt giữa từ. Trong lúc câu chưa chốt, cứ 600ms lại xuất một cửa sổ partial cho ASR dự đoán.
 3. **Deep Noise Filter:** `YAMNet` (hoặc AST thu gọn). Phân loại âm thanh, drop các chunk là tiếng gõ phím, tiếng ho (không phải Speech).
 4. **Overlap Resolver (DSP):** `pedalboard` (Noise Gate & Compressor). Đè bẹp giọng nhỏ, ưu tiên giọng có năng lượng RMS cao hơn khi bị chồng lấn.
 5. **Speaker Diarization:** `pyannote.audio` (ECAPA-TDNN). Trích xuất Voiceprint, so khớp Cosine Similarity. Gắn nhãn Speaker (e.g., Speaker_01).
@@ -86,6 +86,14 @@ khiến mọi bản dịch sai.
 `at_ms` tính từ mẫu đầu tiên server nhận được. `speech_start` trỏ vào mẫu đầu tiên
 được chuyển tiếp (đã tính cả pre-roll), `speech_end` trỏ ngay sau mẫu cuối — nên
 một cặp start/end cắt đúng khớp đoạn audio đưa xuống tầng dưới.
+
+**Utterance (Client <- Server):**
+```json
+{"type": "utterance", "index": 0, "start_ms": 0.0, "end_ms": 6400.0, "duration_ms": 6400.0, "reason": "pause", "continues_previous": false}
+```
+Ranh giới câu do Stream Buffer Manager chốt, gửi **trước khi** có transcript, để UI mở sẵn một dòng cho câu đó. `reason` là một trong: `pause` (VAD đóng segment), `max_duration` (nói liên tục quá 7s), `speaker_change` (dành cho tầng diarization, chưa nối), `end_of_stream` (phiên kết thúc khi đang nói).
+
+`continues_previous: true` nghĩa là câu này là phần tiếp của câu trước bị cắt vì quá dài — tầng dịch cần biết để không coi nó là một câu độc lập.
 
 **Error (Client <- Server):**
 ```json

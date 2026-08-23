@@ -28,6 +28,7 @@ from server.pipeline.vad import (
     VAD_FRAME_BYTES,
     VAD_FRAME_MS,
     VAD_FRAME_SAMPLES,
+    AudioSpan,
     Frame,
     FrameSplitter,
     SegmenterOutput,
@@ -418,3 +419,83 @@ def test_empty_segmenter_output_defaults_are_safe():
     assert not out.has_audio
     assert out.max_probability == 0.0
     assert out.event_kinds == []
+
+
+# ---------------------------------------------------------------------------
+# Audio spans - what the buffer manager consumes
+# ---------------------------------------------------------------------------
+def test_a_segment_that_fits_in_one_chunk_produces_one_span():
+    segmenter = make_segmenter([0.9] * 3 + [0.02] * 16 + [0.02], speech_pad_ms=0)
+    out = segmenter.push(pcm_frames(20))
+    assert len(out.spans) == 1
+    assert out.spans[0].opens_segment and out.spans[0].closes_segment
+
+
+def test_spans_concatenate_back_to_the_flat_pcm():
+    segmenter = make_segmenter([0.9])
+    out = segmenter.push(pcm_frames(10))
+    assert b"".join(span.pcm for span in out.spans) == out.pcm
+
+
+def test_a_span_reports_its_own_position_and_length():
+    segmenter = make_segmenter([0.9], speech_pad_ms=0)
+    out = segmenter.push(pcm_frames(5))
+    span = out.spans[0]
+    assert span.start_ms == 2 * VAD_FRAME_MS         # opens on the third frame
+    assert span.duration_ms == pytest.approx(3 * VAD_FRAME_MS)
+    assert span.end_ms == pytest.approx(5 * VAD_FRAME_MS)
+
+
+def test_a_segment_spanning_chunks_opens_once_and_closes_once():
+    segmenter = make_segmenter([0.9] * 40 + [0.02])
+    spans = []
+    for _ in range(10):
+        spans += segmenter.push(bytes(CHUNK_BYTES)).spans
+    assert sum(1 for s in spans if s.opens_segment) == 1
+    assert sum(1 for s in spans if s.closes_segment) == 1
+    assert spans[0].opens_segment and spans[-1].closes_segment
+
+
+def test_the_middle_spans_of_a_long_segment_carry_no_flags():
+    segmenter = make_segmenter([0.9] * 40 + [0.02])
+    spans = []
+    for _ in range(10):
+        spans += segmenter.push(bytes(CHUNK_BYTES)).spans
+    for span in spans[1:-1]:
+        assert not span.opens_segment and not span.closes_segment
+
+
+def test_spans_are_contiguous_in_time():
+    segmenter = make_segmenter([0.9] * 40 + [0.02])
+    spans = []
+    for _ in range(10):
+        spans += segmenter.push(bytes(CHUNK_BYTES)).spans
+    for earlier, later in zip(spans, spans[1:]):
+        assert later.start_ms == pytest.approx(earlier.end_ms)
+
+
+def test_a_close_on_an_audioless_chunk_still_carries_the_marker():
+    """Regression: the buffer manager never saw the sentence end.
+
+    When the hangover runs out on the first frame of a chunk, that chunk
+    forwards no audio at all. The span is empty, but it still has to say
+    closes_segment or the utterance stays open forever.
+    """
+    segmenter = make_segmenter([0.9] * 3 + [0.02] * 16 + [0.02])
+    spans = []
+    for _ in range(4):
+        spans += segmenter.push(bytes(CHUNK_BYTES)).spans
+    closing = [s for s in spans if s.closes_segment]
+    assert len(closing) == 1
+    assert closing[0].pcm == b""
+    assert closing[0].start_ms == 18 * VAD_FRAME_MS
+
+
+def test_silence_produces_no_spans_at_all():
+    assert make_segmenter([0.02]).push(pcm_frames(20)).spans == []
+
+
+def test_an_audio_span_is_immutable():
+    span = AudioSpan(pcm=bytes(2), start_ms=0.0)
+    with pytest.raises(AttributeError):
+        span.pcm = b""
