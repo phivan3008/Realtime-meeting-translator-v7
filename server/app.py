@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -33,6 +34,7 @@ from common.protocol import (
     make_error,
 )
 from server.net.session import Response, ServerSession
+from server.pipeline.noise import NoiseFilter, NoiseFilterError, YamnetClassifier
 from server.pipeline.vad import SileroVAD, VADSegmenter
 
 logging.basicConfig(
@@ -47,6 +49,8 @@ class AppState:
 
     def __init__(self) -> None:
         self.vad: Optional[SileroVAD] = None
+        self.noise_filter: Optional[NoiseFilter] = None
+        self.noise_error: str = ""
         self.active_session_id: Optional[str] = None
 
     def load_models(self) -> None:
@@ -54,6 +58,21 @@ class AppState:
             log.info("Loading Silero VAD ...")
             self.vad = SileroVAD()
             log.info("Silero VAD ready")
+        if self.noise_filter is None and not self.noise_error:
+            if os.environ.get("DISABLE_NOISE_FILTER"):
+                self.noise_error = "disabled by DISABLE_NOISE_FILTER"
+                log.warning("Deep Noise Filter disabled by environment")
+                return
+            try:
+                log.info("Loading YAMNet ...")
+                self.noise_filter = NoiseFilter(classifier=YamnetClassifier())
+                log.info("YAMNet ready")
+            except NoiseFilterError as exc:
+                # Serving without the filter is worse than serving with it,
+                # but far better than refusing the meeting. /health says which
+                # mode this process is in so nobody has to guess.
+                self.noise_error = str(exc)
+                log.error("Deep Noise Filter unavailable: %s", exc)
 
     def make_segmenter(self) -> VADSegmenter:
         if self.vad is None:                    # pragma: no cover - startup order
@@ -88,6 +107,8 @@ def health() -> dict:
         "chunk_bytes": CHUNK_BYTES,
         "chunk_ms": CHUNK_DURATION_MS,
         "vad_loaded": state.vad is not None,
+        "noise_filter_loaded": state.noise_filter is not None,
+        "noise_filter_error": state.noise_error,
         "session_active": state.active_session_id is not None,
     }
 
@@ -112,7 +133,8 @@ async def stream(socket: WebSocket) -> None:
         await socket.close(code=1013)           # try again later
         return
 
-    session = ServerSession(segmenter_factory=state.make_segmenter)
+    session = ServerSession(segmenter_factory=state.make_segmenter,
+                            noise_filter=state.noise_filter)
     claimed = False
     try:
         while True:
@@ -149,11 +171,15 @@ async def stream(socket: WebSocket) -> None:
             state.active_session_id = None
         log.info(
             "Session %s finished: %d chunks, %.1f s audio, %d segments, "
+            "%d utterances (%d dropped as noise), %d partials, "
             "%d events, %d protocol errors",
             session.session_id or "?",
             session.stats.chunks,
             session.stats.audio_seconds,
             session.stats.speech_segments,
+            session.stats.utterances,
+            session.stats.utterances_dropped,
+            session.stats.partials,
             session.stats.events_sent,
             session.stats.protocol_errors,
         )

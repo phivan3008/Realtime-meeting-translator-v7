@@ -51,6 +51,8 @@ GOOD_HEALTH = {
     "chunk_bytes": CHUNK_BYTES,
     "chunk_ms": CHUNK_DURATION_MS,
     "vad_loaded": True,
+    "noise_filter_loaded": True,
+    "noise_filter_error": "",
     "session_active": False,
 }
 
@@ -274,7 +276,9 @@ def test_a_reconnect_during_the_run_is_reported():
 # Utterance checks
 # ---------------------------------------------------------------------------
 def utterance(index: int, start_ms: float, end_ms: float,
-              reason: str = "pause", continues: bool = False) -> dict:
+              reason: str = "pause", continues: bool = False,
+              kept: bool = True, label: str = "",
+              speech_score: float = 0.8) -> dict:
     return {
         "type": "utterance",
         "index": index,
@@ -283,6 +287,9 @@ def utterance(index: int, start_ms: float, end_ms: float,
         "duration_ms": end_ms - start_ms,
         "reason": reason,
         "continues_previous": continues,
+        "kept": kept,
+        "label": label,
+        "speech_score": speech_score,
     }
 
 
@@ -358,5 +365,44 @@ def test_a_closed_segment_with_no_sentence_is_caught():
     report = harness.Report()
     harness.check_utterances(collected, report)
     assert "Every closed speech segment produced at least one sentence" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_server_without_the_noise_filter_is_flagged():
+    server, url = serve_health({
+        **GOOD_HEALTH,
+        "noise_filter_loaded": False,
+        "noise_filter_error": "Could not load YAMNet from 'https://...'",
+    })
+    try:
+        report = harness.Report()
+        harness.check_health(url, report)
+        assert [c.name for c in report.failed] == [
+            "Server has the noise filter loaded"
+        ]
+    finally:
+        server.shutdown()
+
+
+def test_a_dropped_sentence_without_a_label_is_caught():
+    collected = with_utterances(
+        utterance(0, 0, 1_000),
+        utterance(1, 2_000, 3_000, kept=False, label="", speech_score=0.01),
+    )
+    report = harness.Report()
+    harness.check_utterances(collected, report)
+    assert "Every dropped sentence says what it sounded like" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_filter_that_drops_everything_is_caught():
+    collected = with_utterances(
+        utterance(0, 0, 1_000, kept=False, label="Typing", speech_score=0.01),
+    )
+    report = harness.Report()
+    harness.check_utterances(collected, report)
+    assert "The noise filter did not eat the whole meeting" in [
         c.name for c in report.failed
     ]

@@ -26,6 +26,7 @@ from common.protocol import (
     make_ready,
 )
 from server.net.session import ServerSession, SessionState
+from server.pipeline.noise import Classification, NoiseFilter
 from server.pipeline.vad import VAD_FRAME_SAMPLES, VADEvent, VADSegmenter
 
 
@@ -358,3 +359,77 @@ def test_audio_seconds_reflects_what_arrived():
     for _ in range(5):
         session.handle_binary(chunk())
     assert session.stats.audio_seconds == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Deep Noise Filter verdicts on the wire
+# ---------------------------------------------------------------------------
+class StubClassifier:
+    def __init__(self, result: Classification):
+        self.result = result
+        self.calls: list[bytes] = []
+
+    def classify(self, pcm: bytes) -> Classification:
+        self.calls.append(pcm)
+        return self.result
+
+
+def filtered_session(result: Classification, probabilities=(0.9,)) -> ServerSession:
+    vad = ScriptedVAD(probabilities)
+    return ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        noise_filter=NoiseFilter(classifier=StubClassifier(result)),
+    )
+
+
+SPEECHY = Classification(speech_score=0.85, noise_score=0.05, top=(("Speech", 0.85),))
+KEYBOARD = Classification(speech_score=0.01, noise_score=0.8,
+                          noise_label="Computer keyboard",
+                          top=(("Computer keyboard", 0.8),))
+
+
+def test_a_speech_utterance_is_marked_kept():
+    session = filtered_session(SPEECHY)
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    payload = of_type(session.finish(), "utterance")[0]
+    assert payload["kept"] is True
+    assert payload["speech_score"] == pytest.approx(0.85)
+    assert payload["label"] == ""
+    assert session.stats.utterances_dropped == 0
+
+
+def test_keyboard_clatter_is_announced_but_marked_dropped():
+    """Still announced: indexes stay consecutive and the client can see why."""
+    session = filtered_session(KEYBOARD)
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    payload = of_type(session.finish(), "utterance")[0]
+    assert payload["kept"] is False
+    assert payload["label"] == "Computer keyboard"
+    assert payload["index"] == 0
+    assert session.stats.utterances == 1
+    assert session.stats.utterances_dropped == 1
+
+
+def test_the_filter_sees_the_committed_audio_not_the_raw_chunk():
+    stub = StubClassifier(SPEECHY)
+    vad = ScriptedVAD([0.9])
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        noise_filter=NoiseFilter(classifier=stub),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    session.finish()
+    assert len(stub.calls) == 1
+    assert 0 < len(stub.calls[0]) <= CHUNK_BYTES
+
+
+def test_a_session_without_the_filter_keeps_everything():
+    session = make_session([0.9])
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    payload = of_type(session.finish(), "utterance")[0]
+    assert payload["kept"] is True
+    assert session.stats.utterances_dropped == 0

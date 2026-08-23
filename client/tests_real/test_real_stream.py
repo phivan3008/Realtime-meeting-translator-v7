@@ -139,6 +139,12 @@ def check_health(base_url: str, report: Report) -> bool:
                f"status={payload.get('status')!r}")
     report.add("Server has the VAD model loaded", bool(payload.get("vad_loaded")),
                f"vad_loaded={payload.get('vad_loaded')}")
+    report.add(
+        "Server has the noise filter loaded",
+        bool(payload.get("noise_filter_loaded")),
+        payload.get("noise_filter_error")
+        or f"noise_filter_loaded={payload.get('noise_filter_loaded')}",
+    )
     contract_ok = (
         payload.get("protocol_version") == PROTOCOL_VERSION
         and payload.get("sample_rate") == SAMPLE_RATE
@@ -257,11 +263,13 @@ def check_utterances(collected: Collected, report: Report) -> None:
     print()
     print("  Utterances committed by the server:")
     for payload in utterances:
+        verdict = "keep" if payload.get("kept", True) else f"DROP {payload.get('label', '')}"
         print(f"    #{payload['index']:<3} "
               f"{payload['start_ms'] / 1000:7.2f}s -> "
               f"{payload['end_ms'] / 1000:7.2f}s "
               f"({payload['duration_ms'] / 1000:.2f}s)  "
-              f"{payload['reason']}"
+              f"{payload['reason']:<14} "
+              f"speech={payload.get('speech_score', 0):.2f}  {verdict}"
               + ("  [continues]" if payload["continues_previous"] else ""))
     if not utterances:
         print("    (none)")
@@ -301,6 +309,27 @@ def check_utterances(collected: Collected, report: Report) -> None:
         "Every closed speech segment produced at least one sentence",
         len(utterances) >= ends,
         f"{len(utterances)} utterance(s) for {ends} speech_end",
+    )
+
+    kept = [u for u in utterances if u.get("kept", True)]
+    dropped = [u for u in utterances if not u.get("kept", True)]
+    report.add(
+        "The noise filter did not eat the whole meeting",
+        len(kept) >= 1,
+        f"{len(kept)} kept, {len(dropped)} dropped as noise",
+    )
+    # Whether the scores are any good is the server-side noise test's job;
+    # here we only prove every sentence went past the filter and carries its
+    # verdict.
+    report.add(
+        "Every sentence carries the filter's verdict",
+        all("kept" in u and "speech_score" in u for u in utterances),
+        f"{len(utterances)} sentence(s)",
+    )
+    report.add(
+        "Every dropped sentence says what it sounded like",
+        all(u.get("label") for u in dropped),
+        f"{[u.get('label') for u in dropped][:3]}",
     )
 
 

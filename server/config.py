@@ -6,6 +6,8 @@ Machine-specific tuning lives here; the wire-level audio contract lives in
 
 from __future__ import annotations
 
+import os
+
 # --- Audio contract ----------------------------------------------------------
 # Defined once in common/protocol.py and re-exported here, because a mismatch
 # between the two sides corrupts audio silently rather than raising.
@@ -44,3 +46,18 @@ PARTIAL_INTERVAL_MS = 600
 # moment and cut there instead, so the split lands between words rather than
 # through one.
 SPLIT_SEARCH_MS = 500
+
+# --- 3. Deep Noise Filter (YAMNet, DESIGN.md section 3.3) --------------------
+# YAMNet is loaded from TF Hub unless this points at a local SavedModel
+# directory, which is how an offline pod gets it.
+YAMNET_MODEL_DIR = os.environ.get("YAMNET_MODEL_DIR", "")
+YAMNET_HUB_URL = "https://tfhub.dev/google/yamnet/1"
+
+# An utterance survives unless YAMNet is confident it holds no speech at all.
+# The filter is deliberately timid: dropping real speech loses a sentence for
+# good, while letting a cough through only costs one wasted ASR call.
+NOISE_MIN_SPEECH_SCORE = 0.2
+# ... and even then, only when something non-speech actually scored higher.
+NOISE_REQUIRE_LOUDER_NOISE = True
+# YAMNet needs 0.975 s to produce a single frame; shorter audio is padded.
+YAMNET_MIN_SAMPLES = 15_600

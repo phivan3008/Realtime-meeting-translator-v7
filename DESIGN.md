@@ -18,7 +18,7 @@ Chịu trách nhiệm thu thập âm thanh, truyền lên Server và giao tiếp
 Đường ống (Pipeline) xử lý khép kín tuần tự:
 1. **VAD (Voice Activity Detection):** `Silero VAD` (CPU, 512 sample/frame @ 16kHz). Cắt stream thành các segment speech có timestamp, drop khoảng lặng trước khi vào các tầng nặng. Giữ pre-roll 256ms để không cụt âm đầu từ.
 2. **Stream Buffer Manager:** Gom audio speech từ VAD thành các câu (utterance). Kích hoạt "Sự kiện chốt" (Finalize Event) khi: Pause > 400ms, Overlap (đổi người nói — hook đã có, chờ tầng diarization), hoặc Max duration (>7s). Cắt vì quá dài thì lùi về khung 32ms yên tĩnh nhất trong 500ms gần nhất để không cắt giữa từ. Trong lúc câu chưa chốt, cứ 600ms lại xuất một cửa sổ partial cho ASR dự đoán.
-3. **Deep Noise Filter:** `YAMNet` (hoặc AST thu gọn). Phân loại âm thanh, drop các chunk là tiếng gõ phím, tiếng ho (không phải Speech).
+3. **Deep Noise Filter:** `YAMNet` (chạy CPU, không chiếm VRAM của Whisper/vLLM). Phân loại từng utterance đã chốt, drop cái là tiếng gõ phím, tiếng ho (không phải Speech). Chính sách **rụt rè có chủ đích**: chỉ drop khi speech score < 0.2 VÀ có lớp non-speech ghi điểm cao hơn — bỏ nhầm một câu thật thì mất luôn, còn để lọt một tiếng ho chỉ tốn một lần gọi Whisper. Utterance bị drop vẫn được báo về client kèm nhãn (`kept: false`), không xoá âm thầm.
 4. **Overlap Resolver (DSP):** `pedalboard` (Noise Gate & Compressor). Đè bẹp giọng nhỏ, ưu tiên giọng có năng lượng RMS cao hơn khi bị chồng lấn.
 5. **Speaker Diarization:** `pyannote.audio` (ECAPA-TDNN). Trích xuất Voiceprint, so khớp Cosine Similarity. Gắn nhãn Speaker (e.g., Speaker_01).
 6. **Language ID (LID):** `SpeechBrain` (VoxLingua107). Trả về 'vi' hoặc 'ja' nhanh chóng.
@@ -89,9 +89,11 @@ một cặp start/end cắt đúng khớp đoạn audio đưa xuống tầng dư
 
 **Utterance (Client <- Server):**
 ```json
-{"type": "utterance", "index": 0, "start_ms": 0.0, "end_ms": 6400.0, "duration_ms": 6400.0, "reason": "pause", "continues_previous": false}
+{"type": "utterance", "index": 0, "start_ms": 0.0, "end_ms": 6400.0, "duration_ms": 6400.0, "reason": "pause", "continues_previous": false, "kept": true, "label": "", "speech_score": 0.87}
 ```
 Ranh giới câu do Stream Buffer Manager chốt, gửi **trước khi** có transcript, để UI mở sẵn một dòng cho câu đó. `reason` là một trong: `pause` (VAD đóng segment), `max_duration` (nói liên tục quá 7s), `speaker_change` (dành cho tầng diarization, chưa nối), `end_of_stream` (phiên kết thúc khi đang nói).
+
+`kept: false` là phán quyết của Deep Noise Filter — câu đó nghe như `label` (ví dụ `Computer keyboard`) chứ không phải tiếng nói, và sẽ không được đưa xuống ASR. Vẫn gửi về client để index liên tục và để thấy ngay nếu bộ lọc bắt đầu ăn nhầm tiếng nói thật.
 
 `continues_previous: true` nghĩa là câu này là phần tiếp của câu trước bị cắt vì quá dài — tầng dịch cần biết để không coi nó là một câu độc lập.
 

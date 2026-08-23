@@ -158,11 +158,17 @@ def make_vad(event: str, at_ms: float, **extra: Any) -> str:
 
 
 def make_utterance(index: int, start_ms: float, end_ms: float, reason: str,
-                   continues_previous: bool = False) -> str:
+                   continues_previous: bool = False, kept: bool = True,
+                   label: str = "", speech_score: float = 0.0) -> str:
     """A sentence boundary decided by the Stream Buffer Manager.
 
     Sent before any transcript exists, so the UI can open a row for the
     sentence and the client can see why it was cut.
+
+    ``kept`` is the Deep Noise Filter's verdict. A dropped sentence is still
+    announced, with ``label`` naming what it sounded like: the indexes stay
+    consecutive, and a filter that starts eating real speech is visible on
+    the client instead of silently losing sentences.
     """
     return json.dumps(
         {
@@ -173,6 +179,9 @@ def make_utterance(index: int, start_ms: float, end_ms: float, reason: str,
             "duration_ms": round(float(end_ms) - float(start_ms), 1),
             "reason": reason,
             "continues_previous": bool(continues_previous),
+            "kept": bool(kept),
+            "label": label,
+            "speech_score": round(float(speech_score), 3),
         }
     )
 

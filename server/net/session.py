@@ -31,6 +31,7 @@ from common.protocol import (
     validate_audio_chunk,
 )
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
+from server.pipeline.noise import NoiseFilter
 from server.pipeline.vad import VADSegmenter
 
 log = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class ServerSessionStats:
     speech_segments: int = 0
     events_sent: int = 0
     utterances: int = 0
+    utterances_dropped: int = 0
     partials: int = 0
     protocol_errors: int = 0
 
@@ -73,10 +75,14 @@ class ServerSession:
         self,
         segmenter_factory: Callable[[], VADSegmenter],
         buffer_factory: Callable[[], BufferManager] = BufferManager,
+        noise_filter: Optional[NoiseFilter] = None,
         strict_chunk_size: bool = True,
     ) -> None:
         self._segmenter_factory = segmenter_factory
         self._buffer_factory = buffer_factory
+        # Optional: a pod without YAMNet still runs, it just transcribes the
+        # coughs too. /health reports which mode it is in.
+        self.noise_filter = noise_filter
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
@@ -162,17 +168,29 @@ class ServerSession:
         return Response(messages=messages)
 
     def _announce(self, result: BufferOutput) -> list[str]:
-        """Turn buffer decisions into wire messages and count them."""
-        messages = [
-            make_utterance(
-                index=utterance.index,
-                start_ms=utterance.start_ms,
-                end_ms=utterance.end_ms,
-                reason=utterance.reason.value,
-                continues_previous=utterance.continues_previous,
+        """Classify each finished sentence, then put it on the wire."""
+        messages = []
+        for utterance in result.finals:
+            keep, label, score = True, "", 0.0
+            if self.noise_filter is not None:
+                verdict = self.noise_filter.judge(utterance.pcm)
+                keep = verdict.keep
+                label = verdict.classification.noise_label if not keep else ""
+                score = verdict.classification.speech_score
+                if not keep:
+                    self.stats.utterances_dropped += 1
+            messages.append(
+                make_utterance(
+                    index=utterance.index,
+                    start_ms=utterance.start_ms,
+                    end_ms=utterance.end_ms,
+                    reason=utterance.reason.value,
+                    continues_previous=utterance.continues_previous,
+                    kept=keep,
+                    label=label,
+                    speech_score=score,
+                )
             )
-            for utterance in result.finals
-        ]
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
         if result.partial is not None:
