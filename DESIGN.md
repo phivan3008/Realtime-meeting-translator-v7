@@ -37,6 +37,61 @@ Thiết kế ban đầu đặt VAD ở Client để tiết kiệm băng thông. 
 Giá phải trả: client stream liên tục 16kHz mono 16-bit = 32 KB/s = 256 kbps, kể cả khi không ai nói.
 
 ## 4. WebSocket JSON Protocol
+
+Một kết nối WebSocket cho mỗi phiên họp. Endpoint: `ws://<host>:<port>/ws/stream`.
+Định nghĩa duy nhất nằm ở `common/protocol.py` — cả client và server đều import từ đó,
+để định dạng audio không bao giờ lệch nhau giữa hai bên.
+
+- **Text frame:** JSON điều khiển, cả hai chiều.
+- **Binary frame:** PCM thô, chỉ client -> server. Không header, không framing:
+  mỗi binary frame đúng 6400 bytes (200ms, 16kHz mono 16-bit LE). Chunk N+1 nối
+  tiếp đúng chỗ chunk N dừng.
+
+**Bắt tay:**
+1. Client gửi `hello` (JSON) trước mọi audio.
+2. Server kiểm tra định dạng audio, trả `ready`, hoặc trả `error` rồi đóng kết nối.
+3. Client stream binary chunk cho đến khi gửi `bye` hoặc rớt mạng.
+4. Server đẩy `vad` / `partial` / `final` bất kỳ lúc nào sau `ready`.
+
+Server chỉ phục vụ **một phiên tại một thời điểm**: Silero là mô hình hồi quy,
+trạng thái ẩn thuộc về đúng một luồng audio. Kết nối thứ hai bị từ chối (code 1013)
+chứ không phục vụ kém cho cả hai.
+
+**Hello (Client -> Server):**
+```json
+{
+  "type": "hello",
+  "session_id": "a1b2c3d4e5f6",
+  "protocol_version": 1,
+  "sample_rate": 16000,
+  "channels": 1,
+  "sample_width": 2,
+  "chunk_ms": 200,
+  "client": "windows-client"
+}
+```
+Nếu bất kỳ trường audio nào lệch với server, server trả `error` và đóng. Đây là
+chốt chặn quan trọng: audio sai định dạng không làm crash gì cả, nó chỉ âm thầm
+khiến mọi bản dịch sai.
+
+**Ready (Client <- Server):**
+```json
+{"type": "ready", "session_id": "a1b2c3d4e5f6", "protocol_version": 1, "sample_rate": 16000, "chunk_bytes": 6400}
+```
+
+**VAD event (Client <- Server):**
+```json
+{"type": "vad", "event": "speech_start", "at_ms": 1234.6}
+```
+`at_ms` tính từ mẫu đầu tiên server nhận được. `speech_start` trỏ vào mẫu đầu tiên
+được chuyển tiếp (đã tính cả pre-roll), `speech_end` trỏ ngay sau mẫu cuối — nên
+một cặp start/end cắt đúng khớp đoạn audio đưa xuống tầng dưới.
+
+**Error (Client <- Server):**
+```json
+{"type": "error", "message": "unsupported audio format: sample_rate=48000 (server wants 16000)", "fatal": true}
+```
+
 **Partial Message (Client <- Server):**
 ```json
 {

@@ -6,18 +6,17 @@ tests share exactly the same audio contract as the production client.
 
 from __future__ import annotations
 
-# --- Audio contract sent to the server (DESIGN.md section 2) -----------------
-TARGET_SAMPLE_RATE = 16_000     # Hz
-TARGET_CHANNELS = 1             # mono
-TARGET_SAMPLE_WIDTH = 2         # bytes, 16-bit signed little endian PCM
-
-# --- Streaming chunk size ----------------------------------------------------
-# DESIGN.md asks for ~200-500 ms packets. 200 ms keeps the perceived latency low
-# while still being large enough for Silero VAD (which works on 512 sample
-# frames at 16 kHz, i.e. 32 ms).
-CHUNK_DURATION_MS = 200
-CHUNK_SAMPLES = TARGET_SAMPLE_RATE * CHUNK_DURATION_MS // 1000     # 3200
-CHUNK_BYTES = CHUNK_SAMPLES * TARGET_SAMPLE_WIDTH                  # 6400
+# --- Audio contract ----------------------------------------------------------
+# Defined once in common/protocol.py and re-exported here, because a mismatch
+# between the two sides corrupts audio silently rather than raising.
+from common.protocol import (            # noqa: F401  (re-exported)
+    CHUNK_BYTES,
+    CHUNK_DURATION_MS,
+    CHUNK_SAMPLES,
+    CHANNELS as TARGET_CHANNELS,
+    SAMPLE_RATE as TARGET_SAMPLE_RATE,
+    SAMPLE_WIDTH as TARGET_SAMPLE_WIDTH,
+)
 
 # --- Capture device ----------------------------------------------------------
 # Number of frames pyaudiowpatch reads per callback at the *device* rate.

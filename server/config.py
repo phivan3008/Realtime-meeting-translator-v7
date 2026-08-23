@@ -1,20 +1,22 @@
 """Central configuration for the server pipeline.
 
-The audio contract has to match ``client/config.py`` byte for byte: the client
-produces exactly this format and the server assumes it without re-checking on
-every chunk.
+Machine-specific tuning lives here; the wire-level audio contract lives in
+``common/protocol.py`` and is re-exported below so both sides cannot drift.
 """
 
 from __future__ import annotations
 
-# --- Audio contract received from the client (DESIGN.md section 2) -----------
-SAMPLE_RATE = 16_000            # Hz
-CHANNELS = 1                    # mono
-SAMPLE_WIDTH = 2                # bytes, 16-bit signed little endian PCM
-
-CHUNK_DURATION_MS = 200
-CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_DURATION_MS // 1000     # 3200
-CHUNK_BYTES = CHUNK_SAMPLES * SAMPLE_WIDTH                  # 6400
+# --- Audio contract ----------------------------------------------------------
+# Defined once in common/protocol.py and re-exported here, because a mismatch
+# between the two sides corrupts audio silently rather than raising.
+from common.protocol import (            # noqa: F401  (re-exported)
+    CHANNELS,
+    CHUNK_BYTES,
+    CHUNK_DURATION_MS,
+    CHUNK_SAMPLES,
+    SAMPLE_RATE,
+    SAMPLE_WIDTH,
+)
 
 # --- Voice Activity Detection (Silero, step 0 of the pipeline) ---------------
 # Silero v5 only accepts 512 sample frames at 16 kHz, i.e. 32 ms per decision.

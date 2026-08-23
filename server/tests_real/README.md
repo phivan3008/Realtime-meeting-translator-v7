@@ -3,10 +3,11 @@
 These run on the GPU pod (VSCode SSH into the Kubernetes pod). Do not run them
 on the Dev PC agent loop.
 
-The pod has no sound card, so every audio test is driven by WAV files recorded
-on the Windows Client PC with `client/tests_real/test_real_audio_capture.py`.
-Those files are already 16 kHz mono 16-bit - the exact format the client
-streams - so no conversion is needed.
+The pod has no sound card, so every offline audio test is driven by WAV files
+recorded on the Windows Client PC with
+`client/tests_real/test_real_audio_capture.py`. Those files are already
+16 kHz mono 16-bit - the exact format the client streams - so no conversion is
+needed.
 
 ## One-time setup on the pod
 
@@ -18,7 +19,7 @@ python3.11 -m pip install -r server/requirements.txt
 python --version          # must print 3.11.x
 ```
 
-## Available tests
+## Offline: VAD on recorded audio
 
 | Script | What it proves |
 | --- | --- |
@@ -32,6 +33,24 @@ python3.11 server/tests_real/test_real_vad.py \
 
 Add `--onnx` to run the ONNX model instead of the torch jit one.
 
-Exit code `0` means every check passed. The gated audio is written to
-`server/tests_real/output/` - copy it back to a machine with speakers and
-listen: every word must still be there, with the long pauses cut out.
+## Online: serve the client
+
+Start the WebSocket server, then run `client/tests_real/test_real_stream.py`
+on the Windows Client PC against it.
+
+```bash
+python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+Check it locally first:
+
+```bash
+curl -s http://127.0.0.1:8000/health
+```
+
+Expect `{"status": "ok", ..., "vad_loaded": true, "session_active": false}`.
+The server handles **one meeting at a time**; a second connection is refused
+with WebSocket code 1013.
+
+Exit code `0` means every check passed. Output files land in
+`server/tests_real/output/`.
