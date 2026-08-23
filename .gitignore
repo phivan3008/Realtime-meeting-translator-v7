@@ -12,6 +12,7 @@ venv/
 client/tests_real/output/
 server/tests_real/output/
 *.wav
+recordings/
 
 # Local config / secrets
 .env

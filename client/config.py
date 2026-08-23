@@ -28,14 +28,7 @@ CAPTURE_FRAMES_PER_BUFFER = 1024
 # 250 chunks * 200 ms = 50 seconds of backlog.
 MAX_QUEUED_CHUNKS = 250
 
-# --- Voice Activity Detection (Silero, CPU) ----------------------------------
-# Silero v5 only accepts 512 sample frames at 16 kHz, i.e. 32 ms per decision.
-VAD_THRESHOLD = 0.5
-# A segment opens only after this much speech-like audio, which filters out the
-# short bursts Silero produces on keyboard clicks and door slams.
-VAD_MIN_SPEECH_MS = 96
-# Hangover before a segment closes. Kept above the 400 ms pause that the server
-# uses to finalise a sentence, so the server still sees the whole pause.
-VAD_MIN_SILENCE_MS = 500
-# Audio kept in front of a segment so word onsets are not clipped.
-VAD_SPEECH_PAD_MS = 256
+# NOTE: Voice Activity Detection lives on the GPU server (server/pipeline/vad.py),
+# not here. Silero drags torch + torchaudio onto the Windows client and they
+# refused to load there; the server also needs the pause boundaries anyway for
+# its Stream Buffer Manager. The client streams every chunk, unfiltered.

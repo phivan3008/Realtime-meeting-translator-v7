@@ -18,6 +18,10 @@ soundfile==0.12.1
 torch==2.4.1
 torchaudio==2.4.1
 
+# --- 1. Voice Activity Detection (moved here from the client) ---
+silero-vad==5.1.2
+onnxruntime==1.19.2        # Optional ONNX backend for Silero VAD
+
 # --- 2. Deep Noise Filter: YAMNet ---
 tensorflow==2.17.0
 tensorflow-hub==0.16.1

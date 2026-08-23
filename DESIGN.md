@@ -9,23 +9,32 @@ Hệ thống phiên dịch thời gian thực hai chiều Việt Nam (VI) - Nh�
   - **GPU Server (Pod H100 80GB):** Chạy Server App, kết nối trực tiếp từ Dev PC/Client PC qua VSCode -> Kubernetes -> Attach VSCode SSH Server.
 
 ## 2. Client Architecture (Windows App)
-Chịu trách nhiệm thu thập âm thanh, lọc rác cơ bản và giao tiếp UI.
+Chịu trách nhiệm thu thập âm thanh, truyền lên Server và giao tiếp UI. Không xử lý ML.
 - **Audio Capture:** `pyaudiowpatch` qua WASAPI Loopback (16kHz, 16-bit PCM, Mono). Bắt toàn bộ âm thanh cuộc họp (Zoom, Teams...).
-- **VAD (Voice Activity Detection):** `Silero VAD` (CPU). Drop các khoảng lặng tĩnh để tiết kiệm băng thông mạng.
-- **Streaming:** Đóng gói audio thành các chunk ~200-500ms, gửi liên tục lên Server qua WebSocket.
+- **Streaming:** Đóng gói audio thành các chunk 200ms (6400 bytes), gửi liên tục lên Server qua WebSocket. Client KHÔNG lọc gì cả, gửi toàn bộ audio kể cả khoảng lặng (~256 kbps).
 - **UI Render:** Lắng nghe JSON từ Server, hiển thị 2 trạng thái: Partial (chữ mờ - đang dự đoán) và Final (chữ đậm - chốt câu + bản dịch).
 
 ## 3. Server Architecture (GPU Pod)
 Đường ống (Pipeline) xử lý khép kín tuần tự:
-1. **Stream Buffer Manager:** `asyncio` buffer. Gom chunk audio thành cửa sổ trượt (Sliding Window). Kích hoạt "Sự kiện chốt" (Finalize Event) khi: Pause > 400ms, Overlap (đổi người nói), hoặc Max duration (>7s).
-2. **Deep Noise Filter:** `YAMNet` (hoặc AST thu gọn). Phân loại âm thanh, drop các chunk là tiếng gõ phím, tiếng ho (không phải Speech).
-3. **Overlap Resolver (DSP):** `pedalboard` (Noise Gate & Compressor). Đè bẹp giọng nhỏ, ưu tiên giọng có năng lượng RMS cao hơn khi bị chồng lấn.
-4. **Speaker Diarization:** `pyannote.audio` (ECAPA-TDNN). Trích xuất Voiceprint, so khớp Cosine Similarity. Gắn nhãn Speaker (e.g., Speaker_01).
-5. **Language ID (LID):** `SpeechBrain` (VoxLingua107). Trả về 'vi' hoặc 'ja' nhanh chóng.
-6. **ASR Engine:** `faster-whisper` (large-v3). 
+1. **VAD (Voice Activity Detection):** `Silero VAD` (CPU, 512 sample/frame @ 16kHz). Cắt stream thành các segment speech có timestamp, drop khoảng lặng trước khi vào các tầng nặng. Giữ pre-roll 256ms để không cụt âm đầu từ.
+2. **Stream Buffer Manager:** `asyncio` buffer. Gom chunk audio thành cửa sổ trượt (Sliding Window). Kích hoạt "Sự kiện chốt" (Finalize Event) khi: Pause > 400ms, Overlap (đổi người nói), hoặc Max duration (>7s).
+3. **Deep Noise Filter:** `YAMNet` (hoặc AST thu gọn). Phân loại âm thanh, drop các chunk là tiếng gõ phím, tiếng ho (không phải Speech).
+4. **Overlap Resolver (DSP):** `pedalboard` (Noise Gate & Compressor). Đè bẹp giọng nhỏ, ưu tiên giọng có năng lượng RMS cao hơn khi bị chồng lấn.
+5. **Speaker Diarization:** `pyannote.audio` (ECAPA-TDNN). Trích xuất Voiceprint, so khớp Cosine Similarity. Gắn nhãn Speaker (e.g., Speaker_01).
+6. **Language ID (LID):** `SpeechBrain` (VoxLingua107). Trả về 'vi' hoặc 'ja' nhanh chóng.
+7. **ASR Engine:** `faster-whisper` (large-v3). 
    - *Partial Mode:* Nhận audio stream, ép ngôn ngữ (force_language) theo LID, trả Text dự đoán.
    - *Final Mode:* Chạy khi có Sự kiện chốt, trả Text chính xác tuyệt đối.
-7. **Translation Engine:** `Qwen3.5-9B` (via `vLLM`). Chạy Text-to-Text. Nhận Prompt gồm: Lịch sử 2-3 câu hội thoại + LID + Final Transcript. Trả về văn bản dịch.
+8. **Translation Engine:** `Qwen3.5-9B` (via `vLLM`). Chạy Text-to-Text. Nhận Prompt gồm: Lịch sử 2-3 câu hội thoại + LID + Final Transcript. Trả về văn bản dịch.
+
+## 3b. Ghi chú kiến trúc: vì sao VAD nằm ở Server
+
+Thiết kế ban đầu đặt VAD ở Client để tiết kiệm băng thông. Đã chuyển lên Server vì:
+- `silero-vad` import `torchaudio` vô điều kiện, kéo theo `torch` lên máy Windows Client. Trên máy client thực tế, `torchaudio` fail với `OSError: [WinError 127]` khi nạp `_torchaudio.pyd` (lệch ABI với torch) và không sửa được.
+- Buffer Manager ở Server cần biết pause > 400ms để chốt câu. VAD ở Client buộc phải phát thêm event `speech_start`/`speech_end` báo cho Server biết những pause đã bị xóa. Đặt VAD cạnh Buffer Manager thì protocol phụ đó biến mất.
+- Client không còn dependency ML nào — chỉ `PyAudioWPatch`, `numpy`, `soxr`, `websockets`, `PySide6`.
+
+Giá phải trả: client stream liên tục 16kHz mono 16-bit = 32 KB/s = 256 kbps, kể cả khi không ai nói.
 
 ## 4. WebSocket JSON Protocol
 **Partial Message (Client <- Server):**

@@ -1,13 +1,12 @@
-"""Unit tests for the client Silero VAD gating logic.
+"""Unit tests for the server-side Silero VAD segmenter.
 
 The Silero model itself is replaced by a scripted stub, so these tests run on
 the Dev PC without torch and without downloading a model.  The real model
-behaviour is covered by ``client/tests_real/test_real_vad.py`` on the Windows
-Client PC.
+behaviour is covered by ``server/tests_real/test_real_vad.py`` on the GPU pod.
 
 Run with::
 
-    .venv\\Scripts\\python.exe -m pytest client/tests -v
+    .venv\\Scripts\\python.exe -m pytest server/tests -v
 """
 
 from __future__ import annotations
@@ -20,18 +19,23 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from client.audio.vad import (
+from server.config import (
+    CHUNK_BYTES,
+    FINALIZE_PAUSE_MS,
+    VAD_MIN_SILENCE_MS,
+)
+from server.pipeline.vad import (
     VAD_FRAME_BYTES,
     VAD_FRAME_MS,
     VAD_FRAME_SAMPLES,
     Frame,
     FrameSplitter,
-    GateOutput,
+    SegmenterOutput,
+    SegmentEvent,
     SpeechStateMachine,
     VADEvent,
-    VADGate,
+    VADSegmenter,
 )
-from client.config import CHUNK_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +69,7 @@ def pcm_frames(count: int, value: int = 1000) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Frame contract
+# Contracts
 # ---------------------------------------------------------------------------
 def test_silero_frame_contract():
     assert VAD_FRAME_SAMPLES == 512          # mandated by Silero v5 at 16 kHz
@@ -73,9 +77,14 @@ def test_silero_frame_contract():
     assert VAD_FRAME_MS == 32
 
 
-def test_a_capture_chunk_is_not_a_whole_number_of_vad_frames():
+def test_a_client_chunk_is_not_a_whole_number_of_vad_frames():
     """The reason FrameSplitter has to keep a remainder between calls."""
     assert CHUNK_BYTES % VAD_FRAME_BYTES != 0
+
+
+def test_the_hangover_outlasts_the_finalize_pause():
+    """A closing segment must carry enough silence for the buffer manager."""
+    assert VAD_MIN_SILENCE_MS > FINALIZE_PAUSE_MS
 
 
 # ---------------------------------------------------------------------------
@@ -232,125 +241,180 @@ def test_state_machine_rejects_an_out_of_range_threshold():
 
 
 # ---------------------------------------------------------------------------
-# VADGate
+# VADSegmenter
 # ---------------------------------------------------------------------------
-def make_gate(probabilities, **kwargs) -> VADGate:
+def make_segmenter(probabilities, **kwargs) -> VADSegmenter:
     defaults = dict(threshold=0.5, min_speech_ms=96, min_silence_ms=500,
                     speech_pad_ms=256)
     defaults.update(kwargs)
-    return VADGate(vad=ScriptedVAD(probabilities), **defaults)
+    return VADSegmenter(vad=ScriptedVAD(probabilities), **defaults)
 
 
-def test_gate_forwards_nothing_while_the_room_is_quiet():
-    gate = make_gate([0.02])
-    out = gate.push(pcm_frames(20))
+def test_segmenter_forwards_nothing_while_the_room_is_quiet():
+    segmenter = make_segmenter([0.02])
+    out = segmenter.push(pcm_frames(20))
     assert out.pcm == b""
     assert out.events == []
     assert out.is_speech is False
-    assert gate.stats.bandwidth_saved == 1.0
+    assert segmenter.stats.dropped_ratio == 1.0
 
 
-def test_gate_forwards_audio_once_speech_opens():
-    gate = make_gate([0.9])
-    out = gate.push(pcm_frames(10))
-    assert out.events == [VADEvent.SPEECH_START]
+def test_segmenter_forwards_audio_once_speech_opens():
+    segmenter = make_segmenter([0.9])
+    out = segmenter.push(pcm_frames(10))
+    assert out.event_kinds == [VADEvent.SPEECH_START]
     assert out.is_speech is True
     assert out.has_audio
 
 
-def test_gate_prepends_the_preroll_so_the_word_onset_survives():
+def test_segmenter_prepends_the_preroll_so_the_word_onset_survives():
     """8 quiet frames, then speech: the pad must bring the earlier audio back."""
-    gate = make_gate([0.02] * 8 + [0.9] * 5, speech_pad_ms=256)
-    out = gate.push(pcm_frames(13))
+    segmenter = make_segmenter([0.02] * 8 + [0.9] * 5, speech_pad_ms=256)
+    out = segmenter.push(pcm_frames(13))
     # The 8 pad frames (which already hold the 2 pre-trigger candidate frames)
     # plus the 3 frames from the trigger onwards.
     assert len(out.pcm) // VAD_FRAME_BYTES == 8 + 3
-    assert out.events == [VADEvent.SPEECH_START]
+    assert out.event_kinds == [VADEvent.SPEECH_START]
 
 
 def test_the_preroll_is_bounded_by_speech_pad_ms():
-    gate = make_gate([0.02] * 40 + [0.9] * 3, speech_pad_ms=256)
-    out = gate.push(pcm_frames(43))
+    segmenter = make_segmenter([0.02] * 40 + [0.9] * 3, speech_pad_ms=256)
+    out = segmenter.push(pcm_frames(43))
     # Only the last 8 frames before the trigger are kept, not all 40.
     assert len(out.pcm) // VAD_FRAME_BYTES == 8 + 1
 
 
-def test_gate_forwards_the_trailing_silence_the_server_needs():
-    """The server finalises on a pause > 400 ms, so it must receive one."""
-    gate = make_gate([0.9] * 3 + [0.02] * 20)
-    out = gate.push(pcm_frames(23))
+def test_segmenter_forwards_the_trailing_silence_the_buffer_manager_needs():
+    """The buffer manager finalises on a pause > 400 ms, so it must see one."""
+    segmenter = make_segmenter([0.9] * 3 + [0.02] * 20)
+    out = segmenter.push(pcm_frames(23))
     forwarded_frames = len(out.pcm) // VAD_FRAME_BYTES
     trailing_silence_ms = (forwarded_frames - 3) * VAD_FRAME_MS
-    assert trailing_silence_ms >= 400
-    assert out.events == [VADEvent.SPEECH_START, VADEvent.SPEECH_END]
+    assert trailing_silence_ms >= FINALIZE_PAUSE_MS
+    assert out.event_kinds == [VADEvent.SPEECH_START, VADEvent.SPEECH_END]
     assert out.is_speech is False
 
 
-def test_gate_drops_the_silence_after_a_segment_closed():
-    gate = make_gate([0.9] * 3 + [0.02] * 16 + [0.02] * 50)
-    first = gate.push(pcm_frames(19))
-    second = gate.push(pcm_frames(50))
+def test_segmenter_drops_the_silence_after_a_segment_closed():
+    segmenter = make_segmenter([0.9] * 3 + [0.02] * 16 + [0.02] * 50)
+    first = segmenter.push(pcm_frames(19))
+    second = segmenter.push(pcm_frames(50))
     assert first.has_audio
     assert second.pcm == b""
-    assert gate.stats.bandwidth_saved > 0.5
+    assert segmenter.stats.dropped_ratio > 0.5
 
 
-def test_gate_works_across_capture_chunk_boundaries():
+def test_segmenter_works_across_client_chunk_boundaries():
     """Frames must not be lost when speech straddles two 200 ms chunks."""
-    gate = make_gate([0.9])
-    outputs = [gate.push(bytes(CHUNK_BYTES)) for _ in range(4)]
+    segmenter = make_segmenter([0.9])
+    outputs = [segmenter.push(bytes(CHUNK_BYTES)) for _ in range(4)]
     total_frames = sum(len(o.pcm) for o in outputs) // VAD_FRAME_BYTES
-    assert gate.stats.frames_total == 25          # 4 * 3200 // 512
-    assert total_frames == 25                     # nothing dropped mid-segment
+    assert segmenter.stats.frames_total == 25          # 4 * 3200 // 512
+    assert total_frames == 25                          # nothing dropped mid-segment
 
 
-def test_gate_reports_only_the_probabilities_of_this_chunk():
-    gate = make_gate([0.9])
-    out = gate.push(pcm_frames(4))
+def test_segmenter_reports_only_the_probabilities_of_this_chunk():
+    segmenter = make_segmenter([0.9])
+    out = segmenter.push(pcm_frames(4))
     assert len(out.probabilities) == 4
     assert out.max_probability == pytest.approx(0.9)
 
 
-def test_gate_counts_segments_and_speech_frames():
-    gate = make_gate([0.9] * 3 + [0.02] * 16 + [0.9] * 3 + [0.02] * 16)
-    gate.push(pcm_frames(38))
-    assert gate.stats.segments == 2
-    assert gate.stats.frames_total == 38
-    assert 0.0 < gate.stats.speech_ratio < 1.0
+def test_segmenter_counts_segments_and_speech_frames():
+    segmenter = make_segmenter([0.9] * 3 + [0.02] * 16 + [0.9] * 3 + [0.02] * 16)
+    segmenter.push(pcm_frames(38))
+    assert segmenter.stats.segments == 2
+    assert segmenter.stats.frames_total == 38
+    assert 0.0 < segmenter.stats.speech_ratio < 1.0
 
 
-def test_gate_close_emits_a_final_speech_end():
-    gate = make_gate([0.9])
-    gate.push(pcm_frames(5))
-    assert gate.close().events == [VADEvent.SPEECH_END]
+def test_segmenter_close_emits_a_final_speech_end():
+    segmenter = make_segmenter([0.9])
+    segmenter.push(pcm_frames(5))
+    assert segmenter.close().event_kinds == [VADEvent.SPEECH_END]
 
 
-def test_gate_close_on_silence_emits_nothing():
-    gate = make_gate([0.02])
-    gate.push(pcm_frames(5))
-    assert gate.close().events == []
+def test_segmenter_close_on_silence_emits_nothing():
+    segmenter = make_segmenter([0.02])
+    segmenter.push(pcm_frames(5))
+    assert segmenter.close().events == []
 
 
-def test_gate_reset_clears_everything_including_the_model_state():
+def test_segmenter_reset_clears_everything_including_the_model_state():
     vad = ScriptedVAD([0.9])
-    gate = VADGate(vad=vad)
-    gate.push(pcm_frames(5))
-    gate.reset()
+    segmenter = VADSegmenter(vad=vad)
+    segmenter.push(pcm_frames(5))
+    segmenter.reset()
     assert vad.resets == 1
-    assert gate.stats.frames_total == 0
-    assert gate.state.is_speech is False
-    assert gate.splitter.pending_samples == 0
+    assert segmenter.stats.frames_total == 0
+    assert segmenter.state.is_speech is False
+    assert segmenter.splitter.pending_samples == 0
+    assert segmenter.position_ms == 0
 
 
-def test_gate_preserves_the_audio_it_forwards():
+def test_segmenter_preserves_the_audio_it_forwards():
     """Whatever comes out must be a byte-exact slice of what went in."""
-    gate = make_gate([0.9], speech_pad_ms=0)
+    segmenter = make_segmenter([0.9], speech_pad_ms=0)
     pcm = np.arange(3 * VAD_FRAME_SAMPLES, dtype="<i2").tobytes()
-    out = gate.push(pcm)
+    out = segmenter.push(pcm)
     assert out.pcm == pcm[-len(out.pcm):]
 
 
-def test_empty_gate_output_defaults_are_safe():
-    out = GateOutput()
+# ---------------------------------------------------------------------------
+# Timestamps - what the Stream Buffer Manager consumes
+# ---------------------------------------------------------------------------
+def test_position_advances_by_the_frames_actually_consumed():
+    segmenter = make_segmenter([0.02])
+    out = segmenter.push(bytes(CHUNK_BYTES))       # 6 whole frames, 128 samples left
+    assert out.position_ms == 6 * VAD_FRAME_MS
+    assert segmenter.position_ms == 6 * VAD_FRAME_MS
+
+
+def test_speech_start_is_timestamped_at_the_first_forwarded_sample():
+    """Not at the frame that triggered: the pre-roll comes before it."""
+    segmenter = make_segmenter([0.02] * 8 + [0.9] * 3, speech_pad_ms=256)
+    out = segmenter.push(pcm_frames(11))
+    start = out.events[0]
+    assert start.kind is VADEvent.SPEECH_START
+    # Trigger lands on frame 10 (0-indexed), 8 pad frames precede it.
+    assert start.at_ms == (10 - 8) * VAD_FRAME_MS
+
+
+def test_speech_end_is_timestamped_just_past_the_last_forwarded_sample():
+    segmenter = make_segmenter([0.9] * 3 + [0.02] * 16)
+    out = segmenter.push(pcm_frames(19))
+    end = out.events[-1]
+    assert end.kind is VADEvent.SPEECH_END
+    assert end.at_ms == 18 * VAD_FRAME_MS          # frame 18 closed the segment
+
+
+def test_segment_bounds_match_the_forwarded_audio_duration():
+    segmenter = make_segmenter([0.9] * 3 + [0.02] * 16, speech_pad_ms=0)
+    out = segmenter.push(pcm_frames(19))
+    start, end = out.events
+    forwarded_ms = len(out.pcm) / 2 / 16_000 * 1000
+    assert end.at_ms - start.at_ms == pytest.approx(forwarded_ms)
+
+
+def test_timestamps_keep_running_across_chunks():
+    segmenter = make_segmenter([0.02] * 30 + [0.9] * 3, speech_pad_ms=0)
+    segmenter.push(pcm_frames(30))
+    out = segmenter.push(pcm_frames(3))
+    assert out.events[0].at_ms == 32 * VAD_FRAME_MS
+    assert out.position_ms == 33 * VAD_FRAME_MS
+
+
+def test_close_timestamps_the_final_event_at_the_stream_end():
+    segmenter = make_segmenter([0.9])
+    segmenter.push(pcm_frames(5))
+    out = segmenter.close()
+    assert out.events == [
+        SegmentEvent(kind=VADEvent.SPEECH_END, at_ms=5 * VAD_FRAME_MS)
+    ]
+
+
+def test_empty_segmenter_output_defaults_are_safe():
+    out = SegmenterOutput()
     assert not out.has_audio
     assert out.max_probability == 0.0
+    assert out.event_kinds == []

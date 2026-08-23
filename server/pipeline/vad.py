@@ -1,19 +1,24 @@
-"""Silero VAD gating for the Windows client (CPU only).
+"""Silero VAD - step 0 of the server pipeline.
 
-``DESIGN.md`` section 2 asks the client to drop silent stretches before they
-reach the network.  Doing that naively would break the server though: the
-Stream Buffer Manager finalises a sentence when it sees a pause longer than
-400 ms, and it cannot see a pause that the client already deleted.  So this
-module does two things at once:
+The client streams the raw 16 kHz mono capture without any filtering, so this
+is the first thing the audio meets on the server.  It has two jobs:
 
-* it decides which 200 ms chunks are worth sending, and
-* it emits explicit ``speech_start`` / ``speech_end`` events so the server
-  learns about the pauses that were removed.
+1. **Segment.**  Report where speech starts and stops, with stream
+   timestamps.  The Stream Buffer Manager (``DESIGN.md`` section 3.1) needs
+   exactly this to fire its Finalize Event on a pause longer than 400 ms.
+2. **Drop.**  Keep the silence out of the expensive stages downstream
+   (YAMNet, PyAnnote, Whisper, vLLM).  Running Whisper over an empty meeting
+   room is pure GPU waste.
+
+VAD used to live on the client, but Silero drags ``torch`` and ``torchaudio``
+onto a Windows machine we do not control, and it broke there.  Moving it next
+to the buffer manager also removed a protocol: the client no longer has to
+announce the pauses it deleted, because it no longer deletes any.
 
 Layering
 --------
 ``FrameSplitter``
-    Cuts the 200 ms capture chunks into the exactly 512 sample frames that
+    Cuts the 200 ms client chunks into the exactly 512 sample frames that
     Silero v5 requires at 16 kHz.  Pure Python.
 
 ``SpeechStateMachine``
@@ -25,9 +30,9 @@ Layering
     Thin wrapper around the Silero torch/ONNX model.  The only part that
     needs the real model file.
 
-``VADGate``
-    Wires the three together and produces the audio that the network layer
-    should actually send, including a pre-roll so word onsets are not clipped.
+``VADSegmenter``
+    Wires the three together, produces the audio the rest of the pipeline
+    should see, and timestamps every boundary.
 """
 
 from __future__ import annotations
@@ -40,8 +45,8 @@ from typing import Optional
 
 import numpy as np
 
-from client.config import (
-    TARGET_SAMPLE_RATE,
+from server.config import (
+    SAMPLE_RATE,
     VAD_MIN_SILENCE_MS,
     VAD_MIN_SPEECH_MS,
     VAD_SPEECH_PAD_MS,
@@ -53,7 +58,7 @@ log = logging.getLogger(__name__)
 #: Silero v5 only accepts this exact frame size at 16 kHz.
 VAD_FRAME_SAMPLES = 512
 VAD_FRAME_BYTES = VAD_FRAME_SAMPLES * 2
-VAD_FRAME_MS = VAD_FRAME_SAMPLES * 1000 // TARGET_SAMPLE_RATE      # 32 ms
+VAD_FRAME_MS = VAD_FRAME_SAMPLES * 1000 // SAMPLE_RATE      # 32 ms
 
 
 class VADError(RuntimeError):
@@ -67,10 +72,10 @@ class VADError(RuntimeError):
 class Frame:
     """One VAD frame in both representations.
 
-    ``samples`` feeds the model, ``pcm`` is the untouched slice of the capture
+    ``samples`` feeds the model, ``pcm`` is the untouched slice of the input
     stream.  Keeping the original bytes matters: rebuilding them from the
     float view would shift every sample by one LSB, and that degraded audio
-    would then be what the ASR receives.
+    would then be what Whisper receives.
     """
 
     samples: np.ndarray          # float32 in [-1, 1), length == frame_samples
@@ -80,7 +85,7 @@ class Frame:
 class FrameSplitter:
     """Cut a 16-bit PCM byte stream into fixed size frames.
 
-    Capture chunks are 3200 samples (200 ms) while Silero wants 512, which is
+    Client chunks are 3200 samples (200 ms) while Silero wants 512, which is
     not a divisor, so the remainder has to survive between calls.
     """
 
@@ -116,6 +121,21 @@ class FrameSplitter:
 class VADEvent(str, Enum):
     SPEECH_START = "speech_start"
     SPEECH_END = "speech_end"
+
+
+@dataclass(frozen=True)
+class SegmentEvent:
+    """A speech boundary, positioned in the stream.
+
+    ``at_ms`` is measured from the first sample the segmenter ever saw.  For
+    ``SPEECH_START`` it points at the first forwarded sample (the pre-roll, not
+    the frame that happened to trigger the model); for ``SPEECH_END`` it points
+    just past the last forwarded sample.  So a start/end pair delimits exactly
+    the audio that was handed downstream.
+    """
+
+    kind: VADEvent
+    at_ms: float
 
 
 @dataclass
@@ -223,12 +243,13 @@ class SileroVAD:
         except ImportError as exc:                      # pragma: no cover
             raise VADError(
                 "silero-vad / torch are not installed. Run "
-                "`py -3.11 -m pip install -r client/requirements.txt`."
+                "`python3.11 -m pip install -r server/requirements.txt`."
             ) from exc
 
         self._torch = torch
-        # VAD runs next to the audio callback; letting torch grab every core
-        # would starve the capture thread for no gain on a 512 sample frame.
+        # The model is tiny and runs on one CPU core in far less than real
+        # time; letting torch grab every core would only steal them from the
+        # GPU feeder threads.
         torch.set_num_threads(num_threads)
         try:
             self._model = load_silero_vad(onnx=onnx)
@@ -245,15 +266,15 @@ class SileroVAD:
             )
         tensor = self._torch.from_numpy(np.ascontiguousarray(frame, dtype=np.float32))
         with self._torch.no_grad():
-            return float(self._model(tensor, TARGET_SAMPLE_RATE).item())
+            return float(self._model(tensor, SAMPLE_RATE).item())
 
     def reset(self) -> None:
-        """Clear the model's recurrent state between capture sessions."""
+        """Clear the model's recurrent state between sessions."""
         self._model.reset_states()
 
 
 # ---------------------------------------------------------------------------
-# Gate
+# Segmenter
 # ---------------------------------------------------------------------------
 @dataclass
 class VADStats:
@@ -268,21 +289,22 @@ class VADStats:
         return self.frames_speech / self.frames_total if self.frames_total else 0.0
 
     @property
-    def bandwidth_saved(self) -> float:
-        """Fraction of the captured bytes the gate kept off the network."""
+    def dropped_ratio(self) -> float:
+        """Fraction of the incoming audio kept away from the heavy stages."""
         if not self.bytes_in:
             return 0.0
         return 1.0 - self.bytes_out / self.bytes_in
 
 
 @dataclass
-class GateOutput:
-    """Result of pushing one capture chunk through the gate."""
+class SegmenterOutput:
+    """Result of pushing one client chunk through the segmenter."""
 
-    pcm: bytes = b""                                   # audio to send, may be b""
-    events: list[VADEvent] = field(default_factory=list)
+    pcm: bytes = b""                                   # speech audio, may be b""
+    events: list[SegmentEvent] = field(default_factory=list)
     probabilities: list[float] = field(default_factory=list)
     is_speech: bool = False
+    position_ms: float = 0.0                           # stream time after this chunk
 
     @property
     def has_audio(self) -> bool:
@@ -292,14 +314,19 @@ class GateOutput:
     def max_probability(self) -> float:
         return max(self.probabilities) if self.probabilities else 0.0
 
+    @property
+    def event_kinds(self) -> list[VADEvent]:
+        return [e.kind for e in self.events]
 
-class VADGate:
-    """Drop silence, keep speech, and report the pauses that were removed.
+
+class VADSegmenter:
+    """Cut the incoming stream into timestamped speech segments.
 
     ``speech_pad_ms`` of audio is kept in a ring buffer at all times and
     prepended when a segment opens, because Silero needs a few frames of
     evidence before it triggers and those frames contain the start of the
-    word.
+    word.  Whisper transcribes a clipped onset as a different word, so the
+    pad is not cosmetic.
     """
 
     def __init__(
@@ -313,30 +340,46 @@ class VADGate:
     ) -> None:
         self.vad = vad if vad is not None else SileroVAD()
         self.splitter = FrameSplitter(frame_samples)
+        self.frame_ms = frame_samples * 1000 // SAMPLE_RATE
         self.state = SpeechStateMachine(
             threshold=threshold,
             min_speech_ms=min_speech_ms,
             min_silence_ms=min_silence_ms,
-            frame_ms=frame_samples * 1000 // TARGET_SAMPLE_RATE,
+            frame_ms=self.frame_ms,
         )
-        pad_frames = max(0, round(speech_pad_ms / self.state.frame_ms))
-        self._preroll: deque[bytes] = deque(maxlen=pad_frames) if pad_frames else deque(maxlen=0)
+        pad_frames = max(0, round(speech_pad_ms / self.frame_ms))
+        self._preroll: deque[bytes] = deque(maxlen=pad_frames)
+        self._frames_consumed = 0
         self.stats = VADStats()
 
-    def push(self, pcm: bytes) -> GateOutput:
-        """Feed one capture chunk; get back only the audio worth sending."""
-        out = GateOutput()
+    @property
+    def position_ms(self) -> float:
+        """Stream time of the next frame to be processed."""
+        return self._frames_consumed * self.frame_ms
+
+    def push(self, pcm: bytes) -> SegmenterOutput:
+        """Feed one client chunk; get back the speech worth processing."""
+        out = SegmenterOutput()
         self.stats.bytes_in += len(pcm)
         keep = bytearray()
 
         for frame in self.splitter.push(pcm):
+            frame_start_ms = self._frames_consumed * self.frame_ms
             decision = self.state.push(self.vad.probability(frame.samples))
             out.probabilities.append(decision.probability)
             self.stats.frames_total += 1
+            self._frames_consumed += 1
 
             if decision.event is VADEvent.SPEECH_START:
                 self.stats.segments += 1
-                out.events.append(decision.event)
+                # The forwarded audio begins at the oldest pre-roll frame, not
+                # at the frame that convinced the model.
+                out.events.append(
+                    SegmentEvent(
+                        kind=VADEvent.SPEECH_START,
+                        at_ms=frame_start_ms - len(self._preroll) * self.frame_ms,
+                    )
+                )
                 keep.extend(b"".join(self._preroll))
                 self._preroll.clear()
 
@@ -349,19 +392,25 @@ class VADGate:
                 self._preroll.append(frame.pcm)
 
             if decision.event is VADEvent.SPEECH_END:
-                out.events.append(decision.event)
+                # The hangover frames up to the previous frame were forwarded,
+                # so the segment ends where this frame begins.
+                out.events.append(
+                    SegmentEvent(kind=VADEvent.SPEECH_END, at_ms=frame_start_ms)
+                )
 
         out.pcm = bytes(keep)
         out.is_speech = self.state.is_speech
+        out.position_ms = self.position_ms
         self.stats.bytes_out += len(out.pcm)
         return out
 
-    def close(self) -> GateOutput:
+    def close(self) -> SegmenterOutput:
         """Flush at the end of a session so no segment stays open."""
-        out = GateOutput(is_speech=False)
-        event = self.state.close()
-        if event is not None:
-            out.events.append(event)
+        out = SegmenterOutput(is_speech=False, position_ms=self.position_ms)
+        if self.state.close() is not None:
+            out.events.append(
+                SegmentEvent(kind=VADEvent.SPEECH_END, at_ms=self.position_ms)
+            )
         return out
 
     def reset(self) -> None:
@@ -370,4 +419,5 @@ class VADGate:
         self.state.reset()
         self._preroll.clear()
         self.vad.reset()
+        self._frames_consumed = 0
         self.stats = VADStats()

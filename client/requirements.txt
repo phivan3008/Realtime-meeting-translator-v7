@@ -11,10 +11,7 @@ numpy==1.26.4
 soxr==0.5.0.post1          # High quality streaming resampler (48k -> 16k)
 scipy==1.14.1              # Fallback resampler + WAV helpers
 
-# --- Voice Activity Detection (CPU) ---
-torch==2.4.1               # CPU wheel is enough on the client
-silero-vad==5.1.2
-onnxruntime==1.19.2        # Optional ONNX backend for Silero VAD
+# --- No ML on the client: VAD runs on the GPU server ---
 
 # --- Networking ---
 websockets==13.1
