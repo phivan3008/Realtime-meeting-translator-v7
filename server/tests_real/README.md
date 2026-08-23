@@ -39,7 +39,10 @@ python3.11 server/tests_real/test_real_buffer.py \
 Add `--onnx` to either one to run the ONNX model instead of the torch jit one.
 
 ```bash
-python3.11 server/tests_real/test_real_noise.py     --speech recordings/meeting_speech.wav     --noise recordings/keyboard.wav     --noise recordings/cough.wav
+python3.11 server/tests_real/test_real_noise.py \
+    --speech recordings/meeting_speech.wav \
+    --noise recordings/keyboard.wav \
+    --noise recordings/cough.wav
 ```
 
 If the pod has no internet access, YAMNet cannot come from TF Hub. Download
