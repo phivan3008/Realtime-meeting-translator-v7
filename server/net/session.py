@@ -92,8 +92,14 @@ class ServerSession:
         if kind == ClientMessage.BYE.value:
             reason = payload.get("reason", "")
             log.info("Session %s said bye: %s", self.session_id, reason)
+            # A clean goodbye can still land mid-sentence. Close the segment
+            # here, while the socket is open and the event can still be
+            # delivered, or the last sentence of the meeting never gets an
+            # end and never gets finalised.
+            messages = self._close_segment()
             self.state = SessionState.CLOSED
-            return Response(close=True, close_reason=f"client bye: {reason}")
+            return Response(messages=messages, close=True,
+                            close_reason=f"client bye: {reason}")
 
         if kind == ClientMessage.HELLO.value:
             if self.state is not SessionState.AWAITING_HELLO:
@@ -147,15 +153,23 @@ class ServerSession:
 
     # -- teardown -----------------------------------------------------------
     def finish(self) -> Response:
-        """Close an open speech segment when the connection goes away."""
-        if self.state is not SessionState.STREAMING or self.segmenter is None:
-            self.state = SessionState.CLOSED
-            return Response()
-        out = self.segmenter.close()
+        """Close an open speech segment when the connection goes away.
+
+        Safe to call after a ``bye`` has already closed it: the segmenter
+        reports no events the second time, so no duplicate end is emitted.
+        """
+        messages = self._close_segment()
         self.state = SessionState.CLOSED
+        return Response(messages=messages)
+
+    def _close_segment(self) -> list[str]:
+        """End an in-progress speech segment, if there is one."""
+        if self.state is not SessionState.STREAMING or self.segmenter is None:
+            return []
+        out = self.segmenter.close()
         messages = [make_vad(event.kind.value, event.at_ms) for event in out.events]
         self.stats.events_sent += len(messages)
-        return Response(messages=messages)
+        return messages
 
     # -- helpers ------------------------------------------------------------
     def _fail(self, message: str) -> Response:

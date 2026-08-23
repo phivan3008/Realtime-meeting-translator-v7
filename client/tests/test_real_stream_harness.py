@@ -209,15 +209,18 @@ def test_an_event_that_predates_its_own_audio_fails():
     ]
 
 
-def test_unbalanced_segments_fail():
+def test_an_unclosed_final_segment_fails():
+    """A start with no end means the last sentence never gets finalised."""
     collected = make_collected(
         0.0,
-        [(0.3, 100.0, "speech_start"), (0.6, 200.0, "speech_start"),
+        [(0.3, 100.0, "speech_start"), (0.6, 200.0, "speech_end"),
          (0.9, 300.0, "speech_start")],
     )
     report = harness.Report()
     harness.check_events(collected, report)
-    assert "Speech segments are opened and closed" in [c.name for c in report.failed]
+    assert "Every speech segment is opened and closed" in [
+        c.name for c in report.failed
+    ]
 
 
 # ---------------------------------------------------------------------------

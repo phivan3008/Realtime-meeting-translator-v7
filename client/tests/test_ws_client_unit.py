@@ -48,6 +48,7 @@ class StubServer:
     reject: str = ""                     # non-empty -> refuse the handshake
     push_on_chunk: int = -1              # send a vad event after this chunk
     close_after_chunks: int = -1         # hang up mid-stream, to test reconnect
+    end_on_bye: bool = False             # answer a bye with a closing event
     hellos: list[dict] = field(default_factory=list)
     chunks: list[bytes] = field(default_factory=list)
     byes: list[dict] = field(default_factory=list)
@@ -77,6 +78,8 @@ class StubServer:
                 control = parse_message(message)
                 if control["type"] == ClientMessage.BYE.value:
                     self.byes.append(control)
+                    if self.end_on_bye:
+                        await socket.send(make_vad("speech_end", 4200.0))
                     return
 
 
@@ -270,3 +273,40 @@ async def test_the_client_reconnects_after_the_server_hangs_up():
 
     assert client.stats.connects >= 2
     assert len(stub.hellos) >= 2                  # a fresh hello each time
+
+
+async def test_the_servers_closing_event_survives_a_clean_stop():
+    """Found by the real test: a clean stop lost the final speech_end.
+
+    The server closes an open speech segment when the client says bye, but
+    the client used to cancel its receive loop before sending the bye, so
+    that closing event was never read and the last sentence of the meeting
+    would never be finalised.
+    """
+    received: list[dict] = []
+    stub = StubServer(end_on_bye=True)
+    async with running(stub) as url:
+        client = StreamClient(url, on_message=received.append)
+        task = asyncio.create_task(client.run())
+        assert await client.wait_connected(5.0)
+        client.send(chunk())
+        assert await wait_for(lambda: len(stub.chunks) == 1)
+        await drain(client, task)
+
+    kinds = [m["type"] for m in received]
+    assert "vad" in kinds, f"closing event was dropped; got {kinds}"
+    closing = [m for m in received if m["type"] == "vad"][-1]
+    assert closing["event"] == "speech_end"
+    assert closing["at_ms"] == 4200.0
+
+
+async def test_a_clean_stop_does_not_hang_when_the_server_stays_silent():
+    """The grace period must be a timeout, not a wait forever."""
+    stub = StubServer()                       # never answers the bye
+    async with running(stub) as url:
+        client = StreamClient(url)
+        task = asyncio.create_task(client.run())
+        assert await client.wait_connected(5.0)
+        started = asyncio.get_running_loop().time()
+        await drain(client, task)
+        assert asyncio.get_running_loop().time() - started < 8.0

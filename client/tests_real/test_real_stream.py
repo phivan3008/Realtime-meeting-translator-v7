@@ -223,7 +223,10 @@ def check_events(collected: Collected, report: Report) -> None:
                f"{len(events)} vad event(s)")
     starts = sum(1 for _, m in events if m["event"] == "speech_start")
     ends = sum(1 for _, m in events if m["event"] == "speech_end")
-    report.add("Speech segments are opened and closed", abs(starts - ends) <= 1,
+    # Exact balance, not off-by-one: the client stops with a `bye`, and the
+    # server closes any segment still open before the socket goes away. An
+    # unmatched start means the last sentence would never be finalised.
+    report.add("Every speech segment is opened and closed", starts == ends,
                f"{starts} speech_start, {ends} speech_end")
 
     lags = collected.lags_ms()

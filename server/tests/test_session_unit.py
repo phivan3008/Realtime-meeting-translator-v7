@@ -207,7 +207,7 @@ def test_the_model_state_is_reset_for_each_new_session():
 # ---------------------------------------------------------------------------
 # Teardown
 # ---------------------------------------------------------------------------
-def test_bye_closes_without_an_error_message():
+def test_bye_during_silence_closes_without_an_error_message():
     session = make_session()
     session.handle_text(Hello(session_id="abc").to_json())
     response = session.handle_text(make_bye("client stopped"))
@@ -215,6 +215,50 @@ def test_bye_closes_without_an_error_message():
     assert response.close is True
     assert "bye" in response.close_reason
     assert session.state is SessionState.CLOSED
+
+
+def test_bye_mid_sentence_still_ends_the_segment():
+    """Found by the real test: a clean stop used to lose the last sentence.
+
+    ``bye`` marked the session closed, so the later ``finish()`` skipped the
+    open segment and no ``speech_end`` was ever sent. The buffer manager
+    would then hold the final sentence forever and never finalise it.
+    """
+    session = make_session([0.9])
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    response = session.handle_text(make_bye("client stopped"))
+    payloads = [json.loads(m) for m in response.messages]
+    assert [p["event"] for p in payloads] == [VADEvent.SPEECH_END.value]
+    assert response.close is True
+
+
+def test_the_end_event_is_sent_before_the_socket_closes():
+    """It has to ride out on the same response, or it cannot be delivered."""
+    session = make_session([0.9])
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    response = session.handle_text(make_bye("done"))
+    assert response.messages and response.close
+
+
+def test_finish_after_bye_does_not_repeat_the_end_event():
+    session = make_session([0.9])
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    session.handle_text(make_bye("done"))
+    assert session.finish().messages == []
+
+
+def test_starts_and_ends_balance_over_a_clean_session():
+    session = make_session([0.9])
+    session.handle_text(Hello(session_id="abc").to_json())
+    events = []
+    for _ in range(3):
+        events += [json.loads(m) for m in session.handle_binary(chunk()).messages]
+    events += [json.loads(m) for m in session.handle_text(make_bye("done")).messages]
+    kinds = [e["event"] for e in events]
+    assert kinds.count("speech_start") == kinds.count("speech_end") == 1
 
 
 def test_finish_closes_a_segment_left_open_by_a_dropped_connection():

@@ -46,6 +46,9 @@ BACKOFF_MAX = 10.0
 #: Keepalive, so a silently dead TCP connection is noticed.
 PING_INTERVAL = 20.0
 PING_TIMEOUT = 20.0
+#: How long to keep listening after saying goodbye, so the server's closing
+#: messages are not thrown away.
+CLOSE_GRACE_SECONDS = 2.0
 
 MessageHandler = Callable[[dict], Optional[Awaitable[None]]]
 
@@ -215,19 +218,29 @@ class StreamClient:
             receiver = asyncio.create_task(self._receive_loop(socket))
             sender = asyncio.create_task(self._send_loop(socket))
             try:
-                done, pending = await asyncio.wait(
+                done, _ = await asyncio.wait(
                     {receiver, sender}, return_when=asyncio.FIRST_COMPLETED
                 )
-                for task in pending:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-                for task in done:
-                    task.result()               # re-raise whatever ended it
 
-                if self._stopping.is_set():
+                if self._stopping.is_set() and sender in done and not receiver.done():
                     with contextlib.suppress(ConnectionClosed):
                         await socket.send(make_bye("client stopped"))
+                    # The server answers a bye by closing any speech segment
+                    # still open and only then hanging up. Tearing the
+                    # receiver down first would discard that closing event,
+                    # and the last sentence of the meeting with it.
+                    with contextlib.suppress(
+                        asyncio.TimeoutError, ConnectionClosed, asyncio.CancelledError
+                    ):
+                        await asyncio.wait_for(receiver, CLOSE_GRACE_SECONDS)
+
+                for task in (receiver, sender):
+                    if not task.done():
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                for task in done:
+                    task.result()               # re-raise whatever ended it
             finally:
                 self._connected.clear()
                 self.stats.disconnects += 1
