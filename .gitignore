@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Real test artefacts
+client/tests_real/output/
+server/tests_real/output/
+*.wav
+
+# Local config / secrets
+.env
+
+# Model caches
+models/
+*.onnx
