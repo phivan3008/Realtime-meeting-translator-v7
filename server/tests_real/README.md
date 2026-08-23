@@ -19,19 +19,27 @@ python3.11 -m pip install -r server/requirements.txt
 python --version          # must print 3.11.x
 ```
 
-## Offline: VAD on recorded audio
+## Offline: the pipeline on recorded audio
 
 | Script | What it proves |
 | --- | --- |
 | `test_real_vad.py` | Silero VAD: model loads, runs far faster than real time, no false trigger on a quiet recording, correct speech segments and timestamps |
+| `test_real_buffer.py` | Stream Buffer Manager: sentences partition the speech exactly, none outstays 7 s, timestamps line up, partials keep cadence |
 
 ```bash
 python3.11 server/tests_real/test_real_vad.py \
     --speech recordings/meeting_speech.wav \
     --silence recordings/quiet_room.wav
+
+python3.11 server/tests_real/test_real_buffer.py \
+    --speech recordings/meeting_speech.wav
 ```
 
-Add `--onnx` to run the ONNX model instead of the torch jit one.
+Add `--onnx` to either one to run the ONNX model instead of the torch jit one.
+
+`test_real_buffer.py` writes one WAV per sentence into
+`server/tests_real/output/<name>_utterances/`. Listen to any file named
+`*_max_duration*.wav`: the cut must fall between words, not through one.
 
 ## Online: serve the client
 
