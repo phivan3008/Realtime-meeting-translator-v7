@@ -25,6 +25,7 @@ python --version          # must print 3.11.x
 | --- | --- |
 | `test_real_vad.py` | Silero VAD: model loads, runs far faster than real time, no false trigger on a quiet recording, correct speech segments and timestamps |
 | `test_real_buffer.py` | Stream Buffer Manager: sentences partition the speech exactly, none outstays 7 s, timestamps line up, partials keep cadence |
+| `test_real_noise.py` | YAMNet: loads on the pod, keeps real speech, drops recorded keyboard and coughing, costs almost nothing |
 
 ```bash
 python3.11 server/tests_real/test_real_vad.py \
@@ -36,6 +37,14 @@ python3.11 server/tests_real/test_real_buffer.py \
 ```
 
 Add `--onnx` to either one to run the ONNX model instead of the torch jit one.
+
+```bash
+python3.11 server/tests_real/test_real_noise.py     --speech recordings/meeting_speech.wav     --noise recordings/keyboard.wav     --noise recordings/cough.wav
+```
+
+If the pod has no internet access, YAMNet cannot come from TF Hub. Download
+the SavedModel once elsewhere, copy it over, and either pass `--model-dir` or
+export `YAMNET_MODEL_DIR` before starting the server.
 
 `test_real_buffer.py` writes one WAV per sentence into
 `server/tests_real/output/<name>_utterances/`. Listen to any file named
