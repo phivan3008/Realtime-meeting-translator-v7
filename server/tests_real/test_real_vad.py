@@ -19,6 +19,9 @@ What it proves
    boundaries and timestamps are consistent.
 5. The segment timestamps are exactly what the Stream Buffer Manager needs:
    monotonic, non-overlapping, and matching the forwarded audio.
+6. reset() really does restore the model. The server keeps one loaded model
+   across meetings, so a second session must not inherit anything from the
+   first.
 6. The forwarded audio still contains every word - it is written to a WAV for
    listening.
 
@@ -273,6 +276,26 @@ def check_speech(result: Replay, report: Report) -> None:
                f"{result.dropped_ratio * 100:.1f}% dropped")
 
 
+def check_repeatable(first: Replay, again: Replay, report: Report) -> None:
+    """The same audio through the same model instance must give the same result.
+
+    The server loads Silero once and reuses it for every meeting, resetting
+    between sessions. If reset() left anything behind, meeting two would be
+    judged partly by meeting one - quietly, and differently every time.
+    """
+    report.add(
+        "Replaying the same audio gives byte-identical speech",
+        bytes(first.gated_pcm) == bytes(again.gated_pcm),
+        f"{len(first.gated_pcm)} bytes then {len(again.gated_pcm)} bytes",
+    )
+    report.add(
+        "Replaying the same audio gives the same segments",
+        [(e.kind, e.at_ms) for e in first.events]
+        == [(e.kind, e.at_ms) for e in again.events],
+        f"{len(first.events)} events then {len(again.events)}",
+    )
+
+
 def check_timestamps(result: Replay, report: Report) -> None:
     """The Stream Buffer Manager consumes these; they have to be exact."""
     events = result.events
@@ -368,6 +391,10 @@ def main() -> int:
         speech = replay(args.speech, vad)
         describe(speech)
 
+        # Same file, same model instance, straight after: only reset() stands
+        # between the two runs.
+        again = replay(args.speech, vad)
+
         print("\nChecks:")
         check_latency(vad, report)
         report.add("Faster than real time end to end",
@@ -377,6 +404,7 @@ def main() -> int:
             check_silence(silence, report)
         check_speech(speech, report)
         check_timestamps(speech, report)
+        check_repeatable(speech, again, report)
 
         gated_path = save_gated(speech)
         print(f"\n  Forwarded audio: {gated_path}")

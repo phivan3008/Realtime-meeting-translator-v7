@@ -60,7 +60,11 @@ class ScriptedVAD:
         return float(value)
 
     def reset(self) -> None:
+        # A resettable model returns to its starting state, so the script
+        # rewinds too. Without this the stub would model a model that cannot
+        # be reset, which is the very thing under test.
         self.resets += 1
+        self.calls = 0
 
 
 def write_wav(path: Path, seconds: float, rate: int = SAMPLE_RATE,
@@ -309,3 +313,44 @@ def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sys, "argv", ["x", "--speech", str(speech)])
     assert harness.main() == 2
     assert "Could not load" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# reset() completeness
+# ---------------------------------------------------------------------------
+def test_two_identical_replays_pass_the_repeat_check(tmp_path):
+    """A scripted model is stateless, so this is the shape of a clean pass."""
+    path = write_wav(tmp_path / "speech.wav", 6.0)
+    vad = ScriptedVAD([0.9] * 100 + [0.02])
+    first = harness.replay(path, vad)
+    again = harness.replay(path, vad)
+    report = harness.Report()
+    harness.check_repeatable(first, again, report)
+    assert report.failed == []
+
+
+def test_a_model_that_remembers_the_previous_run_is_caught():
+    """What an incomplete reset() looks like: the second pass differs."""
+    first = harness.Replay(path=Path("a.wav"))
+    first.gated_pcm = bytearray(b"aaaa")
+    again = harness.Replay(path=Path("a.wav"))
+    again.gated_pcm = bytearray(b"aabb")
+    report = harness.Report()
+    harness.check_repeatable(first, again, report)
+    assert [c.name for c in report.failed] == [
+        "Replaying the same audio gives byte-identical speech"
+    ]
+
+
+def test_differing_segment_boundaries_are_caught(tmp_path):
+    from server.pipeline.vad import SegmentEvent, VADEvent
+
+    first = harness.Replay(path=Path("a.wav"))
+    again = harness.Replay(path=Path("a.wav"))
+    first.events = [SegmentEvent(kind=VADEvent.SPEECH_START, at_ms=0.0)]
+    again.events = [SegmentEvent(kind=VADEvent.SPEECH_START, at_ms=32.0)]
+    report = harness.Report()
+    harness.check_repeatable(first, again, report)
+    assert "Replaying the same audio gives the same segments" in [
+        c.name for c in report.failed
+    ]
