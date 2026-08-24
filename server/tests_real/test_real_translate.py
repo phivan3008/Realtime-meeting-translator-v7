@@ -153,6 +153,31 @@ MEETING_REFUSALS = [
      "the ASR misheard the whole sentence"),
 ]
 
+# The turns that were in the history when ここに作っているの? was refused,
+# taken from the same run. Both are Vietnamese, so both translations in it
+# are Japanese - which is exactly the shape that appears to have taught the
+# model to answer in Japanese as well.
+#
+# Run on its own, with no history at all, that sentence translates correctly:
+#
+#     ここに作っているの?  ->  Đang làm ở đây à?
+#
+# So the history is the only thing that differs, and this replays it.
+STEERING_HISTORY = [
+    Turn("Speaker_01", "vi",
+         "Đang thiếu cái phần đó. Tại vì "
+         "cái chỗ câu hỏi câu trả lời của "
+         "hai bên phần đó rất là quan trọng.",
+         "その部分が不足しています。"
+         "なぜなら、双方の質問と回答"
+         "の部分は非常に重要だからです。"),
+    Turn("Speaker_01", "vi",
+         "Cái phần đó chưa mô tả ở bên này.",
+         "その部分は、こちら側でまだ"
+         "記述されていません。"),
+]
+STEERED_SENTENCE = ("ja", "ここに作っているの?")
+
 
 def attempt(translator: Translator, lang_code: str, source: str) -> Attempt:
     started = time.perf_counter()
@@ -271,6 +296,50 @@ def check_context(client, report: Report) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def check_history_does_not_steer_the_language(client, report: Report) -> None:
+    """Put both prompts to the same model on the same history.
+
+    Asserting only that the new prompt works would leave the interesting
+    question unanswered: was the old one really at fault, or did that run just
+    go badly? So both are sent, and both answers are printed. If the old
+    prompt now answers correctly too, the diagnosis was wrong and the change
+    is unjustified - say so rather than keeping it.
+    """
+    lang, source = STEERED_SENTENCE
+    print("\n  Does the history steer the output language?")
+    print(f"    history: {len(STEERING_HISTORY)} Vietnamese turns, so every "
+          "translation in it is Japanese")
+    print(f"    line   : {source}  ({lang} -> vi)")
+
+    answers = {}
+    for style, steer in (("old prompt", False), ("new prompt", True)):
+        context = TranslationContext(size=TRANSLATE_HISTORY)
+        for turn in STEERING_HISTORY:
+            context.remember(turn)
+        translator = Translator(backend=client, context=context,
+                                steer_language=steer)
+        result = translator.translate(source, lang)
+        answers[style] = result
+        print(f"\n    {style}:")
+        if result.ok:
+            print(f"      out    : {result.text}")
+        else:
+            print(f"      refused: {result.reason}")
+            print(f"      raw    : {result.raw[:200]!r}")
+
+    report.add("The history does not steer the output language",
+               answers["new prompt"].ok,
+               f"{answers['new prompt'].reason or answers['new prompt'].text}")
+
+    if answers["old prompt"].ok:
+        print("\n    NOTE: the old prompt answered correctly too. The history "
+              "is then not the cause, the labelling change is unjustified, "
+              "and the real cause is still unknown.")
+    else:
+        print("\n    The old prompt failed and the new one did not, on the "
+              "same model and the same history.")
+
+
 def check_meeting_refusals(client, report: Report) -> None:
     """Replay the sentences a real meeting lost, and show what the model said.
 
@@ -333,6 +402,7 @@ def main() -> int:
         check_latency(attempts, report)
         check_repeatable(lambda: Translator(backend=client), report)
         check_context(client, report)
+        check_history_does_not_steer_the_language(client, report)
         check_meeting_refusals(client, report)
 
         print(f"\n  Translator stats: {translator.stats.seen} seen, "

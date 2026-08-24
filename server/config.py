@@ -294,7 +294,25 @@ TRANSLATE_HISTORY = 3
 
 # A translation runs a little longer than its source, never many times longer.
 # Far past this and the model has started explaining itself or looping.
-TRANSLATE_MAX_EXPANSION = 4.0
+#
+# One number for both directions was wrong, and it was wrong in both
+# directions at once. Measured over 21 real pairs, as len(output)/len(source)
+# in characters:
+#
+#     ja -> vi   1.17 - 4.44      Japanese is dense; a nine-character
+#                                 fragment becomes a forty-character sentence
+#     vi -> ja   0.44 - 0.70      the same information, written shorter
+#
+# The old shared 4.0 therefore refused a correct Vietnamese translation of
+# あれこれ今下の方に (4.44) while being unreachable in the other direction -
+# a Japanese answer would have had to run six times the length of a correct
+# one before anything noticed.
+#
+# Keyed by the TARGET language. The slack is what makes short sources
+# survive: at nine characters a ratio is mostly noise, and every measured
+# pair fits inside its own limit with room to spare (tightest: 74 against 92).
+TRANSLATE_MAX_EXPANSION = {"vi": 2.0, "ja": 1.0}
+TRANSLATE_EXPANSION_SLACK = 50
 TRANSLATE_MAX_TOKENS = 512
 
 # A translation has to be written in the target language's script. Measured on

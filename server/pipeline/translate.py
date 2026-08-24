@@ -56,6 +56,7 @@ from server.config import (
     TRANSLATE_BASE_URL,
     TRANSLATE_ENABLE_THINKING,
     TRANSLATE_HISTORY,
+    TRANSLATE_EXPANSION_SLACK,
     TRANSLATE_MAX_EXPANSION,
     TRANSLATE_MAX_WRONG_SCRIPT,
     TRANSLATE_MAX_TOKENS,
@@ -224,8 +225,16 @@ class TranslationContext:
     def turns(self) -> list[Turn]:
         return list(self._turns)
 
-    def as_prompt(self) -> str:
-        """The history, laid out for the model to read but not to translate."""
+    def as_prompt(self, label_languages: bool = True) -> str:
+        """The history, laid out for the model to read but not to translate.
+
+        ``label_languages`` marks which language each translated line is in.
+        Without it the history reads as a run of worked examples that all end
+        in the same language: a meeting where three Vietnamese lines in a row
+        were rendered into Japanese taught the model that its next answer
+        should be Japanese too - including for the Japanese line that came
+        next, which then came back untranslated. Pass False to reproduce that.
+        """
         if not self._turns:
             return ""
         lines = []
@@ -233,7 +242,9 @@ class TranslationContext:
             who = turn.speaker_id or "someone"
             lines.append(f"{who} ({turn.lang_code}): {turn.source}")
             if turn.translation:
-                lines.append(f"  -> {turn.translation}")
+                target = target_language(turn.lang_code)
+                tag = f"({target}) " if label_languages and target else ""
+                lines.append(f"  -> {tag}{turn.translation}")
         return "\n".join(lines)
 
     def clear(self) -> None:
@@ -303,30 +314,57 @@ class Translator:
         self,
         backend: Optional[Backend] = None,
         context: Optional[TranslationContext] = None,
-        max_expansion: float = TRANSLATE_MAX_EXPANSION,
+        max_expansion: dict[str, float] | float = TRANSLATE_MAX_EXPANSION,
+        expansion_slack: int = TRANSLATE_EXPANSION_SLACK,
+        steer_language: bool = True,
     ) -> None:
-        if max_expansion <= 1.0:
-            raise ValueError("max_expansion must be greater than 1")
+        if isinstance(max_expansion, (int, float)):
+            max_expansion = {code: float(max_expansion)
+                             for code in TRANSLATE_MAX_EXPANSION}
+        if any(value <= 0.0 for value in max_expansion.values()):
+            raise ValueError("every max_expansion must be greater than 0")
         self.backend = backend if backend is not None else VllmClient()
         self.context = context if context is not None else TranslationContext()
-        self.max_expansion = max_expansion
+        self.max_expansion = dict(max_expansion)
+        self.expansion_slack = expansion_slack
+        self.steer_language = steer_language
         self.stats = TranslationStats()
 
-    def build_prompt(self, source: str, lang_code: str) -> tuple[str, str]:
-        """The system and user messages, so a test can read them."""
+    def build_prompt(self, source: str, lang_code: str,
+                     steer_language: bool = True) -> tuple[str, str]:
+        """The system and user messages, so a test can read them.
+
+        ``steer_language=False`` rebuilds the prompt exactly as it was before
+        the history was found to be steering the output language. It exists so
+        ``server/tests_real/test_real_translate.py`` can put both versions to
+        a real model on the same history and show that the difference is the
+        prompt, not the weather. Nothing in the pipeline passes False.
+        """
         target = target_language(lang_code)
+        target_name = LANGUAGE_NAMES.get(target, "the other language")
         system = SYSTEM_PROMPT.format(
             source_name=LANGUAGE_NAMES.get(lang_code, "the source language"),
-            target_name=LANGUAGE_NAMES.get(target, "the other language"),
+            target_name=target_name,
         )
-        history = self.context.as_prompt()
-        if history:
-            user = (
+        history = self.context.as_prompt(label_languages=steer_language)
+        if not history:
+            return system, f"Translate this line into {target_name}:\n{source}"
+        if not steer_language:
+            return system, (
                 "Earlier in the meeting, for context only - do not translate "
                 f"these:\n{history}\n\nTranslate this line:\n{source}"
             )
-        else:
-            user = f"Translate this line:\n{source}"
+        # Two changes, and both are about the same thing: the history is the
+        # last text the model reads before answering, and a run of lines all
+        # ending in the same language outweighed a system prompt asking for
+        # the other one. So each history line now says which language it is
+        # in, and the instruction is repeated where the model will read it
+        # last.
+        user = (
+            "Earlier in the meeting, for context only - do not translate "
+            f"these:\n{history}\n\nNow translate the following line "
+            f"into {target_name}, and into {target_name} only:\n{source}"
+        )
         return system, user
 
     def translate(self, source: str, lang_code: str,
@@ -341,7 +379,8 @@ class Translator:
             return self._refuse(source, lang_code, target,
                                 "the language was undecided")
 
-        system, user = self.build_prompt(source, lang_code)
+        system, user = self.build_prompt(source, lang_code,
+                                         self.steer_language)
         try:
             answer = self.backend.complete(system, user)
         except TranslationError as exc:
@@ -376,11 +415,27 @@ class Translator:
             # Showing it would put Japanese in the Vietnamese column, which
             # reads as a translation until someone tries to read it.
             return f"the answer is not written in {target or 'the target'}"
-        if len(text) > len(source) * self.max_expansion:
+        if len(text) > self.length_limit(source, target):
             # Not a translation any more: the model started explaining, or
             # looped, or answered a question nobody asked.
             return "the answer is far longer than the sentence"
         return ""
+
+    def length_limit(self, source: str, target: str) -> float:
+        """How long an answer may run before it stops being a translation.
+
+        Per direction, because Japanese carries the same meaning in far fewer
+        characters than Vietnamese: measured over real pairs, ja -> vi ran up
+        to 4.44x while vi -> ja never passed 0.70x. The slack keeps short
+        sources out of it - at nine characters a ratio is mostly noise, and a
+        shared limit refused a correct translation of あれこれ今下の方に.
+        """
+        ratio = self.max_expansion.get(target)
+        if ratio is None:
+            # An unknown target has no measurements behind it; judging it on
+            # a number borrowed from another language pair would be a guess.
+            return float("inf")
+        return len(source) * ratio + self.expansion_slack
 
     def _refuse(self, source: str, lang_code: str, target: str,
                 reason: str, raw: str = "") -> Translation:

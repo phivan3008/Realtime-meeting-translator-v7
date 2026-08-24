@@ -128,7 +128,27 @@ def test_the_history_prompt_names_the_speaker_and_the_language():
     context.remember(turn("xin chào", "こんにちは"))
     text = context.as_prompt()
     assert "Speaker_01 (vi): xin chào" in text
+    assert "-> (ja) こんにちは" in text
+
+
+def test_every_history_line_says_which_language_its_translation_is_in():
+    """Unlabelled, the history reads as worked examples that all end in the
+    same language, and the model follows that over the system prompt."""
+    context = TranslationContext()
+    context.remember(turn("xin chào", "こんにちは"))
+    context.remember(Turn("Speaker_02", "ja", "はい。", "Vâng."))
+    text = context.as_prompt()
+    assert "-> (ja) こんにちは" in text
+    assert "-> (vi) Vâng." in text
+
+
+def test_the_old_unlabelled_history_can_still_be_built():
+    """Kept so the real test can put both versions to a live model."""
+    context = TranslationContext()
+    context.remember(turn("xin chào", "こんにちは"))
+    text = context.as_prompt(label_languages=False)
     assert "-> こんにちは" in text
+    assert "(ja)" not in text
 
 
 def test_an_empty_history_contributes_nothing():
@@ -270,8 +290,14 @@ def test_a_backend_that_is_down_is_reported_not_raised():
 
 def test_the_expansion_limit_is_configurable():
     with pytest.raises(ValueError):
-        make("x", max_expansion=1.0)
+        make("x", max_expansion=0.0)
     assert make("あ" * 20, max_expansion=10.0).translate("xin chào", "vi").ok
+
+
+def test_a_single_number_still_applies_to_both_directions():
+    """The old signature, so a caller passing one float is not surprised."""
+    translator = make("x", max_expansion=3.0)
+    assert translator.max_expansion == {"vi": 3.0, "ja": 3.0}
 
 
 # ---------------------------------------------------------------------------
@@ -541,3 +567,67 @@ def test_a_good_translation_still_passes_through_the_translator():
         "\u306f\u3044\u3001\u627f\u77e5\u3057\u307e\u3057\u305f\u3002", "ja")
     assert result.ok
     assert result.text == answer
+
+
+# ---------------------------------------------------------------------------
+# How long an answer may run, per direction
+#
+# Measured over 21 real pairs. Japanese carries the same meaning in far fewer
+# characters, so one shared limit was wrong both ways at once: it refused a
+# correct Vietnamese translation of あれこれ今下の方に at 4.44x, and in the
+# other direction it sat so far above every real answer that nothing could
+# reach it.
+# ---------------------------------------------------------------------------
+#: (source length, output length) taken from real translations.
+MEASURED_JA_TO_VI = [(4, 5), (6, 22), (6, 7), (7, 9), (7, 15), (9, 40),
+                     (10, 16), (10, 17), (13, 23), (19, 35), (20, 45),
+                     (21, 74), (23, 78), (26, 55), (29, 53)]
+MEASURED_VI_TO_JA = [(33, 23), (45, 20), (46, 24), (47, 32), (58, 32),
+                     (59, 30)]
+
+
+@pytest.mark.parametrize("src_len,out_len", MEASURED_JA_TO_VI)
+def test_every_measured_japanese_to_vietnamese_pair_fits(src_len, out_len):
+    assert out_len <= make("x").length_limit("x" * src_len, "vi")
+
+
+@pytest.mark.parametrize("src_len,out_len", MEASURED_VI_TO_JA)
+def test_every_measured_vietnamese_to_japanese_pair_fits(src_len, out_len):
+    assert out_len <= make("x").length_limit("x" * src_len, "ja")
+
+
+def test_the_fragment_that_the_shared_limit_refused_now_survives():
+    """あれこれ今下の方に -> 'Đó là những gì đang ở phía dưới hiện tại'.
+
+    Nine characters in, forty out: 4.44x, and correct.
+    """
+    source = "\u3042\u308c\u3053\u308c\u4eca\u4e0b\u306e\u65b9\u306b"
+    answer = ("\u0110\u00f3 l\u00e0 nh\u1eefng g\u00ec \u0111ang \u1edf "
+              "ph\u00eda d\u01b0\u1edbi hi\u1ec7n t\u1ea1i")
+    assert len(answer) / len(source) > 4.0        # the old limit
+    assert make(answer).translate(source, "ja").ok
+
+
+def test_a_looping_answer_is_still_refused():
+    """The guard exists for this, and must keep working after the change."""
+    source = "\u305d\u306e\u4ef6\u306b\u3064\u3044\u3066\u306f\u3001\u6765\u9031\u307e\u3067\u306b\u56de\u7b54\u3057\u307e\u3059\u3002"
+    looping = "V\u1ec1 v\u1ea5n \u0111\u1ec1 n\u00e0y, t\u00f4i s\u1ebd tr\u1ea3 l\u1eddi. " * 6
+    result = make(looping).translate(source, "ja")
+    assert not result.ok
+    assert result.reason == "the answer is far longer than the sentence"
+
+
+def test_a_rambling_japanese_answer_is_now_reachable():
+    """Under the shared 4.0 a Japanese answer had to run six times the length
+    of a correct one before anything noticed."""
+    source = "C\u00e1i ph\u1ea7n \u0111\u00f3 ch\u01b0a m\u00f4 t\u1ea3 \u1edf b\u00ean n\u00e0y."
+    correct_length = 23
+    rambling = "\u3042" * (correct_length * 4)
+    assert len(rambling) / len(source) < 4.0      # the old limit never fired
+    assert not make(rambling).translate(source, "vi").ok
+
+
+def test_an_unknown_target_is_not_judged_on_length():
+    """No measurements exist for it, and borrowing another pair's number
+    would be a guess."""
+    assert make("x").length_limit("x" * 10, "de") == float("inf")

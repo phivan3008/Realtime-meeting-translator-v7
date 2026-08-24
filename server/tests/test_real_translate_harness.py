@@ -325,3 +325,66 @@ def test_the_raw_answer_is_printed_for_every_refusal(capsys):
     harness.check_meeting_refusals(Echoing(), harness.Report())
     assert capsys.readouterr().out.count("raw    :") == len(
         harness.MEETING_REFUSALS)
+
+
+# ---------------------------------------------------------------------------
+# Does the history steer the output language?
+# ---------------------------------------------------------------------------
+def test_the_steering_history_is_all_one_direction():
+    """The shape that appears to cause it: every translation in the history
+    lands in the language the next sentence is *coming from*."""
+    assert {turn.lang_code for turn in harness.STEERING_HISTORY} == {"vi"}
+    assert harness.STEERED_SENTENCE[0] == "ja"
+
+
+def test_a_model_that_ignores_the_history_passes():
+    report = harness.Report()
+    harness.check_history_does_not_steer_the_language(StubClient(), report)
+    assert report.failed == []
+
+
+def test_a_model_steered_by_the_unlabelled_history_is_caught():
+    """Answers in whichever language the history's last translation used,
+    unless the prompt names the target after the history."""
+
+    class Steered:
+        def complete(self, system: str, user: str) -> str:
+            if "and into Vietnamese only" in user:
+                return "Đang làm ở đây à?"
+            return "ここに作っているのですか?"
+
+    report = harness.Report()
+    harness.check_history_does_not_steer_the_language(Steered(), report)
+    assert report.failed == []       # the new prompt gets it right
+
+
+def test_a_model_steered_by_both_prompts_is_caught():
+    """If the new prompt does not fix it either, the check has to fail."""
+
+    class AlwaysJapanese:
+        def complete(self, system: str, user: str) -> str:
+            return "ここに作っているのですか?"
+
+    report = harness.Report()
+    harness.check_history_does_not_steer_the_language(AlwaysJapanese(), report)
+    assert "The history does not steer the output language" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_an_old_prompt_that_also_works_is_reported_as_such(capsys):
+    """Then the diagnosis was wrong, and the change is unjustified. Saying so
+    matters more than keeping the change."""
+    class Working:
+        def complete(self, system: str, user: str) -> str:
+            return "Đang làm ở đây à?"
+
+    harness.check_history_does_not_steer_the_language(Working(), harness.Report())
+    assert "the old prompt answered correctly too" in capsys.readouterr().out
+
+
+def test_both_answers_are_printed(capsys):
+    harness.check_history_does_not_steer_the_language(StubClient(), harness.Report())
+    out = capsys.readouterr().out
+    assert "old prompt:" in out
+    assert "new prompt:" in out
