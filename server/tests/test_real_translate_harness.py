@@ -245,13 +245,19 @@ def test_main_runs_and_passes(monkeypatch, capsys):
 
 
 def test_main_survives_a_chatty_model(monkeypatch, capsys):
-    """The cleaning happens before any check sees the answer."""
+    """The cleaning happens before any check sees the answer.
+
+    Only the ``out:`` lines are examined. A ``raw:`` line is *supposed* to
+    carry the model's preface verbatim - that is what it is for.
+    """
     monkeypatch.setattr(harness, "VllmClient",
                         lambda **k: StubClient(chatty=True))
     monkeypatch.setattr(sys, "argv", ["x"])
     assert harness.main() == 0
-    assert "Here is the translation" not in capsys.readouterr().out.split(
-        "Checks:")[1]
+    answers = [line for line in capsys.readouterr().out.splitlines()
+               if line.strip().startswith("out:")]
+    assert answers, "nothing was translated at all"
+    assert not [line for line in answers if "Here is the translation" in line]
 
 
 def test_main_reports_a_server_that_is_not_running(monkeypatch, capsys):
@@ -262,3 +268,60 @@ def test_main_reports_a_server_that_is_not_running(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["x"])
     assert harness.main() == 2
     assert "No translation server" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Sentences a real meeting lost
+# ---------------------------------------------------------------------------
+def test_the_refusal_list_holds_both_kinds():
+    """Mangled input and a complete sentence, or the check cannot separate
+    the model's fault from the ASR's."""
+    notes = [note for _lang, _source, note in harness.MEETING_REFUSALS]
+    assert any(note.startswith("a complete") for note in notes)
+    assert any(not note.startswith("a complete") for note in notes)
+
+
+def test_a_working_model_passes_the_refusal_check():
+    report = harness.Report()
+    harness.check_meeting_refusals(StubClient(), report)
+    assert report.failed == []
+
+
+def test_a_model_that_refuses_the_complete_sentence_is_caught():
+    class Echoing:
+        """Hands every sentence straight back."""
+
+        def complete(self, system: str, user: str) -> str:
+            return user.strip().splitlines()[-1]
+
+    report = harness.Report()
+    harness.check_meeting_refusals(Echoing(), report)
+    assert "A complete sentence is not refused" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_the_mangled_sentences_alone_do_not_fail_the_check():
+    """A model cannot translate what the ASR never heard, and blaming it for
+    that would make this check impossible to pass."""
+    class OnlyTranslatesTheQuestion:
+        def complete(self, system: str, user: str) -> str:
+            line = user.strip().splitlines()[-1]
+            if "\u3053\u3053\u306b\u4f5c\u3063\u3066" in line:
+                return "\u0110ang t\u1ea1o \u1edf \u0111\u00e2y \u00e0?"
+            return line
+
+    report = harness.Report()
+    harness.check_meeting_refusals(OnlyTranslatesTheQuestion(), report)
+    assert report.failed == []
+
+
+def test_the_raw_answer_is_printed_for_every_refusal(capsys):
+    """The reason this list exists at all."""
+    class Echoing:
+        def complete(self, system: str, user: str) -> str:
+            return user.strip().splitlines()[-1]
+
+    harness.check_meeting_refusals(Echoing(), harness.Report())
+    assert capsys.readouterr().out.count("raw    :") == len(
+        harness.MEETING_REFUSALS)

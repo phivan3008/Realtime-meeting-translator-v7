@@ -123,7 +123,35 @@ CONTEXT_HISTORY = [
     Turn("Speaker_02", "ja", "ビルドにはどのくらい時間がかかりますか。",
          "Bản dựng mất khoảng bao lâu?"),
 ]
-CONTEXT_SENTENCE = ("ja", "終わりました。")
+CONTEXT_SENTENCE = ("ja", "\u7d42\u308f\u308a\u307e\u3057\u305f\u3002")
+
+# Sentences the pipeline actually committed and the translator then refused,
+# on the third end-to-end run. Six of ten sentences came back translated; the
+# other four are here, so the cause can be found without a microphone.
+#
+# Two kinds are mixed on purpose, because the point is to tell them apart:
+#
+#   * nothing to translate - the ASR misheard the sentence outright, or the
+#     max-duration cut left half of one. A model handing those back is doing
+#     the only sensible thing, and refusing them is correct.
+#   * a complete sentence refused anyway - ここに作っているの? is an ordinary
+#     Japanese question, and there is no honest reason for it to come back
+#     in Japanese.
+#
+# Whatever the model actually said is printed under each one. That is the
+# whole reason this list exists.
+MEETING_REFUSALS = [
+    ("ja", "\u3053\u3053\u306b\u4f5c\u3063\u3066\u3044\u308b\u306e?",
+     "a complete question; refused as 'not written in vi'"),
+    ("ja", "\u3042\u308c\u3053\u308c\u4eca\u4e0b\u306e\u65b9\u306b",
+     "cut mid-sentence by the 7 s limit"),
+    ("ja", "\u3042\u3089\u305f\u3063",
+     "four characters, no meaning"),
+    ("vi", "M\u00ecnh \u0111\u1ea9u g\u00f3i c\u1ee7a b\u00e1c t\u1edbi, "
+           "m\u00ecnh \u0111\u00e1nh l\u1ea1i s\u1ed1 th\u00ec n\u00f3 "
+           "nh\u1ea3y b\u1ecdn gi\u1ea3 trong n\u00e0y.",
+     "the ASR misheard the whole sentence"),
+]
 
 
 def attempt(translator: Translator, lang_code: str, source: str) -> Attempt:
@@ -243,6 +271,38 @@ def check_context(client, report: Report) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def check_meeting_refusals(client, report: Report) -> None:
+    """Replay the sentences a real meeting lost, and show what the model said.
+
+    No check here can decide whether refusing a mangled sentence was right -
+    that needs a person. What it can do is separate the mangled ones from the
+    complete one, and put the model's own words next to each.
+    """
+    print("\n  Sentences a real meeting lost - read the raw answers:")
+    translator = Translator(backend=client)
+    complete_and_refused = []
+    for lang, source, note in MEETING_REFUSALS:
+        result = translator.translate(source, lang)
+        print(f"\n    [{lang} -> {result.target}] {note}")
+        print(f"      in : {source}")
+        if result.ok:
+            print(f"      out: {result.text}")
+        else:
+            print(f"      refused: {result.reason}")
+            print(f"      raw    : {result.raw[:300]!r}")
+            if note.startswith("a complete"):
+                complete_and_refused.append((source, result))
+
+    report.add(
+        "A complete sentence is not refused",
+        not complete_and_refused,
+        f"{[(s[:20], r.reason) for s, r in complete_and_refused]}",
+    )
+    print("    The mangled ones are expected to fail; a model cannot "
+          "translate a sentence the ASR did not hear. The complete one has "
+          "no such excuse.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="", help="vLLM base URL")
@@ -273,6 +333,7 @@ def main() -> int:
         check_latency(attempts, report)
         check_repeatable(lambda: Translator(backend=client), report)
         check_context(client, report)
+        check_meeting_refusals(client, report)
 
         print(f"\n  Translator stats: {translator.stats.seen} seen, "
               f"{translator.stats.translated} translated, "
