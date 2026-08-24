@@ -44,7 +44,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from server.config import HISTORY_STYLE, TRANSLATE_HISTORY  # noqa: E402
+from server.config import (  # noqa: E402
+    HISTORY_STYLE,
+    SHORT_LINE_HINT_ENABLED,
+    TRANSLATE_HISTORY,
+)
 from server.pipeline.translate import (  # noqa: E402
     TranslationContext,
     TranslationError,
@@ -196,6 +200,58 @@ CUT_SENTENCES = [
     # one the run did translate. If the cut were the cause, it would fail too.
     ("vi", "các FCG có tặng một cái thêm kết cho cái xong thì bác muốn tất cả các"),
 ]
+
+
+# Short lines the pipeline committed, with what happened to each on the run
+# they came from. A meeting is mostly these.
+#
+# はい is the one that failed - handed straight back, and it is a whole turn
+# of a Japanese meeting and one of the commonest lines in one. The others
+# translated on the same run, which is what says this is about single words
+# rather than short lines in general.
+SHORT_LINES = [
+    ("ja", "はい", "handed back untranslated"),
+    ("ja", "えっ", "translated: Eh?"),
+    ("ja", "いや違います", "translated: Không, tôi nhầm rồi"),
+    ("ja", "それじゃないの", "translated: Không phải vậy đâu"),
+    ("vi", "Cảm ơn.", "translated: ありがとうございます。"),
+    ("vi", "review kết quả hôm nay", "translated: 今日の結果をレビューする"),
+]
+
+
+def check_short_lines(client, report: Report) -> None:
+    """Does a one-word turn survive?
+
+    Both prompts, so the hint has to earn its place: if the plain prompt
+    translates everything too, the hint is not doing anything and should go.
+    """
+    print("\n  Short lines, with and without the one-word hint:")
+    refused = {True: [], False: []}
+    for lang, source, note in SHORT_LINES:
+        target = "vi" if lang == "ja" else "ja"
+        print(f"\n    [{lang} -> {target}] {source}   ({note})")
+        for hint in (False, True):
+            translator = Translator(backend=client, short_line_hint=hint)
+            result = translator.translate(source, lang)
+            label = "with hint" if hint else "plain    "
+            if result.ok:
+                print(f"      {label}: {result.text}")
+            else:
+                refused[hint].append(source)
+                print(f"      {label}: REFUSED ({result.reason}) "
+                      f"raw={result.raw[:60]!r}")
+
+    in_use = SHORT_LINE_HINT_ENABLED
+    report.add("Every short line comes back translated",
+               not refused[in_use],
+               f"{len(refused[in_use])} refused: {refused[in_use][:3]}")
+
+    print(f"\n    plain refused {len(refused[False])}, "
+          f"with the hint {len(refused[True])}")
+    if not refused[False]:
+        print("    NOTE: the plain prompt translated them all. The hint is "
+              "then not doing anything on this run and should be removed "
+              "rather than kept on faith.")
 
 
 def attempt(translator: Translator, lang_code: str, source: str) -> Attempt:
@@ -459,6 +515,7 @@ def main() -> int:
         check_repeatable(lambda: Translator(backend=client), report)
         check_context(client, report)
         check_what_the_history_does(client, report)
+        check_short_lines(client, report)
         check_meeting_refusals(client, report)
 
         print(f"\n  Translator stats: {translator.stats.seen} seen, "

@@ -56,6 +56,7 @@ from server.config import (
     TRANSLATE_BASE_URL,
     TRANSLATE_ENABLE_THINKING,
     HISTORY_STYLE,
+    SHORT_LINE_HINT_ENABLED,
     TRANSLATE_HISTORY,
     TRANSLATE_EXPANSION_SLACK,
     TRANSLATE_MAX_EXPANSION,
@@ -335,6 +336,16 @@ SYSTEM_PROMPT = (
     "terms exactly as they are. Never repeat the line back in {source_name}."
 )
 
+#: Appended to the system prompt. A meeting is mostly short lines, and the
+#: model handed はい straight back - it is a whole turn of a Japanese meeting
+#: and one of the commonest lines there is. Other short lines translated fine
+#: on the same run (えっ -> Eh?, いや違います -> Không, tôi nhầm rồi), so this
+#: is about single words rather than length as such.
+SHORT_LINE_HINT = (
+    " A line of one word, an interjection or a filler is still a line: write "
+    "it in {target_name} too, never leave it as it was."
+)
+
 
 class Translator:
     """Turn one committed sentence into the other language."""
@@ -346,6 +357,7 @@ class Translator:
         max_expansion: dict[str, float] | float = TRANSLATE_MAX_EXPANSION,
         expansion_slack: int = TRANSLATE_EXPANSION_SLACK,
         history_style: str = HISTORY_STYLE,
+        short_line_hint: bool = SHORT_LINE_HINT_ENABLED,
     ) -> None:
         if isinstance(max_expansion, (int, float)):
             max_expansion = {code: float(max_expansion)
@@ -359,10 +371,12 @@ class Translator:
         if history_style not in TranslationContext.STYLES:
             raise ValueError(f"unknown history style {history_style!r}")
         self.history_style = history_style
+        self.short_line_hint = short_line_hint
         self.stats = TranslationStats()
 
     def build_prompt(self, source: str, lang_code: str,
-                     history_style: str = "") -> tuple[str, str]:
+                     history_style: str = "",
+                     short_line_hint: Optional[bool] = None) -> tuple[str, str]:
         """The system and user messages, so a test can read them.
 
         ``history_style`` overrides this translator's own, so
@@ -372,9 +386,10 @@ class Translator:
         which is how the diagnosis was confirmed rather than assumed.
         """
         style = history_style or self.history_style
+        hint = self.short_line_hint if short_line_hint is None else short_line_hint
         target = target_language(lang_code)
         target_name = LANGUAGE_NAMES.get(target, "the other language")
-        system = SYSTEM_PROMPT.format(
+        system = (SYSTEM_PROMPT + (SHORT_LINE_HINT if hint else "")).format(
             source_name=LANGUAGE_NAMES.get(lang_code, "the source language"),
             target_name=target_name,
         )

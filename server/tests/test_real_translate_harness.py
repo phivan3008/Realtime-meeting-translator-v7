@@ -442,3 +442,73 @@ def test_every_variant_is_printed(capsys):
     out = capsys.readouterr().out
     for variant in harness.HISTORY_VARIANTS:
         assert variant in out
+
+
+# ---------------------------------------------------------------------------
+# Short lines
+# ---------------------------------------------------------------------------
+def test_the_short_lines_include_the_one_that_failed():
+    sources = [source for _lang, source, _note in harness.SHORT_LINES]
+    assert "\u306f\u3044" in sources
+
+
+def test_the_short_lines_include_ones_that_worked():
+    """Otherwise there is nothing to say the trouble is single words rather
+    than short lines in general."""
+    notes = [note for _lang, _source, note in harness.SHORT_LINES]
+    assert sum(1 for note in notes if note.startswith("translated")) >= 2
+
+
+def test_the_short_lines_cover_both_directions():
+    assert {lang for lang, _s, _n in harness.SHORT_LINES} == {"vi", "ja"}
+
+
+def test_a_model_that_translates_short_lines_passes():
+    report = harness.Report()
+    harness.check_short_lines(StubClient(), report)
+    assert report.failed == []
+
+
+def test_a_model_that_hands_a_one_word_line_back_is_caught():
+    """Only when the hint fails to help - the hint is what is in use."""
+    class HandsBackShortLines:
+        def complete(self, system: str, user: str) -> str:
+            line = user.strip().splitlines()[-1]
+            if len(line) <= 3:
+                return line
+            return ("\u3053\u3093\u306b\u3061\u306f"
+                    if "Write it in Japanese" in system else "Xin ch\u00e0o")
+
+    report = harness.Report()
+    harness.check_short_lines(HandsBackShortLines(), report)
+    assert "Every short line comes back translated" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_hint_that_rescues_the_line_passes():
+    """The hint doing its job is the outcome this change is betting on."""
+    class NeedsTheHint:
+        def complete(self, system: str, user: str) -> str:
+            line = user.strip().splitlines()[-1]
+            if len(line) <= 3 and "still a line" not in system:
+                return line
+            return ("\u3053\u3093\u306b\u3061\u306f"
+                    if "Write it in Japanese" in system else "V\u00e2ng")
+
+    report = harness.Report()
+    harness.check_short_lines(NeedsTheHint(), report)
+    assert report.failed == []
+
+
+def test_a_hint_that_changes_nothing_is_reported_as_such(capsys):
+    """Then it should be removed rather than kept on faith."""
+    harness.check_short_lines(StubClient(), harness.Report())
+    assert "the plain prompt translated them all" in capsys.readouterr().out
+
+
+def test_both_prompts_are_tried(capsys):
+    harness.check_short_lines(StubClient(), harness.Report())
+    out = capsys.readouterr().out
+    assert "plain    :" in out
+    assert "with hint:" in out

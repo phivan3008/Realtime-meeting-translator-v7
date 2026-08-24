@@ -316,6 +316,13 @@ TRANSLATE_HISTORY = 3
 # answers still change with the history, they just stop copying its language.
 HISTORY_STYLE = "sources"
 
+# Whether the system prompt spells out that a one-word line is still a line.
+# はい came back as はい on the sixth end-to-end run - a whole turn of a
+# Japanese meeting, and one of the commonest lines in one. Longer short lines
+# on the same run were fine (えっ -> Eh?, いや違います -> Không, tôi nhầm rồi),
+# so it is single words the model treats as nothing to do.
+SHORT_LINE_HINT_ENABLED = True
+
 # A translation runs a little longer than its source, never many times longer.
 # Far past this and the model has started explaining itself or looping.
 #
