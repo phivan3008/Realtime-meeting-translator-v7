@@ -210,8 +210,13 @@ def make_partial(speaker_id: str, lang_code: str, transcript: str) -> str:
 
 
 def make_final(speaker_id: str, lang_code: str, transcript: str,
-               translation: str) -> str:
-    """DESIGN.md section 4: the committed sentence plus its translation."""
+               translation: str, translation_reason: str = "") -> str:
+    """DESIGN.md section 4: the committed sentence plus its translation.
+
+    ``translation_reason`` carries why there is no translation when there is
+    none. An empty translation with no reason attached is a silent failure,
+    and this project has already spent a round trip on one.
+    """
     return json.dumps(
         {
             "type": ServerMessage.FINAL.value,
@@ -219,6 +224,7 @@ def make_final(speaker_id: str, lang_code: str, transcript: str,
             "lang_code": lang_code,
             "transcript": transcript,
             "translation": translation,
+            "translation_reason": translation_reason,
         },
         ensure_ascii=False,
     )

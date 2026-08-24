@@ -442,9 +442,11 @@ def test_each_missing_stage_is_named(flag, name):
 # Transcripts and translations
 # ---------------------------------------------------------------------------
 def final(transcript: str = "xin chào", translation: str = "こんにちは",
-          speaker: str = "Speaker_01", lang: str = "vi") -> dict:
+          speaker: str = "Speaker_01", lang: str = "vi",
+          reason: str = "") -> dict:
     return {"type": "final", "speaker_id": speaker, "lang_code": lang,
-            "transcript": transcript, "translation": translation}
+            "transcript": transcript, "translation": translation,
+            "translation_reason": reason}
 
 
 def partial(transcript: str = "xin", lang: str = "vi") -> dict:
@@ -476,8 +478,92 @@ def test_a_meeting_with_no_committed_sentence_is_caught():
 def test_an_untranslated_sentence_is_caught():
     report = harness.Report()
     harness.check_transcripts(
-        collected_of((1.0, partial()), (2.0, final(translation=""))), report)
+        collected_of((1.0, partial()),
+                     (2.0, final(translation="", reason="no translation server"))),
+        report)
     assert "Committed sentences come back translated" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_an_untranslated_sentence_with_no_reason_is_caught_twice():
+    """Blank plus silent is worse than blank: it hides why."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()), (2.0, final(translation=""))), report)
+    failed = [c.name for c in report.failed]
+    assert "Committed sentences come back translated" in failed
+    assert "Every untranslated sentence says why" in failed
+
+
+def test_the_refusal_reason_reaches_the_screen(capsys):
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(translation="",
+                                 reason="the answer is not written in ja"))),
+        harness.Report())
+    out = capsys.readouterr().out
+    assert "NOT translated: the answer is not written in ja" in out
+
+
+# ---------------------------------------------------------------------------
+# The answer has to be in the other language's script
+# ---------------------------------------------------------------------------
+def test_a_japanese_sentence_answered_in_japanese_is_caught():
+    """The real one: はい、今の画面の came back as はい、現在の画面の, and
+    every other check passed it."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(lang="ja", transcript="はい、今の画面の",
+                                 translation="はい、現在の画面の"))),
+        report)
+    assert "No translation came back in the language it started in" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_vietnamese_sentence_answered_in_vietnamese_is_caught():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(lang="vi", transcript="Cái đó thì mình chưa xem.",
+                                 translation="Cái đó mình chưa xem."))),
+        report)
+    assert "No translation came back in the language it started in" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_japanese_answer_keeping_a_latin_initialism_is_accepted():
+    """Measured at 0.86 on the real run; the threshold has to leave room."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(lang="vi",
+                                 transcript="các FCG có tặng một cái thêm",
+                                 translation="FCG が贈呈する追加分が完了したら"))),
+        report)
+    assert report.failed == []
+
+
+def test_a_vietnamese_answer_keeping_a_latin_word_is_accepted():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(lang="ja", transcript="あのタスクの",
+                                 translation="Task đó"))),
+        report)
+    assert report.failed == []
+
+
+def test_a_numeric_answer_is_not_judged_on_script():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(lang="ja", transcript="15", translation="15"))),
+        report)
+    assert "No translation came back in the language it started in" not in [
         c.name for c in report.failed
     ]
 

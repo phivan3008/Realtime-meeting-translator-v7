@@ -316,6 +316,7 @@ class ServerSession:
             )
             if transcript is not None and transcript.has_text:
                 translation = ""
+                translation_reason = ""
                 if self.translator is not None:
                     # Runs inline, which puts an LLM call on the path that also
                     # reads audio. server/tests_real/test_real_translate.py
@@ -330,6 +331,7 @@ class ServerSession:
                     translated = self.translator.translate(
                         transcript.text, transcript.lang_code, speaker_id)
                     translation = translated.text
+                    translation_reason = translated.reason
                     if translated.ok:
                         self.stats.translations += 1
                 messages.append(make_final(
@@ -337,6 +339,7 @@ class ServerSession:
                     lang_code=transcript.lang_code,
                     transcript=transcript.text,
                     translation=translation,
+                    translation_reason=translation_reason,
                 ))
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)

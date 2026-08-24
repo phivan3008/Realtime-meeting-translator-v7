@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 import urllib.error
 import urllib.request
 from collections import deque
@@ -56,6 +57,7 @@ from server.config import (
     TRANSLATE_ENABLE_THINKING,
     TRANSLATE_HISTORY,
     TRANSLATE_MAX_EXPANSION,
+    TRANSLATE_MAX_WRONG_SCRIPT,
     TRANSLATE_MAX_TOKENS,
     TRANSLATE_MODEL,
     TRANSLATE_PAIR,
@@ -149,6 +151,46 @@ def looks_like_echo(source: str, text: str) -> bool:
     """
     return (_IGNORABLE.sub("", source).casefold()
             == _IGNORABLE.sub("", text).casefold())
+
+
+def japanese_ratio(text: str) -> Optional[float]:
+    """Fraction of the letters that are kana or kanji.
+
+    ``None`` when there are no letters to judge - a bare number translates to
+    itself, and refusing that would be refusing a correct answer.
+
+    Vietnamese and Japanese do not share a script, which makes this a cheap and
+    near-certain test of whether a translation came out in the language it was
+    asked for. It is not a language detector: it cannot tell Vietnamese from
+    English, so ``プレー`` coming back as ``Play`` still passes.
+    """
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return None
+    japanese = sum(
+        1 for c in letters
+        if unicodedata.name(c, "").startswith(("HIRAGANA", "KATAKANA", "CJK"))
+    )
+    return japanese / len(letters)
+
+
+def wrong_script(text: str, target: str,
+                 limit: float = TRANSLATE_MAX_WRONG_SCRIPT) -> bool:
+    """Is this answer written in the wrong language's script?
+
+    The end-to-end run produced ``はい、今の画面の`` -> ``はい、現在の画面の``:
+    a Japanese sentence answered in Japanese. It passed every guard, because
+    the two strings differ and neither is longer than the other, and the check
+    that should have caught it did not exist.
+    """
+    ratio = japanese_ratio(text)
+    if ratio is None:
+        return False
+    if target == "ja":
+        return ratio < limit
+    if target == "vi":
+        return ratio > limit
+    return False
 
 
 def target_language(lang_code: str) -> str:
@@ -309,7 +351,7 @@ class Translator:
             return result
 
         text = clean(answer)
-        reason = self._refuse_reason(source, text)
+        reason = self._refuse_reason(source, text, target)
         if reason:
             return self._refuse(source, lang_code, target, reason, answer)
 
@@ -321,13 +363,19 @@ class Translator:
         )
         return result
 
-    def _refuse_reason(self, source: str, text: str) -> str:
+    def _refuse_reason(self, source: str, text: str,
+                       target: str = "") -> str:
         if not text:
             return "the model returned nothing"
         if looks_like_echo(source, text):
             # Handed back untranslated. Showing it would put the same sentence
             # in both columns and read as though the translation succeeded.
             return "the model returned the sentence untranslated"
+        if wrong_script(text, target):
+            # Answered in the language it was asked to translate *out* of.
+            # Showing it would put Japanese in the Vietnamese column, which
+            # reads as a translation until someone tries to read it.
+            return f"the answer is not written in {target or 'the target'}"
         if len(text) > len(source) * self.max_expansion:
             # Not a translation any more: the model started explaining, or
             # looped, or answered a question nobody asked.

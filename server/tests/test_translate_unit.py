@@ -26,9 +26,12 @@ from server.pipeline.translate import (
     Translator,
     Turn,
     clean,
+    japanese_ratio,
     looks_like_echo,
     target_language,
+    wrong_script,
 )
+from server.config import TRANSLATE_MAX_WRONG_SCRIPT
 
 
 class StubBackend:
@@ -411,3 +414,130 @@ def test_the_prompt_no_longer_offers_to_repeat_the_line():
     system, _user = make().build_prompt("xin chào", "vi")
     assert "repeat it" not in system.lower()
     assert "never repeat the line back" in system.lower()
+
+
+# ---------------------------------------------------------------------------
+# The answer has to be in the target language's script
+#
+# Every pair below was produced by the 60 s end-to-end run or by the Module 10
+# translation test. They are the measurements the threshold was chosen from,
+# kept here so that changing it has to face them.
+#
+# Written as escapes on purpose: a heredoc has mangled non-ASCII in this repo
+# more than once, and a test whose data quietly became mojibake still passes.
+# ---------------------------------------------------------------------------
+REAL_INTO_VIETNAMESE = [
+    ("\u30d7\u30ec\u30fc", "Play"),
+    ("\u3042\u306e\u30bf\u30b9\u30af\u306e", "Task \u0111\u00f3"),
+    ("\u5ba2\u6307\u793a\u3055\u3093\u304c\u4f5c\u3063\u3066\u304f\u308c\u305f"
+     "\u30bf\u30b9\u30af\u306e\u30b5\u30de\u30ea\u30da\u30fc\u30b8\u306e"
+     "\u30d5\u30a9\u30fc\u30de\u30c3\u30c8\u304c",
+     "Format c\u1ee7a trang t\u00f3m t\u1eaft cho c\u00e1c task \u0111\u01b0"
+     "\u1ee3c kh\u00e1ch ch\u1ec9 \u0111\u1ecbnh t\u1ea1o ra l\u00e0"),
+    ("\u3042\u308b\u3068\u601d\u3046\u306e\u3067",
+     "T\u00f4i ngh\u0129 l\u00e0 v\u1eady"),
+    ("\u3053\u306e\u8fba\u306e\u30bf\u30b9\u30af\u3082\u5168\u90e8\u3042\u306e"
+     "\u30d5\u30a9\u30fc\u30de\u30c3\u30c8\u4f5c\u308a\u305f\u3044\u306a\u3068"
+     "\u601d\u3063\u3066\u308b\u3093\u3067\u3059\u3088\u306d",
+     "T\u00f4i c\u0169ng mu\u1ed1n t\u1ea1o ra format t\u01b0\u01a1ng t\u1ef1 "
+     "cho t\u1ea5t c\u1ea3 c\u00e1c task \u1edf khu v\u1ef1c n\u00e0y."),
+    ("\u306f\u3044\u3001\u627f\u77e5\u3057\u307e\u3057\u305f\u3002",
+     "V\u00e2ng, t\u00f4i \u0111\u00e3 hi\u1ec3u."),
+]
+
+REAL_INTO_JAPANESE = [
+    # Opens with a Latin initialism kept as-is: 0.86, the lowest correct
+    # measurement there is, and the reason the threshold is not higher.
+    ("c\u00e1c FCG c\u00f3 t\u1eb7ng m\u1ed9t c\u00e1i th\u00eam h\u1ebft cho "
+     "c\u00e1i xong th\u00ec b\u00e1c mu\u1ed1n t\u1ea5t c\u1ea3 c\u00e1c",
+     "FCG \u304c\u8d08\u5448\u3059\u308b\u8ffd\u52a0\u5206\u304c\u5b8c\u4e86"
+     "\u3057\u305f\u3089\u3001\u3059\u3079\u3066\u3092"),
+    ("C\u00e1i tab n\u00e0y \u0111\u1ec1u vi\u1ebft theo c\u00e1i template "
+     "c\u00f3 \u0111\u01b0\u1ee3c.",
+     "\u3053\u306e\u30bf\u30d6\u306f\u3059\u3079\u3066\u3001\u53d6\u5f97\u3057"
+     "\u305f\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u306b\u5f93\u3063\u3066"
+     "\u8a18\u8ff0\u3055\u308c\u3066\u3044\u307e\u3059\u3002"),
+    ("C\u00e1i \u0111\u00f3 th\u00ec m\u00ecnh ch\u01b0a xem. Kh\u00f4ng "
+     "bi\u1ebft l\u00e0 ph\u1ea3i l\u00e0 m\u1edbi update.",
+     "\u305d\u306e\u4ef6\u306f\u78ba\u8a8d\u3057\u3066\u3044\u307e\u305b\u3093"
+     "\u3002\u66f4\u65b0\u304c\u5fc5\u8981\u304b\u3069\u3046\u304b\u306f"
+     "\u308f\u304b\u308a\u307e\u305b\u3093\u3002"),
+    ("B\u1ea3n d\u1ef1ng th\u1ee9 ba s\u1ebd xong tr\u01b0\u1edbc ng\u00e0y "
+     "15 th\u00e1ng 4.",
+     "\u7b2c 3 \u7248\u306f 4 \u6708 15 \u65e5\u307e\u3067\u306b\u5b8c\u4e86"
+     "\u3057\u307e\u3059\u3002"),
+]
+
+#: The sentence that started this: Japanese in, Japanese out, and every guard
+#: that existed let it through.
+UNTRANSLATED = ("\u306f\u3044\u3001\u4eca\u306e\u753b\u9762\u306e",
+                "\u306f\u3044\u3001\u73fe\u5728\u306e\u753b\u9762\u306e")
+
+
+def test_the_fixtures_survived_being_written_to_disk():
+    """A mangled fixture would make every test below pass for nothing."""
+    assert REAL_INTO_VIETNAMESE[0][0] == "\u30d7\u30ec\u30fc"
+    assert japanese_ratio(REAL_INTO_VIETNAMESE[0][0]) == 1.0
+    assert japanese_ratio("Task \u0111\u00f3") == 0.0
+
+
+@pytest.mark.parametrize("source,text", REAL_INTO_VIETNAMESE)
+def test_a_real_vietnamese_translation_is_accepted(source, text):
+    assert not wrong_script(text, "vi")
+
+
+@pytest.mark.parametrize("source,text", REAL_INTO_JAPANESE)
+def test_a_real_japanese_translation_is_accepted(source, text):
+    assert not wrong_script(text, "ja")
+
+
+def test_the_sentence_that_came_back_in_its_own_language_is_caught():
+    _source, text = UNTRANSLATED
+    assert wrong_script(text, "vi")
+
+
+def test_the_threshold_sits_between_the_two_measured_groups():
+    """Not chosen by taste: correct answers into Vietnamese measured 0.00, and
+    correct answers into Japanese measured 0.86 upwards."""
+    into_vi = [japanese_ratio(text) for _s, text in REAL_INTO_VIETNAMESE]
+    into_ja = [japanese_ratio(text) for _s, text in REAL_INTO_JAPANESE]
+    assert max(into_vi) < TRANSLATE_MAX_WRONG_SCRIPT < min(into_ja)
+
+
+def test_a_bare_number_is_not_judged():
+    """"15" translates to "15", and refusing that refuses a correct answer."""
+    assert japanese_ratio("15") is None
+    assert not wrong_script("15", "ja")
+    assert not wrong_script("15", "vi")
+
+
+def test_an_unknown_target_is_not_judged():
+    assert not wrong_script("anything at all", "")
+
+
+def test_the_guard_refuses_through_the_translator():
+    """End to end through Translator, not just the helper."""
+    source, echoed = UNTRANSLATED
+
+    class Echoing:
+        def complete(self, system: str, user: str) -> str:
+            return echoed
+
+    result = Translator(backend=Echoing()).translate(source, "ja")
+    assert not result.ok
+    assert result.reason == "the answer is not written in vi"
+    # The refusal keeps what it refused, or the next bug costs a round trip.
+    assert result.raw == echoed
+
+
+def test_a_good_translation_still_passes_through_the_translator():
+    answer = "V\u00e2ng, t\u00f4i \u0111\u00e3 hi\u1ec3u."
+
+    class Working:
+        def complete(self, system: str, user: str) -> str:
+            return answer
+
+    result = Translator(backend=Working()).translate(
+        "\u306f\u3044\u3001\u627f\u77e5\u3057\u307e\u3057\u305f\u3002", "ja")
+    assert result.ok
+    assert result.text == answer

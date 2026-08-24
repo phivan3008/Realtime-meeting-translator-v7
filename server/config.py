@@ -253,6 +253,21 @@ TRANSLATE_HISTORY = 3
 TRANSLATE_MAX_EXPANSION = 4.0
 TRANSLATE_MAX_TOKENS = 512
 
+# A translation has to be written in the target language's script. Measured on
+# every translation the 60 s end-to-end run produced, as a fraction of letters
+# that are kana or kanji:
+#
+#     into Vietnamese, correct      0.00  (7 sentences)
+#     into Vietnamese, NOT translated 1.00  (1 sentence: はい、今の画面の
+#                                            came back as はい、現在の画面の)
+#     into Japanese, correct        0.86 - 1.00  (4 sentences)
+#
+# Everything from 0.00 to 0.86 is empty, so this sits in the middle of both
+# gaps rather than on the edge of either. The 0.86 is a Japanese sentence
+# opening with the Latin initialism "FCG", which is what the headroom is for:
+# a name kept as-is must not fail its own translation.
+TRANSLATE_MAX_WRONG_SCRIPT = 0.30
+
 #: Which language each one becomes.
 TRANSLATE_PAIR = {"vi": "ja", "ja": "vi"}
 #: Human names, for the prompt.

@@ -37,25 +37,41 @@ harness = load_harness()
 class StubClient:
     """A model that translates, and that reads the history when given one.
 
-    Answering identically with and without context would model a model that
-    ignores it - which is the thing the context check exists to catch.
+    It answers in the script it was asked for. The earlier version replied
+    with the same Japanese string whichever way it was pointed, which modelled
+    a model that never translates out of Japanese - exactly the failure the
+    wrong-script guard exists to catch, and the guard duly caught the stub.
     """
 
     model = "stub/qwen"
     source = "stub/qwen at http://stub/v1"
 
-    def __init__(self, answer: str = "こんにちは", chatty: bool = False,
+    #: Keyed by the language the prompt asks for.
+    ANSWERS = {"Japanese": "こんにちは",
+               "Vietnamese": "Xin chào"}
+    #: What the history adds, in the same script as the answer.
+    FROM_HISTORY = {"Japanese": "（その件）",
+                    "Vietnamese": " (chuyện đó)"}
+
+    def __init__(self, answer: str = "", chatty: bool = False,
                  ignores_history: bool = False):
         self.answer = answer
         self.chatty = chatty
         self.ignores_history = ignores_history
         self.calls: list[tuple[str, str]] = []
 
+    def target_of(self, system: str) -> str:
+        for name in self.ANSWERS:
+            if f"Write it in {name}" in system:
+                return name
+        raise AssertionError(f"no target language in system prompt: {system!r}")
+
     def complete(self, system: str, user: str) -> str:
         self.calls.append((system, user))
-        answer = self.answer
+        target = self.target_of(system)
+        answer = self.answer if self.answer != "" else self.ANSWERS[target]
         if "do not translate" in user and not self.ignores_history:
-            answer = f"{answer}(その件)"
+            answer = f"{answer}{self.FROM_HISTORY[target]}"
         if self.chatty:
             return f"Sure! Here is the translation: {answer}"
         return answer

@@ -32,10 +32,12 @@ import json
 import statistics
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -349,6 +351,34 @@ def check_utterances(collected: Collected, report: Report) -> None:
     )
 
 
+def japanese_ratio(text: str) -> Optional[float]:
+    """Fraction of the letters that are kana or kanji, or None if no letters.
+
+    Deliberately a copy of the server's: this test has to be able to disagree
+    with the server it is testing.
+    """
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return None
+    japanese = sum(
+        1 for c in letters
+        if unicodedata.name(c, "").startswith(("HIRAGANA", "KATAKANA", "CJK"))
+    )
+    return japanese / len(letters)
+
+
+def in_wrong_script(translation: str, source_lang: str) -> bool:
+    """A Japanese sentence must not come back in Japanese, and vice versa."""
+    ratio = japanese_ratio(translation)
+    if ratio is None:
+        return False
+    if source_lang == "ja":         # target is Vietnamese
+        return ratio > 0.30
+    if source_lang == "vi":         # target is Japanese
+        return ratio < 0.30
+    return False
+
+
 def check_transcripts(collected: Collected, report: Report) -> None:
     """The whole pipeline, judged by what actually reaches the client."""
     partials, finals = collected.partials, collected.finals
@@ -369,7 +399,13 @@ def check_transcripts(collected: Collected, report: Report) -> None:
               f"{payload.get('speaker_id') or '?':<16} "
               f"[{payload.get('lang_code') or '?'}]")
         print(f"        said      : {payload.get('transcript', '')}")
-        print(f"        translated: {payload.get('translation', '') or '(none)'}")
+        if payload.get("translation", "").strip():
+            print(f"        translated: {payload['translation']}")
+        else:
+            # A blank translation with no reason beside it is a silent
+            # failure, and reading one cost this project a round trip.
+            print(f"        NOT translated: "
+                  f"{payload.get('translation_reason') or '(no reason given)'}")
     if not finals:
         print("    (none)")
 
@@ -388,13 +424,31 @@ def check_transcripts(collected: Collected, report: Report) -> None:
                f"{sorted({m.get('speaker_id') for _t, m in finals})}")
 
     translated = [m for _t, m in finals if m.get("translation", "").strip()]
+    refused = [m for _t, m in finals if not m.get("translation", "").strip()]
     report.add("Committed sentences come back translated",
                len(translated) == len(finals),
-               f"{len(translated)}/{len(finals)} translated")
+               f"{len(translated)}/{len(finals)} translated"
+               + (f"; refused: {[m.get('translation_reason') for m in refused]}"
+                  if refused else ""))
+    report.add("Every untranslated sentence says why",
+               all(m.get("translation_reason") for m in refused),
+               f"{sum(1 for m in refused if not m.get('translation_reason'))} "
+               f"silent of {len(refused)}")
     same = [m for m in translated
             if m["translation"].strip() == m["transcript"].strip()]
     report.add("A translation is not just the sentence again", not same,
                f"{len(same)} identical")
+
+    # Checked here as well as on the server, because a test that trusts the
+    # thing it is testing proves nothing. A run once returned
+    # はい、今の画面の as
+    # はい、現在の画面の - Japanese
+    # in, Japanese out - and every check above passed it.
+    wrong = [m for m in translated
+             if in_wrong_script(m["translation"], m.get("lang_code", ""))]
+    report.add("No translation came back in the language it started in",
+               not wrong,
+               f"{[m['translation'][:30] for m in wrong][:2]}")
 
     report.add("Running text appeared before the sentences were committed",
                bool(partials),
