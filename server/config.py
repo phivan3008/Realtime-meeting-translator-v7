@@ -121,10 +121,13 @@ SPEAKER_DEVICE = os.environ.get("SPEAKER_DEVICE", "")
 SPEAKER_CACHE_DIR = os.environ.get("SPEAKER_CACHE_DIR", "models/speaker")
 
 # Cosine similarity above which two voiceprints are called the same person.
-# A guess until server/tests_real/test_real_diarization.py measures the real
-# same-speaker and different-speaker distributions on your recordings; it
-# prints the separation so this can be set from data rather than from taste.
-SPEAKER_MATCH_THRESHOLD = 0.55
+# 0.25 is SpeechBrain's own default for this checkpoint - see the `threshold`
+# argument of SpeakerRecognition.verify_batch - which is a tuned operating
+# point rather than a guess, and a long way below the 0.55 first put here.
+# Still to be confirmed against real single-speaker recordings by
+# server/tests_real/test_real_diarization.py, which measures the two
+# distributions this number has to separate.
+SPEAKER_MATCH_THRESHOLD = 0.25
 
 # Shorter than this there is not enough voice for a trustworthy print, and a
 # wrong speaker label is worse than an honest "unknown".

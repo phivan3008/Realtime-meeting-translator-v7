@@ -4,38 +4,31 @@ MUST RUN ON: the GPU Server pod.
 DO NOT RUN ON: the Dev PC agent loop.
 
 ``DESIGN.md`` section 3.5 labels each sentence with who said it, by cosine
-similarity between ECAPA-TDNN voiceprints. Everything about that rests on one
-number - the threshold - and a threshold picked by taste is a guess. This
-measures the two distributions it has to separate:
+similarity between ECAPA-TDNN voiceprints. Everything rests on one number -
+the threshold - so this measures the two distributions it has to separate:
 
-* **same speaker**: every pair of sentences from one recording
-* **different speakers**: every pair across two recordings of different people
+* **same speaker**: every pair of sentences inside one recording
+* **different speakers**: every pair across two recordings
 
-If those two clouds overlap, no threshold works and the design needs
-rethinking rather than tuning. If they separate, the gap tells you where the
-threshold belongs, and the test prints the midpoint.
+Every ``--voice`` must be ONE person
+------------------------------------
+That is not a detail, it is the whole experiment.  A recording with three
+people in it has no same-speaker pairs to measure, and the numbers that come
+out of one mean nothing at all.
 
-Sentences come from the real chain - VAD, buffer manager, noise filter,
-overlap resolver - so the voiceprints are taken from exactly the audio the
-live server would embed, bleed already attenuated.
+Worse, it also breaks the fallback diagnostic.  The VAD only closes a segment
+after 500 ms of silence, while conversational turns are usually shorter than
+that, so in a multi-speaker recording a single seven-second "sentence" can
+easily hold two people - and then even the two halves of one sentence are not
+the same speaker.  The first version of this test leaned on those halves as
+ground truth and was measuring the very thing it was trying to rule out.
 
-Before any of that means anything, three diagnostics run. A low
-sentence-to-sentence score has three possible causes and the number alone
-cannot tell them apart: the embedder is being called wrongly, the overlap
-resolver is damaging the audio before it is embedded, or the recording holds
-more than one speaker. So the test measures whether the same audio gives the
-same voiceprint, whether the two halves of one sentence match each other
-(they are the same person by definition), and whether shaped audio scores
-worse than raw. Only once those are known does the threshold mean anything.
+So: one voice per file, several files, at least two of them different people.
+A minute of one person talking is enough.
 
 Usage
 -----
-    python3.11 server/tests_real/test_real_diarization.py \\
-        --speech recordings/meeting_speech.wav \\
-        --other recordings/other_voice.wav
-
-``--other`` is optional but the test proves very little without it: one
-recording can only show that a voice matches itself.
+    python3.11 server/tests_real/test_real_diarization.py         --voice recordings/alice.wav         --voice recordings/bob.wav
 """
 
 from __future__ import annotations
@@ -316,34 +309,40 @@ def check_separation(same: list[float], different: list[float],
               f"and SPEAKER_MATCH_THRESHOLD is {SPEAKER_MATCH_THRESHOLD}.")
 
 
-def check_labelling(first: Voice, second: Optional[Voice],
-                    report: Report) -> None:
+def check_labelling(voices: list[Voice], report: Report) -> None:
     """What the registry actually does, not just what the numbers imply."""
+    everything: list[np.ndarray] = []
+    for voice in voices:
+        everything += voice.embeddings
     identifier = SpeakerIdentifier(
-        embedder=_Replay(first.embeddings + (second.embeddings if second else [])),
+        embedder=_Replay(everything),
         registry=SpeakerRegistry(),
         min_duration_ms=0,
     )
-    labels_first = [identifier.identify(u.pcm).speaker_id for u in first.utterances]
-    print(f"\n  labels for {first.path.name}: {labels_first}")
-    report.add("One speaker is labelled as one speaker",
-               len(set(labels_first)) == 1,
-               f"{sorted(set(labels_first))}")
 
-    if second is None:
-        return
-    labels_second = [identifier.identify(u.pcm).speaker_id
-                     for u in second.utterances]
-    print(f"  labels for {second.path.name}: {labels_second}")
-    report.add("The second speaker is labelled as one speaker",
-               len(set(labels_second)) == 1,
-               f"{sorted(set(labels_second))}")
-    report.add("The two speakers get different labels",
-               not (set(labels_first) & set(labels_second)),
-               f"{sorted(set(labels_first))} vs {sorted(set(labels_second))}")
-    report.add("Exactly two speakers were found",
-               identifier.registry.count == 2,
-               f"{identifier.registry.count} speaker(s)")
+    print()
+    labels_per_voice = []
+    for voice in voices:
+        labels = [identifier.identify(u.pcm).speaker_id for u in voice.utterances]
+        labels_per_voice.append(labels)
+        print(f"  labels for {voice.path.name}: {labels}")
+
+    for voice, labels in zip(voices, labels_per_voice):
+        report.add(f"{voice.path.name} is labelled as one speaker",
+                   len(set(labels)) == 1, f"{sorted(set(labels))}")
+
+    seen: set[str] = set()
+    overlapping = False
+    for labels in labels_per_voice:
+        if seen & set(labels):
+            overlapping = True
+        seen |= set(labels)
+    if len(voices) >= 2:
+        report.add("Different recordings get different labels", not overlapping,
+                   f"{[sorted(set(l)) for l in labels_per_voice]}")
+        report.add(f"Exactly {len(voices)} speakers were found",
+                   identifier.registry.count == len(voices),
+                   f"{identifier.registry.count} speaker(s)")
 
 
 class _Replay:
@@ -364,11 +363,10 @@ class _Replay:
 # ---------------------------------------------------------------------------
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--speech", type=Path, required=True,
-                        help="WAV of one speaker")
-    parser.add_argument("--other", type=Path, default=None,
-                        help="WAV of a different speaker; without it the "
-                             "threshold cannot be judged")
+    parser.add_argument("--voice", type=Path, action="append", required=True,
+                        help="WAV holding exactly ONE speaker; repeat for "
+                             "each person. Two or more are needed before the "
+                             "threshold means anything.")
     parser.add_argument("--device", default="", help='"cuda" or "cpu"')
     args = parser.parse_args()
 
@@ -390,48 +388,41 @@ def main() -> int:
         vad = SileroVAD()
         resolver = OverlapResolver(processor=PedalboardProcessor())
 
-        first = embed_all(args.speech, embedder, vad, resolver)
-        describe(first)
-        second = None
-        if args.other is not None:
-            second = embed_all(args.other, embedder, vad, resolver)
-            describe(second)
+        voices = [embed_all(path, embedder, vad, resolver) for path in args.voice]
+        for voice in voices:
+            describe(voice)
 
-        same = pairwise(first.embeddings)
-        if second is not None:
-            same += pairwise(second.embeddings)
-        different = crosswise(first.embeddings,
-                              second.embeddings) if second else []
+        same: list[float] = []
+        halves: list[float] = []
+        raw_same: list[float] = []
+        for voice in voices:
+            same += pairwise(voice.embeddings)
+            raw_same += pairwise(voice.raw_embeddings)
+            halves += half_similarities(voice.utterances, embedder)
+        different: list[float] = []
+        for left, right in itertools.combinations(voices, 2):
+            different += crosswise(left.embeddings, right.embeddings)
 
-        halves = half_similarities(first.utterances, embedder)
-        raw_same = pairwise(first.raw_embeddings)
-        if second is not None:
-            halves += half_similarities(second.utterances, embedder)
-            raw_same += pairwise(second.raw_embeddings)
-
-        print("\n  Cosine similarity:")
+        print()
+        print("  Cosine similarity:")
         summarise("two halves of one sentence", halves)
-        summarise("sentence to sentence, same recording", same)
-        summarise("sentence to sentence, across recordings", different)
+        summarise("sentence to sentence, same voice", same)
+        summarise("sentence to sentence, across voices", different)
 
-        print("\nDiagnostics:")
-        check_deterministic(first, embedder, report)
-        halves_ok = check_halves(halves, report)
+        print()
+        print("Diagnostics:")
+        check_deterministic(voices[0], embedder, report)
+        check_halves(halves, report)
         check_shaping(same, raw_same, report)
 
-        print("\nChecks:")
-        check_embeddings(first, report)
-        if second is not None:
-            check_embeddings(second, report)
+        print()
+        print("Checks:")
+        for voice in voices:
+            check_embeddings(voice, report)
+        report.add("At least two voices to compare", len(voices) >= 2,
+                   f"{len(voices)} recording(s)")
         check_separation(same, different, report)
-        check_labelling(first, second, report)
-
-        if halves_ok and same and statistics.median(same) < SPEAKER_MATCH_THRESHOLD:
-            print("\n  The voiceprints are sound (both halves of a sentence "
-                  "match) but sentences within one recording do not.")
-            print("  That points at the recordings rather than the code: a "
-                  "file with several voices in it cannot be used as the "
-                  "same-speaker ground truth.")
+        check_labelling(voices, report)
 
         print("\n" + "=" * 72)
         if report.failed:

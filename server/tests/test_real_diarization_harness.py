@@ -229,26 +229,35 @@ def test_one_recording_alone_leaves_the_threshold_unproven(capsys):
 
 def test_labelling_two_speakers_gives_two_labels():
     report = harness.Report()
-    harness.check_labelling(voice_of([ALICE, ALICE + 0.02], "alice.wav"),
-                            voice_of([BOB, BOB + 0.02], "bob.wav"), report)
+    harness.check_labelling([voice_of([ALICE, ALICE + 0.02], "alice.wav"),
+                             voice_of([BOB, BOB + 0.02], "bob.wav")], report)
     assert report.failed == []
 
 
 def test_a_speaker_split_in_two_is_caught():
     report = harness.Report()
-    harness.check_labelling(voice_of([ALICE, BOB], "alice.wav"), None, report)
-    assert "One speaker is labelled as one speaker" in [
+    harness.check_labelling([voice_of([ALICE, BOB], "alice.wav")], report)
+    assert "alice.wav is labelled as one speaker" in [
         c.name for c in report.failed
     ]
 
 
 def test_two_speakers_merged_into_one_is_caught():
     report = harness.Report()
-    harness.check_labelling(voice_of([ALICE, ALICE], "alice.wav"),
-                            voice_of([ALICE, ALICE], "bob.wav"), report)
+    harness.check_labelling([voice_of([ALICE, ALICE], "alice.wav"),
+                             voice_of([ALICE, ALICE], "bob.wav")], report)
     names = [c.name for c in report.failed]
-    assert "The two speakers get different labels" in names
-    assert "Exactly two speakers were found" in names
+    assert "Different recordings get different labels" in names
+    assert "Exactly 2 speakers were found" in names
+
+
+def test_a_single_recording_is_not_asked_about_other_speakers():
+    """With one voice there is nothing to distinguish it from."""
+    report = harness.Report()
+    harness.check_labelling([voice_of([ALICE, ALICE + 0.02], "alice.wav")], report)
+    assert [c.name for c in report.checks] == [
+        "alice.wav is labelled as one speaker"
+    ]
 
 
 def test_embedding_checks_catch_a_ragged_voiceprint():
@@ -279,9 +288,9 @@ def run_main(monkeypatch, tmp_path, with_other: bool) -> int:
     monkeypatch.setattr(harness, "SileroVAD", lambda **k: ScriptedVAD([0.9]))
     monkeypatch.setattr(harness, "PedalboardProcessor", lambda: _Passthrough())
 
-    argv = ["x", "--speech", str(alice)]
+    argv = ["x", "--voice", str(alice)]
     if with_other:
-        argv += ["--other", str(bob)]
+        argv += ["--voice", str(bob)]
     monkeypatch.setattr(sys, "argv", argv)
     return harness.main()
 
@@ -299,9 +308,11 @@ def test_main_runs_and_passes_with_two_speakers(monkeypatch, tmp_path, capsys):
     assert "separates them" in out
 
 
-def test_main_runs_with_one_recording(monkeypatch, tmp_path, capsys):
-    assert run_main(monkeypatch, tmp_path, with_other=False) == 0
-    assert "unproven" in capsys.readouterr().out
+def test_main_says_one_recording_proves_nothing(monkeypatch, tmp_path, capsys):
+    assert run_main(monkeypatch, tmp_path, with_other=False) == 1
+    out = capsys.readouterr().out
+    assert "unproven" in out
+    assert "At least two voices to compare" in out
 
 
 def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
@@ -311,7 +322,7 @@ def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(harness, "EcapaEmbedder", explode)
     monkeypatch.setattr(
         sys, "argv",
-        ["x", "--speech", str(write_wav(tmp_path / "a.wav", 2.0))],
+        ["x", "--voice", str(write_wav(tmp_path / "a.wav", 2.0))],
     )
     assert harness.main() == 2
     assert "Could not load" in capsys.readouterr().out
