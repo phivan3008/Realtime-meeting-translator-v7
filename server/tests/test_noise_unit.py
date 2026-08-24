@@ -1,7 +1,7 @@
 """Unit tests for the Deep Noise Filter policy.
 
-YAMNet itself is replaced by a stub, so these run on the Dev PC without
-TensorFlow. The model's real behaviour is covered by
+The classifier is replaced by a stub, so these run on the Dev PC without
+torch or transformers. The model's real behaviour is covered by
 ``server/tests_real/test_real_noise.py`` on the GPU pod.
 
 Run with::
@@ -19,14 +19,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from server.config import NOISE_WINDOW_SECONDS, SAMPLE_RATE
 from server.pipeline.noise import (
     NOISE_LABELS,
     SPEECH_LABELS,
     Classification,
     NoiseFilter,
     aggregate,
+    fill_window,
+    split_windows,
     top_labels,
 )
+
+WINDOW = int(NOISE_WINDOW_SECONDS * SAMPLE_RATE)
 
 
 class StubClassifier:
@@ -219,3 +224,52 @@ def test_a_classification_summarises_itself_for_the_log():
 
 def test_top_label_is_empty_when_nothing_was_scored():
     assert Classification(0.0, 0.0).top_label == ""
+
+
+# ---------------------------------------------------------------------------
+# Filling the classifier window
+# ---------------------------------------------------------------------------
+def test_a_short_clip_is_repeated_until_the_window_is_full():
+    """Zero padding a 1.2 s sentence made it 88% silence, and it got dropped."""
+    clip = np.arange(SAMPLE_RATE, dtype=np.float32)          # 1 second
+    filled = fill_window(clip, WINDOW)
+    assert filled.size == WINDOW
+    assert np.array_equal(filled[:SAMPLE_RATE], clip)
+    assert np.array_equal(filled[SAMPLE_RATE:2 * SAMPLE_RATE], clip)
+
+
+def test_the_repeat_never_leaves_silence_at_the_end():
+    clip = np.full(SAMPLE_RATE // 3, 0.5, dtype=np.float32)
+    filled = fill_window(clip, WINDOW)
+    assert filled.size == WINDOW
+    assert np.all(filled != 0.0)
+
+
+def test_audio_that_already_fills_the_window_is_untouched():
+    clip = np.zeros(WINDOW, dtype=np.float32)
+    assert fill_window(clip, WINDOW) is clip
+    longer = np.zeros(WINDOW + 10, dtype=np.float32)
+    assert fill_window(longer, WINDOW) is longer
+
+
+def test_empty_audio_stays_empty():
+    empty = np.zeros(0, dtype=np.float32)
+    assert fill_window(empty, WINDOW) is empty
+
+
+def test_a_seven_second_utterance_is_topped_up_to_a_full_window():
+    """The longest an utterance can be is still shorter than the window."""
+    clip = np.arange(7 * SAMPLE_RATE, dtype=np.float32)
+    assert fill_window(clip, WINDOW).size == WINDOW
+
+
+def test_long_audio_is_split_before_it_is_filled():
+    long_audio = np.zeros(int(2.5 * WINDOW), dtype=np.float32)
+    windows = split_windows(long_audio, WINDOW)
+    assert [w.size for w in windows] == [WINDOW, WINDOW, WINDOW // 2]
+    assert all(fill_window(w, WINDOW).size == WINDOW for w in windows)
+
+
+def test_split_windows_rejects_a_non_positive_window():
+    with pytest.raises(ValueError, match="window_samples"):
+        split_windows(np.zeros(10, dtype=np.float32), 0)

@@ -251,6 +251,24 @@ def split_windows(waveform: np.ndarray, window_samples: int) -> list[np.ndarray]
     ]
 
 
+def fill_window(waveform: np.ndarray, window_samples: int) -> np.ndarray:
+    """Repeat a short clip until it fills the classifier window.
+
+    AST reads a fixed 10.24 s window and zero-pads anything shorter.  A 1.2 s
+    utterance therefore arrives as 88% silence, and the evidence for speech is
+    diluted by everything that is not there - which is how a perfectly good
+    one-second sentence gets scored as noise and thrown away.
+
+    Repeating the clip instead keeps the window full of the sound actually
+    being judged.  The classifier is asked "what is this?", not "how long was
+    it?", so tiling changes nothing it should care about.
+    """
+    if waveform.size == 0 or waveform.size >= window_samples:
+        return waveform
+    repeats = int(np.ceil(window_samples / waveform.size))
+    return np.tile(waveform, repeats)[:window_samples]
+
+
 class AstClassifier:
     """Audio Spectrogram Transformer, fine-tuned on AudioSet."""
 
@@ -322,7 +340,10 @@ class AstClassifier:
         """Score one utterance. ``pcm`` is 16 kHz mono 16-bit, as everywhere."""
         waveform = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
         windows = split_windows(waveform, self.window_samples)
-        scores = np.stack([self._score_window(w) for w in windows])
+        scores = np.stack([
+            self._score_window(fill_window(w, self.window_samples))
+            for w in windows
+        ])
 
         speech_score, _ = aggregate(scores, self.labels, SPEECH_LABELS)
         noise_score, noise_label = aggregate(scores, self.labels, NOISE_LABELS)

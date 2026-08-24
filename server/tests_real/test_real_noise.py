@@ -43,6 +43,7 @@ import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -54,14 +55,17 @@ from server.config import (  # noqa: E402
     SAMPLE_RATE,
     SAMPLE_WIDTH,
 )
-from server.pipeline.buffer import BufferManager  # noqa: E402
+from server.pipeline.buffer import BufferManager, Utterance  # noqa: E402
 from server.pipeline.noise import (  # noqa: E402
     AstClassifier,
     Classification,
     NoiseFilter,
     NoiseFilterError,
+    Verdict,
 )
 from server.pipeline.vad import SileroVAD, VADError, VADSegmenter  # noqa: E402
+
+OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 # Classifying one utterance must stay far below the audio it covers, or the
 # filter costs more than the Whisper call it is meant to save.
@@ -100,8 +104,19 @@ class FileResult:
     )
     kept: bool = True
     reason: str = ""
-    utterances: int = 0
-    utterances_kept: int = 0
+    judged: list[tuple[Utterance, Verdict]] = field(default_factory=list)
+
+    @property
+    def utterances(self) -> int:
+        return len(self.judged)
+
+    @property
+    def utterances_kept(self) -> int:
+        return sum(1 for _, verdict in self.judged if verdict.keep)
+
+    @property
+    def dropped(self) -> list[tuple[Utterance, Verdict]]:
+        return [(u, v) for u, v in self.judged if not v.keep]
 
     @property
     def classify_ratio(self) -> float:
@@ -134,8 +149,14 @@ def classify_file(path: Path, filt: NoiseFilter) -> FileResult:
     return result
 
 
-def run_pipeline(path: Path, vad: SileroVAD, filt: NoiseFilter) -> tuple[int, int]:
-    """VAD -> buffer -> filter, the way a live session runs it."""
+def run_pipeline(path: Path, vad: SileroVAD,
+                 filt: NoiseFilter) -> list[tuple[Utterance, Verdict]]:
+    """VAD -> buffer -> filter, the way a live session runs it.
+
+    Returns every sentence with the verdict it got, not just a count: when the
+    filter eats a real sentence, the only useful next step is listening to
+    that exact sentence.
+    """
     pcm = read_pcm(path)
     vad.reset()
     segmenter = VADSegmenter(vad=vad)
@@ -145,8 +166,7 @@ def run_pipeline(path: Path, vad: SileroVAD, filt: NoiseFilter) -> tuple[int, in
         finals += buffer.push(segmenter.push(pcm[offset : offset + CHUNK_BYTES])).finals
     segmenter.close()
     finals += buffer.flush().finals
-    kept = sum(1 for u in finals if filt.judge(u.pcm).keep)
-    return len(finals), kept
+    return [(utterance, filt.judge(utterance.pcm)) for utterance in finals]
 
 
 def describe(result: FileResult) -> None:
@@ -157,6 +177,33 @@ def describe(result: FileResult) -> None:
           f"(ratio {result.classify_ratio:.4f})")
     print(f"    through the full pipeline: {result.utterances} utterance(s), "
           f"{result.utterances_kept} survived the filter")
+    for utterance, verdict in result.judged:
+        mark = "keep" if verdict.keep else "DROP"
+        print(f"      #{utterance.index}  "
+              f"{utterance.start_ms / 1000:6.2f}s -> "
+              f"{utterance.end_ms / 1000:6.2f}s "
+              f"({utterance.duration_ms / 1000:4.2f}s)  {mark:<4}  "
+              f"{verdict.classification.summary()}")
+
+
+def save_dropped(result: FileResult) -> Optional[Path]:
+    """Write out the sentences the filter refused, so they can be listened to.
+
+    A count cannot tell you whether the filter was right. The audio can.
+    """
+    if not result.dropped:
+        return None
+    directory = OUTPUT_DIR / f"{result.path.stem}_dropped"
+    directory.mkdir(parents=True, exist_ok=True)
+    for utterance, verdict in result.dropped:
+        label = (verdict.classification.noise_label or "unknown").replace(" ", "_")
+        with wave.open(str(directory / f"{utterance.index:03d}_{label}.wav"),
+                       "wb") as wav:
+            wav.setnchannels(CHANNELS)
+            wav.setsampwidth(SAMPLE_WIDTH)
+            wav.setframerate(SAMPLE_RATE)
+            wav.writeframes(utterance.pcm)
+    return directory
 
 
 # ---------------------------------------------------------------------------
@@ -200,17 +247,13 @@ def main() -> int:
         vad = SileroVAD()
 
         speech = classify_file(args.speech, filt)
-        speech.utterances, speech.utterances_kept = run_pipeline(
-            args.speech, vad, filt
-        )
+        speech.judged = run_pipeline(args.speech, vad, filt)
         describe(speech)
 
         noises = []
         for path in args.noise:
             result = classify_file(path, filt)
-            result.utterances, result.utterances_kept = run_pipeline(
-                path, vad, filt
-            )
+            result.judged = run_pipeline(path, vad, filt)
             describe(result)
             noises.append(result)
 
@@ -252,6 +295,14 @@ def main() -> int:
         report.add("The filter is cheap next to the audio it covers",
                    worst < MAX_CLASSIFY_RATIO,
                    f"worst ratio {worst:.4f} < {MAX_CLASSIFY_RATIO}")
+
+        dropped_dir = save_dropped(speech)
+        if dropped_dir is not None:
+            print(f"\n  The filter refused {len(speech.dropped)} sentence(s) "
+                  f"from {speech.path.name}: {dropped_dir}")
+            print("  Listen to them. If they really are a cough or a throat "
+                  "clear, the filter was right and this check is too strict. "
+                  "If they are speech, the filter is broken.")
 
         print(f"\n  Filter stats: {filt.stats.seen} judged, "
               f"{filt.stats.dropped} dropped, labels {filt.stats.dropped_labels}")

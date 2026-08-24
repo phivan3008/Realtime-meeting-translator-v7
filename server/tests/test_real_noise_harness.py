@@ -123,28 +123,27 @@ def test_an_empty_result_has_a_harmless_ratio():
 # ---------------------------------------------------------------------------
 def test_speech_survives_the_full_pipeline(tmp_path):
     path = write_wav(tmp_path / "speech.wav", 6.0)
-    total, kept = harness.run_pipeline(
+    judged = harness.run_pipeline(
         path, ScriptedVAD([0.9]), NoiseFilter(classifier=StubClassifier(SPEECHY))
     )
-    assert total >= 1
-    assert kept == total
+    assert len(judged) >= 1
+    assert all(verdict.keep for _, verdict in judged)
 
 
 def test_noise_leaves_nothing_for_the_asr(tmp_path):
     path = write_wav(tmp_path / "keyboard.wav", 6.0)
-    total, kept = harness.run_pipeline(
+    judged = harness.run_pipeline(
         path, ScriptedVAD([0.9]), NoiseFilter(classifier=StubClassifier(KEYBOARD))
     )
-    assert total >= 1
-    assert kept == 0
+    assert len(judged) >= 1
+    assert not any(verdict.keep for _, verdict in judged)
 
 
 def test_a_silent_file_produces_no_utterances_at_all(tmp_path):
     path = write_wav(tmp_path / "quiet.wav", 3.0)
-    total, kept = harness.run_pipeline(
+    assert harness.run_pipeline(
         path, ScriptedVAD([0.02]), NoiseFilter(classifier=StubClassifier(SPEECHY))
-    )
-    assert (total, kept) == (0, 0)
+    ) == []
 
 
 def test_the_pipeline_resets_the_vad_between_files(tmp_path):
@@ -161,13 +160,12 @@ def test_the_pipeline_resets_the_vad_between_files(tmp_path):
 def test_describe_prints_both_the_verdict_and_the_cost(capsys):
     result = harness.FileResult(path=Path("keyboard.wav"), audio_seconds=2.0,
                                 classify_seconds=0.05, classification=KEYBOARD,
-                                kept=False, reason="no speech, sounds like x",
-                                utterances=2, utterances_kept=0)
+                                kept=False, reason="no speech, sounds like x")
     harness.describe(result)
     out = capsys.readouterr().out
     assert "DROP" in out
     assert "keyboard.wav" in out
-    assert "0 survived" in out
+    assert "0 utterance(s), 0 survived" in out
 
 
 def test_the_report_separates_passes_from_failures():
@@ -270,3 +268,34 @@ def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
     )
     assert harness.main() == 2
     assert "Could not load" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Writing out what the filter refused
+# ---------------------------------------------------------------------------
+def test_dropped_sentences_are_written_out_for_listening(tmp_path, monkeypatch):
+    """A count cannot say whether the filter was right; the audio can."""
+    monkeypatch.setattr(harness, "OUTPUT_DIR", tmp_path / "output")
+    path = write_wav(tmp_path / "speech.wav", 6.0)
+    result = harness.FileResult(path=path)
+    result.judged = harness.run_pipeline(
+        path, ScriptedVAD([0.9]), NoiseFilter(classifier=StubClassifier(KEYBOARD))
+    )
+    directory = harness.save_dropped(result)
+    files = sorted(p.name for p in directory.glob("*.wav"))
+    assert files
+    assert all("Computer_keyboard" in name for name in files)
+    with wave.open(str(directory / files[0]), "rb") as wav:
+        assert wav.getframerate() == SAMPLE_RATE
+        assert wav.getnframes() > 0
+
+
+def test_nothing_is_written_when_the_filter_kept_everything(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness, "OUTPUT_DIR", tmp_path / "output")
+    path = write_wav(tmp_path / "speech.wav", 6.0)
+    result = harness.FileResult(path=path)
+    result.judged = harness.run_pipeline(
+        path, ScriptedVAD([0.9]), NoiseFilter(classifier=StubClassifier(SPEECHY))
+    )
+    assert harness.save_dropped(result) is None
+    assert not (tmp_path / "output").exists()
