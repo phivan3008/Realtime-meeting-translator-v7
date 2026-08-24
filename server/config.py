@@ -235,6 +235,14 @@ TRANSLATE_TIMEOUT_S = float(os.environ.get("TRANSLATE_TIMEOUT_S", "20"))
 # the same answer twice.
 TRANSLATE_TEMPERATURE = 0.0
 
+# Qwen3 reasons before it answers, emitting a <think> block first. For a
+# sentence-length translation that is all cost and no benefit: the first run
+# against Qwen3.5-9B spent its entire 512-token budget thinking and returned
+# no translation at all, at 3.5 s a sentence. Turned off through the chat
+# template; the <think> stripping in translate.py stays as a second line of
+# defence for a server that ignores the flag.
+TRANSLATE_ENABLE_THINKING = False
+
 # DESIGN.md asks for two or three previous sentences of context. Enough for
 # pronouns and carried-over subjects, short enough that the model cannot drift
 # into summarising the meeting.

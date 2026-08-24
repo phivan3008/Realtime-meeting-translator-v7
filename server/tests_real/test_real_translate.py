@@ -134,6 +134,11 @@ def describe(attempts: list[Attempt]) -> None:
             print(f"      out: {item.result.text}")
         else:
             print(f"      refused: {item.result.reason}")
+            if item.result.raw:
+                # Whatever the model said is the only clue to why. Hiding it
+                # once already cost a round trip: 512 tokens of <think> looked
+                # exactly like "the answer is far longer than the sentence".
+                print(f"      raw    : {item.result.raw[:300]!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +191,9 @@ def check_repeatable(translator_factory, report: Report) -> None:
     lang, source = SAMPLES[0]
     first = translator_factory().translate(source, lang)
     second = translator_factory().translate(source, lang)
+    # Both empty is not agreement, it is the same failure twice.
     report.add("The same sentence twice gives the same translation",
-               first.text == second.text,
+               first.ok and second.ok and first.text == second.text,
                f"{first.text[:30]!r} vs {second.text[:30]!r}")
 
 

@@ -53,6 +53,7 @@ from typing import Optional, Protocol
 from server.config import (
     LANGUAGE_NAMES,
     TRANSLATE_BASE_URL,
+    TRANSLATE_ENABLE_THINKING,
     TRANSLATE_HISTORY,
     TRANSLATE_MAX_EXPANSION,
     TRANSLATE_MAX_TOKENS,
@@ -80,6 +81,12 @@ _LEAD_IN = re.compile(
     r"translated(?: text)?|dịch|bản dịch|翻訳|訳)\s*[:：]\s*",
     re.IGNORECASE,
 )
+#: Reasoning models answer with their working first. Qwen3 emits this unless
+#: the chat template is told otherwise, and a server that ignores the flag
+#: would otherwise return 512 tokens of thinking and no translation.
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_UNCLOSED_THINK = re.compile(r"^\s*<think>.*", re.DOTALL | re.IGNORECASE)
+
 #: Quote pairs a model reaches for when asked for exactly one line.
 _QUOTES = (('"', '"'), ("'", "'"), ("「", "」"), ("“", "”"), ("『", "』"))
 
@@ -90,7 +97,10 @@ def clean(answer: str) -> str:
     Applied repeatedly, because the additions stack: "Sure! Here is the
     translation: 「...」" is three of them in front of one sentence.
     """
-    text = answer.strip()
+    text = _THINK.sub("", answer).strip()
+    if _UNCLOSED_THINK.match(text):
+        # The whole budget went on thinking and the answer never arrived.
+        return ""
     for _ in range(4):
         before = text
         text = _INTERJECTION.sub("", text, count=1).strip()
@@ -181,6 +191,9 @@ class Translation:
     lang_code: str
     target: str
     reason: str = ""
+    #: What the model actually said, kept so a refusal can be looked at.
+    #: A guard that hides its evidence turns one bug into two.
+    raw: str = ""
 
     @property
     def ok(self) -> bool:
@@ -283,9 +296,9 @@ class Translator:
         text = clean(answer)
         reason = self._refuse_reason(source, text)
         if reason:
-            return self._refuse(source, lang_code, target, reason)
+            return self._refuse(source, lang_code, target, reason, answer)
 
-        result = Translation(text, source, lang_code, target)
+        result = Translation(text, source, lang_code, target, raw=answer)
         self.stats.record(result)
         self.context.remember(
             Turn(speaker_id=speaker_id, lang_code=lang_code, source=source,
@@ -303,9 +316,11 @@ class Translator:
         return ""
 
     def _refuse(self, source: str, lang_code: str, target: str,
-                reason: str) -> Translation:
-        result = Translation("", source, lang_code, target, reason)
+                reason: str, raw: str = "") -> Translation:
+        result = Translation("", source, lang_code, target, reason, raw)
         self.stats.record(result)
+        if raw:
+            log.info("Refused a translation (%s): %r", reason, raw[:200])
         return result
 
     def reset(self) -> None:
@@ -360,6 +375,10 @@ class VllmClient:
             "temperature": TRANSLATE_TEMPERATURE,
             "max_tokens": TRANSLATE_MAX_TOKENS,
             "stream": False,
+            # Qwen3 reasons before answering unless the chat template is told
+            # not to. A server whose template ignores this is caught by the
+            # <think> stripping instead.
+            "chat_template_kwargs": {"enable_thinking": TRANSLATE_ENABLE_THINKING},
         }).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions", data=body,
@@ -374,7 +393,22 @@ class VllmClient:
         choices = payload.get("choices") or []
         if not choices:
             raise TranslationError("the server returned no choices")
-        return str(choices[0].get("message", {}).get("content", ""))
+        message = choices[0].get("message", {})
+        # vLLM splits reasoning out of `content` for some models. If it did,
+        # `content` is already the answer alone; if it did not, the <think>
+        # block is still in there and clean() takes it out.
+        text = str(message.get("content") or "")
+        if not text and message.get("reasoning_content"):
+            raise TranslationError(
+                "the model returned only reasoning and no answer; "
+                "chat_template_kwargs.enable_thinking was not honoured"
+            )
+        if choices[0].get("finish_reason") == "length" and not text.strip():
+            raise TranslationError(
+                f"the model used its whole {TRANSLATE_MAX_TOKENS}-token budget "
+                "without answering"
+            )
+        return text
 
     @property
     def source(self) -> str:

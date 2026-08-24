@@ -31,6 +31,7 @@ Chịu trách nhiệm thu thập âm thanh, truyền lên Server và giao tiếp
    - Prompt gồm: 3 câu hội thoại gần nhất (chỉ để tham chiếu, **không dịch**) + LID + Final Transcript.
    - **Model sẽ cố trò chuyện với bạn.** Model instruction-tuned được yêu cầu dịch sẽ trả về "Sure! Here is the translation:" rồi mới tới bản dịch, hoặc thêm ghi chú, hoặc bọc trong ngoặc kép — tất cả sẽ hiện lên màn hình như thể có người vừa nói ra. Nên câu trả lời được **bóc sạch** phần thừa rồi **kiểm tra**: câu trả lời dài gấp nhiều lần câu gốc không phải bản dịch, đó là model đang giải thích, và bị từ chối.
    - `temperature = 0`: cùng một câu phải cho cùng một bản dịch.
+   - **Tắt chế độ thinking.** Qwen3 suy luận ra tiếng trước khi trả lời; với một câu dịch thì đó là toàn chi phí, không lợi ích. Lần chạy đầu trên Qwen3.5-9B tiêu hết trọn 512 token vào khối `<think>` và **không trả về bản dịch nào**, mất 3.5s/câu. Tắt qua `chat_template_kwargs.enable_thinking`, kèm việc bóc khối `<think>` ở phía client làm lớp phòng thủ thứ hai cho server bỏ qua cờ đó.
 
 ## 3b. Ghi chú kiến trúc: vì sao VAD nằm ở Server
 

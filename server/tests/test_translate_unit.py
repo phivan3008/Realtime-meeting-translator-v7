@@ -330,3 +330,47 @@ def test_an_empty_setting_accepts_whatever_is_running():
 def test_a_server_with_no_model_is_refused():
     with pytest.raises(TranslationError, match="serving no model"):
         choose("Qwen/Qwen3.5-9B", [])
+
+
+# ---------------------------------------------------------------------------
+# Reasoning models
+# ---------------------------------------------------------------------------
+def test_a_reasoning_block_is_removed_before_the_answer_is_read():
+    """Qwen3 thinks out loud first unless the chat template says otherwise."""
+    assert clean("<think>The speaker greets everyone...</think>こんにちは") ==         "こんにちは"
+
+
+def test_reasoning_is_removed_even_across_lines():
+    answer = chr(10).join(["<think>", "first I consider", "then I decide",
+                           "</think>", "こんにちは"])
+    assert clean(answer) == "こんにちは"
+
+
+def test_thinking_that_never_finished_leaves_nothing_to_show():
+    """512 tokens of working and no answer is not a translation."""
+    assert clean("<think>I should consider what the speaker means by") == ""
+
+
+def test_a_sentence_merely_mentioning_think_is_untouched():
+    assert clean("I think so") == "I think so"
+
+
+def test_a_refusal_keeps_what_the_model_actually_said():
+    """A guard that hides its evidence turns one bug into two."""
+    raw = "<think>" + "reasoning " * 200
+    result = make(raw).translate("xin chào", "vi")
+    assert result.ok is False
+    assert result.raw == raw
+    assert "reasoning" in result.raw
+
+
+def test_a_successful_translation_also_keeps_the_raw_answer():
+    result = make("Sure! こんにちは").translate("xin chào", "vi")
+    assert result.text == "こんにちは"
+    assert result.raw == "Sure! こんにちは"
+
+
+def test_thinking_is_switched_off_in_the_request():
+    from server.config import TRANSLATE_ENABLE_THINKING
+
+    assert TRANSLATE_ENABLE_THINKING is False
