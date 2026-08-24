@@ -443,10 +443,10 @@ def test_each_missing_stage_is_named(flag, name):
 # ---------------------------------------------------------------------------
 def final(transcript: str = "xin chào", translation: str = "こんにちは",
           speaker: str = "Speaker_01", lang: str = "vi",
-          reason: str = "") -> dict:
+          reason: str = "", raw: str = "") -> dict:
     return {"type": "final", "speaker_id": speaker, "lang_code": lang,
             "transcript": transcript, "translation": translation,
-            "translation_reason": reason}
+            "translation_reason": reason, "translation_raw": raw}
 
 
 def partial(transcript: str = "xin", lang: str = "vi") -> dict:
@@ -479,7 +479,8 @@ def test_an_untranslated_sentence_is_caught():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(translation="", reason="no translation server"))),
+                     (2.0, final(translation="", reason="no translation server",
+                                 raw="boom"))),
         report)
     assert "Committed sentences come back translated" in [
         c.name for c in report.failed
@@ -653,3 +654,68 @@ def test_the_confirmed_goodbye_is_caught():
 def test_a_goodbye_with_anything_attached_survives():
     assert not harness.is_invented("Chào tạm biệt nhé.")
     assert not harness.is_invented("Tạm biệt.")
+
+
+# ---------------------------------------------------------------------------
+# What the model actually said
+# ---------------------------------------------------------------------------
+def test_a_refusal_that_hides_the_answer_is_caught():
+    """"far longer than the sentence" reads the same whether the model
+    rambled or the limit was too tight. Only the text tells them apart."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(translation="",
+                                 reason="the answer is far longer than the sentence"))),
+        report)
+    assert "Every untranslated sentence shows what the model said" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_refusal_that_shows_the_answer_passes():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(translation="",
+                                 reason="the answer is far longer than the sentence",
+                                 raw="a long rambling answer"))),
+        report)
+    assert "Every untranslated sentence shows what the model said" not in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_model_that_said_nothing_has_nothing_to_show():
+    """Demanding text from a refusal for producing no text would be a check
+    that cannot pass."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(translation="",
+                                 reason="the model returned nothing"))),
+        report)
+    assert "Every untranslated sentence shows what the model said" not in [
+        c.name for c in report.failed
+    ]
+
+
+def test_the_raw_answer_reaches_the_screen(capsys):
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(translation="", reason="too long",
+                                 raw="Sure! Here is the translation: ..."))),
+        harness.Report())
+    assert "the model said: Sure! Here is the translation" in capsys.readouterr().out
+
+
+def test_a_successful_translation_shows_no_raw(capsys):
+    """It would be noise: the translation is right there.
+
+    Matched on the printed line, not the phrase - the check's own name
+    contains the phrase, which made an earlier version of this fail on its
+    own report.
+    """
+    harness.check_transcripts(
+        collected_of((1.0, partial()), (2.0, final())), harness.Report())
+    assert "the model said:" not in capsys.readouterr().out

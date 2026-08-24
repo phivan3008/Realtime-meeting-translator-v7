@@ -210,12 +210,20 @@ def make_partial(speaker_id: str, lang_code: str, transcript: str) -> str:
 
 
 def make_final(speaker_id: str, lang_code: str, transcript: str,
-               translation: str, translation_reason: str = "") -> str:
+               translation: str, translation_reason: str = "",
+               translation_raw: str = "") -> str:
     """DESIGN.md section 4: the committed sentence plus its translation.
 
     ``translation_reason`` carries why there is no translation when there is
-    none. An empty translation with no reason attached is a silent failure,
-    and this project has already spent a round trip on one.
+    none, and ``translation_raw`` carries what the model actually said. A
+    reason alone answers "was it refused" but not "should it have been": the
+    refusal "the answer is far longer than the sentence" reads identically
+    whether the model rambled or produced a good translation that the limit
+    was too tight for. Only the text tells them apart, and reaching for it in
+    the server log has now cost this project two round trips.
+
+    Both are empty on a successful translation, and a UI has no reason to
+    show either.
     """
     return json.dumps(
         {
@@ -225,6 +233,7 @@ def make_final(speaker_id: str, lang_code: str, transcript: str,
             "transcript": transcript,
             "translation": translation,
             "translation_reason": translation_reason,
+            "translation_raw": translation_raw,
         },
         ensure_ascii=False,
     )

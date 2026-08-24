@@ -435,6 +435,11 @@ def check_transcripts(collected: Collected, report: Report) -> None:
             # failure, and reading one cost this project a round trip.
             print(f"        NOT translated: "
                   f"{payload.get('translation_reason') or '(no reason given)'}")
+            # And the reason alone does not say whether refusing was right.
+            # "far longer than the sentence" reads the same whether the model
+            # rambled or the limit was too tight for a good translation.
+            if payload.get("translation_raw"):
+                print(f"        the model said: {payload['translation_raw']}")
     if not finals:
         print("    (none)")
 
@@ -463,6 +468,14 @@ def check_transcripts(collected: Collected, report: Report) -> None:
                all(m.get("translation_reason") for m in refused),
                f"{sum(1 for m in refused if not m.get('translation_reason'))} "
                f"silent of {len(refused)}")
+    # A refusal for saying nothing has nothing to show; any other refusal is
+    # a judgement about text, and the text has to be readable to judge it.
+    should_show = [m for m in refused
+                   if m.get("translation_reason") != "the model returned nothing"]
+    report.add("Every untranslated sentence shows what the model said",
+               all(m.get("translation_raw") for m in should_show),
+               f"{sum(1 for m in should_show if not m.get('translation_raw'))} "
+               f"silent of {len(should_show)}")
     same = [m for m in translated
             if m["translation"].strip() == m["transcript"].strip()]
     report.add("A translation is not just the sentence again", not same,
