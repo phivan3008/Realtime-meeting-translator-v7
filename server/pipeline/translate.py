@@ -230,10 +230,20 @@ class TranslationContext:
 
         ``label_languages`` marks which language each translated line is in.
         Without it the history reads as a run of worked examples that all end
-        in the same language: a meeting where three Vietnamese lines in a row
-        were rendered into Japanese taught the model that its next answer
-        should be Japanese too - including for the Japanese line that came
-        next, which then came back untranslated. Pass False to reproduce that.
+        in the same language, and the model follows the examples rather than
+        the instruction. Measured against the live model, same history, same
+        moment, on ここに作っているの? going into Vietnamese::
+
+            unlabelled  ->  ここで作っているの？
+            labelled    ->  Đang tạo ở đây à?
+
+        Note what the unlabelled answer is. Not the sentence handed back: に
+        became で and ? became ？. The model translated it - into Japanese,
+        because two Vietnamese turns of history had put two Japanese
+        translations in front of it. That is also why ``looks_like_echo`` is
+        blind here and only ``wrong_script`` caught it.
+
+        Pass False to reproduce that.
         """
         if not self._turns:
             return ""
@@ -338,7 +348,9 @@ class Translator:
         the history was found to be steering the output language. It exists so
         ``server/tests_real/test_real_translate.py`` can put both versions to
         a real model on the same history and show that the difference is the
-        prompt, not the weather. Nothing in the pipeline passes False.
+        prompt, not the weather. It has done so: the old form came back in
+        Japanese and the new one in Vietnamese, on one run of one model.
+        Nothing in the pipeline passes False.
         """
         target = target_language(lang_code)
         target_name = LANGUAGE_NAMES.get(target, "the other language")
