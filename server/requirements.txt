@@ -23,9 +23,12 @@ torchaudio==2.4.0
 silero-vad==5.1.2
 onnxruntime==1.19.2        # Optional ONNX backend for Silero VAD
 
-# --- 2. Deep Noise Filter: YAMNet ---
-tensorflow==2.17.0
-tensorflow-hub==0.16.1
+# --- 2. Deep Noise Filter: AST (AudioSet), see server/pipeline/noise.py ---
+# DESIGN.md allows YAMNet or a slimmed AST. AST is chosen because it runs on
+# the torch stack that is already here: YAMNet would mean TensorFlow, and TF
+# pins numpy < 2.1 and protobuf 4.x, which is a landmine for anything else
+# sharing the interpreter.
+transformers==4.44.2
 
 # --- 3. Overlap Resolver (DSP) ---
 pedalboard==0.9.16

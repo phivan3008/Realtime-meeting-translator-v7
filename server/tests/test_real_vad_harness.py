@@ -263,3 +263,49 @@ def test_save_gated_writes_a_playable_wav(tmp_path, monkeypatch):
         assert wav.getframerate() == SAMPLE_RATE
         assert wav.getnchannels() == CHANNELS
         assert wav.getnframes() == len(result.gated_pcm) // SAMPLE_WIDTH
+
+
+# ---------------------------------------------------------------------------
+# main()
+# ---------------------------------------------------------------------------
+def test_main_runs_and_passes_on_speech_and_silence(monkeypatch, tmp_path, capsys):
+    """Importing the module does not prove main() still works."""
+    monkeypatch.setattr(harness, "OUTPUT_DIR", tmp_path / "output")
+    # Talk for the first ~3 s, then go quiet: the checks want to see the
+    # segmenter both keep and drop audio.
+    monkeypatch.setattr(
+        harness, "SileroVAD", lambda **k: ScriptedVAD([0.9] * 100 + [0.02])
+    )
+    speech = write_wav(tmp_path / "speech.wav", 8.0)
+    monkeypatch.setattr(sys, "argv", ["x", "--speech", str(speech)])
+    assert harness.main() == 0
+    out = capsys.readouterr().out
+    assert "RESULT: PASS" in out
+    assert "Forwarded audio" in out
+
+
+def test_main_checks_the_quiet_recording_too(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(harness, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(harness, "SileroVAD", lambda **k: ScriptedVAD([0.9]))
+    speech = write_wav(tmp_path / "speech.wav", 8.0)
+    quiet = write_wav(tmp_path / "quiet.wav", 4.0)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["x", "--speech", str(speech), "--silence", str(quiet)],
+    )
+    # The stub calls everything speech, so the quiet file trips its checks.
+    assert harness.main() == 1
+    assert "Quiet recording triggers no speech segment" in capsys.readouterr().out
+
+
+def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
+    from server.pipeline.vad import VADError
+
+    def explode(**_kwargs):
+        raise VADError("Could not load the Silero VAD model")
+
+    monkeypatch.setattr(harness, "SileroVAD", explode)
+    speech = write_wav(tmp_path / "speech.wav", 2.0)
+    monkeypatch.setattr(sys, "argv", ["x", "--speech", str(speech)])
+    assert harness.main() == 2
+    assert "Could not load" in capsys.readouterr().out

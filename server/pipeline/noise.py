@@ -5,26 +5,37 @@ keyboard clatter, a cough, a chair scraping - before it reaches the stages
 that cost real GPU time.
 
 Silero already removes silence, but it is a *voice activity* detector, not a
-sound classifier: it fires happily on a cough, a laugh, a door slam.  YAMNet
-knows the difference, so it gets the last word on whether an utterance is
-worth transcribing.
+sound classifier: it fires happily on a cough, a laugh, a door slam.  An
+AudioSet classifier knows the difference, so it gets the last word on whether
+an utterance is worth transcribing.
+
+Why AST and not YAMNet
+----------------------
+``DESIGN.md`` allows either.  YAMNet means TensorFlow, and TF pins
+``numpy < 2.1`` and ``protobuf 4.x``.  Inside our own venv that happens to be
+satisfiable, but it makes the noise filter the one stage that dictates the
+numpy version for everything downstream - and the pod's system interpreter,
+which carries a newer torch and vllm, cannot host TF at all.  AST needs only
+the torch already in use and reads the same AudioSet labels, so it works in
+either interpreter and constrains nothing.  The policy below is unchanged
+either way; only the backend differs.
 
 The filter is deliberately timid
 --------------------------------
-The two mistakes are not symmetric.  Letting a cough through costs one
-wasted Whisper call.  Dropping real speech loses a sentence from the meeting
+The two mistakes are not symmetric.  Letting a cough through costs one wasted
+Whisper call.  Dropping real speech loses a sentence from the meeting
 permanently, and the participant never learns why.  So an utterance survives
-unless YAMNet is confident it contains no speech *and* something non-speech
-scored higher.  A borderline utterance is always kept.
+unless the classifier is confident it contains no speech *and* something
+non-speech scored higher.  A borderline utterance is always kept.
 
 Layering
 --------
 ``NoiseFilter``
     The policy: given scores, decide keep or drop.  Pure Python, unit tested
-    without TensorFlow.
+    without torch.
 
-``YamnetClassifier``
-    The model wrapper.  The only part that needs TensorFlow, and the only
+``AstClassifier``
+    The model wrapper.  The only part that needs transformers, and the only
     part that cannot run on the Dev PC.
 """
 
@@ -37,19 +48,19 @@ from typing import Iterable, Optional, Protocol
 import numpy as np
 
 from server.config import (
+    AST_MODEL_ID,
+    NOISE_DEVICE,
     NOISE_MIN_SPEECH_SCORE,
     NOISE_REQUIRE_LOUDER_NOISE,
+    NOISE_WINDOW_SECONDS,
     SAMPLE_RATE,
-    YAMNET_HUB_URL,
-    YAMNET_MIN_SAMPLES,
-    YAMNET_MODEL_DIR,
 )
 
 log = logging.getLogger(__name__)
 
 
 class NoiseFilterError(RuntimeError):
-    """Raised when YAMNet cannot be loaded or used."""
+    """Raised when the audio classifier cannot be loaded or used."""
 
 
 #: AudioSet labels that mean "a person is talking". Anything here counts as
@@ -104,7 +115,7 @@ NOISE_LABELS = frozenset({
 
 @dataclass(frozen=True)
 class Classification:
-    """What YAMNet made of one piece of audio."""
+    """What the classifier made of one piece of audio."""
 
     speech_score: float
     noise_score: float
@@ -165,7 +176,7 @@ class NoiseFilter:
     ) -> None:
         if not 0.0 <= min_speech_score <= 1.0:
             raise ValueError("min_speech_score must be between 0 and 1")
-        self.classifier = classifier if classifier is not None else YamnetClassifier()
+        self.classifier = classifier if classifier is not None else AstClassifier()
         self.min_speech_score = min_speech_score
         self.require_louder_noise = require_louder_noise
         self.stats = NoiseStats()
@@ -204,7 +215,7 @@ class NoiseFilter:
 # ---------------------------------------------------------------------------
 def aggregate(scores: np.ndarray, labels: list[str],
               wanted: Iterable[str]) -> tuple[float, str]:
-    """Best score across frames for any of ``wanted``, and which label won.
+    """Best score across windows for any of ``wanted``, and which label won.
 
     Max, not mean: a seven second utterance that is mostly keyboard but holds
     one clear sentence must still count as speech.
@@ -228,54 +239,91 @@ def top_labels(scores: np.ndarray, labels: list[str],
     return tuple((labels[i], float(peaks[i])) for i in order)
 
 
-class YamnetClassifier:
-    """YAMNet from TF Hub, pinned to the CPU."""
+def split_windows(waveform: np.ndarray, window_samples: int) -> list[np.ndarray]:
+    """Cut a waveform into classifier-sized windows, keeping the tail."""
+    if window_samples <= 0:
+        raise ValueError("window_samples must be positive")
+    if waveform.size <= window_samples:
+        return [waveform]
+    return [
+        waveform[offset : offset + window_samples]
+        for offset in range(0, waveform.size, window_samples)
+    ]
 
-    def __init__(self, model_dir: str = "", url: str = YAMNET_HUB_URL) -> None:
+
+class AstClassifier:
+    """Audio Spectrogram Transformer, fine-tuned on AudioSet."""
+
+    def __init__(self, model_id: str = "", device: str = "") -> None:
         try:
-            import tensorflow as tf
-            import tensorflow_hub as hub
+            import torch
+            from transformers import ASTFeatureExtractor, ASTForAudioClassification
         except ImportError as exc:                      # pragma: no cover
             raise NoiseFilterError(
-                "tensorflow / tensorflow-hub are not installed. Run "
+                "transformers / torch are not installed. Run "
                 "`python3.11 -m pip install -r server/requirements.txt`."
             ) from exc
 
-        # Whisper and vLLM need the whole H100. YAMNet is small enough that
-        # the CPU runs it faster than the argument is worth having, and TF
-        # would otherwise reserve VRAM the moment it sees the device.
-        tf.config.set_visible_devices([], "GPU")
-        self._tf = tf
+        self._torch = torch
+        self.model_id = model_id or AST_MODEL_ID
+        chosen = device or NOISE_DEVICE
+        if not chosen:
+            chosen = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = chosen
 
-        source = model_dir or YAMNET_MODEL_DIR or url
         try:
-            self._model = hub.load(source)
+            self._extractor = ASTFeatureExtractor.from_pretrained(self.model_id)
+            model = ASTForAudioClassification.from_pretrained(self.model_id)
         except Exception as exc:                        # pragma: no cover
             raise NoiseFilterError(
-                f"Could not load YAMNet from {source!r}. On a pod without "
-                "internet access, download the SavedModel once and point "
-                "YAMNET_MODEL_DIR at the directory."
+                f"Could not load {self.model_id!r}. On a pod without internet "
+                "access, download it once and point AST_MODEL_ID at the local "
+                "directory."
             ) from exc
-        self.source = source
-        self.labels = self._read_labels()
 
-    def _read_labels(self) -> list[str]:
-        import csv
+        # Half precision on the GPU: the verdict is a threshold comparison, so
+        # the lost precision cannot change a decision that was not already a
+        # coin flip.
+        if self.device.startswith("cuda"):
+            model = model.half()
+        self._model = model.to(self.device).eval()
 
-        path = self._model.class_map_path().numpy().decode("utf-8")
-        with open(path, newline="", encoding="utf-8") as handle:
-            return [row["display_name"] for row in csv.DictReader(handle)]
+        self.labels = [
+            model.config.id2label[i] for i in range(model.config.num_labels)
+        ]
+        self._check_labels()
+        self.window_samples = int(NOISE_WINDOW_SECONDS * SAMPLE_RATE)
+        log.info("AST ready on %s: %s, %d labels", self.device, self.model_id,
+                 len(self.labels))
+
+    def _check_labels(self) -> None:
+        """Fail loudly if this checkpoint does not use AudioSet display names.
+
+        A silently empty intersection would make every score zero, which the
+        timid policy reads as "nothing conclusive" - so the filter would keep
+        everything and look like it was working.
+        """
+        known = set(self.labels)
+        missing_speech = SPEECH_LABELS - known
+        if len(missing_speech) == len(SPEECH_LABELS):
+            raise NoiseFilterError(
+                f"{self.model_id!r} shares no speech label with AudioSet; "
+                f"its first labels are {self.labels[:5]}"
+            )
+        if not NOISE_LABELS & known:
+            raise NoiseFilterError(
+                f"{self.model_id!r} shares no noise label with AudioSet"
+            )
+        if missing_speech:
+            log.warning("Speech labels absent from this checkpoint: %s",
+                        sorted(missing_speech))
 
     def classify(self, pcm: bytes) -> Classification:
         """Score one utterance. ``pcm`` is 16 kHz mono 16-bit, as everywhere."""
         waveform = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-        if waveform.size < YAMNET_MIN_SAMPLES:
-            # Shorter than one YAMNet frame; pad rather than get zero frames
-            # back and have to guess.
-            waveform = np.pad(waveform, (0, YAMNET_MIN_SAMPLES - waveform.size))
+        windows = split_windows(waveform, self.window_samples)
+        scores = np.stack([self._score_window(w) for w in windows])
 
-        scores, _embeddings, _spectrogram = self._model(waveform)
-        scores = scores.numpy()
         speech_score, _ = aggregate(scores, self.labels, SPEECH_LABELS)
         noise_score, noise_label = aggregate(scores, self.labels, NOISE_LABELS)
         return Classification(
@@ -284,6 +332,24 @@ class YamnetClassifier:
             noise_label=noise_label,
             top=top_labels(scores, self.labels),
         )
+
+    def _score_window(self, waveform: np.ndarray) -> np.ndarray:
+        torch = self._torch
+        features = self._extractor(
+            waveform, sampling_rate=SAMPLE_RATE, return_tensors="pt"
+        )
+        values = features["input_values"].to(self.device)
+        if self.device.startswith("cuda"):
+            values = values.half()
+        with torch.no_grad():
+            logits = self._model(input_values=values).logits
+        # AudioSet is multi-label: several classes can be true at once, so each
+        # gets its own sigmoid rather than competing in a softmax.
+        return torch.sigmoid(logits.float())[0].cpu().numpy()
+
+    @property
+    def source(self) -> str:
+        return f"{self.model_id} ({self.device})"
 
     @property
     def sample_rate(self) -> int:

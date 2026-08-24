@@ -47,17 +47,27 @@ PARTIAL_INTERVAL_MS = 600
 # through one.
 SPLIT_SEARCH_MS = 500
 
-# --- 3. Deep Noise Filter (YAMNet, DESIGN.md section 3.3) --------------------
-# YAMNet is loaded from TF Hub unless this points at a local SavedModel
-# directory, which is how an offline pod gets it.
-YAMNET_MODEL_DIR = os.environ.get("YAMNET_MODEL_DIR", "")
-YAMNET_HUB_URL = "https://tfhub.dev/google/yamnet/1"
+# --- 3. Deep Noise Filter (AST, DESIGN.md section 3.3) ----------------------
+# DESIGN.md allows "YAMNet or a slimmed AST". AST wins on this pod: YAMNet
+# means TensorFlow, and TF 2.17 pins numpy < 2.1 and protobuf 4.x while vllm,
+# whisperx and pyannote all need numpy >= 2 and protobuf >= 5.29. There is no
+# version of both. AST runs on the torch the pod already has, over the same
+# AudioSet label space, so the filter policy is unchanged.
+AST_MODEL_ID = os.environ.get(
+    "AST_MODEL_ID", "MIT/ast-finetuned-audioset-10-10-0.4593"
+)
+# "cuda", "cpu", or "" to pick automatically. The model is ~350 MB of VRAM,
+# which is nothing next to vLLM, and on CPU a 7 s utterance would eat most of
+# the latency budget.
+NOISE_DEVICE = os.environ.get("NOISE_DEVICE", "")
 
-# An utterance survives unless YAMNet is confident it holds no speech at all.
-# The filter is deliberately timid: dropping real speech loses a sentence for
-# good, while letting a cough through only costs one wasted ASR call.
+# An utterance survives unless the classifier is confident it holds no speech
+# at all. The filter is deliberately timid: dropping real speech loses a
+# sentence for good, while letting a cough through only costs one wasted ASR
+# call.
 NOISE_MIN_SPEECH_SCORE = 0.2
 # ... and even then, only when something non-speech actually scored higher.
 NOISE_REQUIRE_LOUDER_NOISE = True
-# YAMNet needs 0.975 s to produce a single frame; shorter audio is padded.
-YAMNET_MIN_SAMPLES = 15_600
+# AST reads a fixed 10.24 s window. Longer audio is scored one window at a
+# time and the best score for each label wins.
+NOISE_WINDOW_SECONDS = 10.0

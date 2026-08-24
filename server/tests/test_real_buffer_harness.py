@@ -251,3 +251,44 @@ def test_describe_prints_without_crashing(capsys):
     out = capsys.readouterr().out
     assert "Utterances:" in out
     assert "pause" in out
+
+
+# ---------------------------------------------------------------------------
+# main()
+# ---------------------------------------------------------------------------
+def test_main_runs_and_passes_on_a_talking_recording(monkeypatch, tmp_path, capsys):
+    """Importing the module does not prove main() still works."""
+    monkeypatch.setattr(harness, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(harness, "SileroVAD", lambda *a, **k: ScriptedVAD([0.9]))
+    speech = write_wav(tmp_path / "speech.wav", 12.0)
+    monkeypatch.setattr(sys, "argv", ["x", "--speech", str(speech)])
+    assert harness.main() == 0
+    out = capsys.readouterr().out
+    assert "RESULT: PASS" in out
+    assert "Utterances:" in out
+
+
+def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
+    from server.pipeline.vad import VADError
+
+    def explode(*_args, **_kwargs):
+        raise VADError("Could not load the Silero VAD model")
+
+    monkeypatch.setattr(harness, "SileroVAD", explode)
+    speech = write_wav(tmp_path / "speech.wav", 2.0)
+    monkeypatch.setattr(sys, "argv", ["x", "--speech", str(speech)])
+    assert harness.main() == 2
+    assert "Could not load" in capsys.readouterr().out
+
+
+def test_main_rejects_a_wrongly_formatted_recording(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(harness, "SileroVAD", lambda *a, **k: ScriptedVAD([0.9]))
+    path = tmp_path / "wrong.wav"
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(SAMPLE_WIDTH)
+        wav.setframerate(8_000)
+        wav.writeframes(bytes(4000))
+    monkeypatch.setattr(sys, "argv", ["x", "--speech", str(path)])
+    assert harness.main() == 2
+    assert "8000 Hz" in capsys.readouterr().out

@@ -34,7 +34,7 @@ from common.protocol import (
     make_error,
 )
 from server.net.session import Response, ServerSession
-from server.pipeline.noise import NoiseFilter, NoiseFilterError, YamnetClassifier
+from server.pipeline.noise import AstClassifier, NoiseFilter, NoiseFilterError
 from server.pipeline.vad import SileroVAD, VADSegmenter
 
 logging.basicConfig(
@@ -64,9 +64,9 @@ class AppState:
                 log.warning("Deep Noise Filter disabled by environment")
                 return
             try:
-                log.info("Loading YAMNet ...")
-                self.noise_filter = NoiseFilter(classifier=YamnetClassifier())
-                log.info("YAMNet ready")
+                log.info("Loading the audio classifier ...")
+                self.noise_filter = NoiseFilter(classifier=AstClassifier())
+                log.info("Audio classifier ready")
             except NoiseFilterError as exc:
                 # Serving without the filter is worse than serving with it,
                 # but far better than refusing the meeting. /health says which

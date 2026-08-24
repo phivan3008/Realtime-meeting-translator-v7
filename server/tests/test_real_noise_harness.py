@@ -1,7 +1,8 @@
 """Smoke tests for the ``server/tests_real/test_real_noise.py`` harness.
 
-The real script needs TensorFlow and the pod; this drives everything around
-the model with stubs so a crash in the reporting code is caught here.
+The real script needs the pod's torch stack; this drives everything around
+the model with stubs, including main() itself, so a crash in the script is
+caught here rather than after a round trip through the user.
 
 Run with::
 
@@ -174,3 +175,98 @@ def test_the_report_separates_passes_from_failures():
     report.add("good", True)
     report.add("bad", False, "why")
     assert [c.name for c in report.failed] == ["bad"]
+
+
+# ---------------------------------------------------------------------------
+# main()
+# ---------------------------------------------------------------------------
+class StubAst:
+    """Enough of AstClassifier for main() to run end to end."""
+
+    labels = ["Speech", "Computer keyboard"] + [f"Class {i}" for i in range(500)]
+    source = "stub (cpu)"
+
+    def __init__(self, result: Classification, **_kwargs):
+        self.result = result
+
+    def classify(self, pcm: bytes) -> Classification:
+        return self.result
+
+
+def run_main(monkeypatch, tmp_path, result: Classification, noise_result=None,
+             with_noise: bool = True) -> int:
+    """Drive the real script exactly as the pod would, with stubs for models.
+
+    Importing the module is not enough: a broken main() - a stale model class,
+    a renamed flag - only shows up when it is actually called, and on the pod
+    that costs a round trip.
+    """
+    speech = write_wav(tmp_path / "speech.wav", 6.0)
+    noise = write_wav(tmp_path / "keyboard.wav", 6.0)
+
+    results = {"speech.wav": result, "keyboard.wav": noise_result or KEYBOARD}
+
+    class Router(StubAst):
+        def __init__(self, **_kwargs):
+            self.result = result
+
+        def classify(self, pcm: bytes) -> Classification:
+            return self.current
+
+    router = Router()
+
+    def make_classifier(**_kwargs):
+        return router
+
+    monkeypatch.setattr(harness, "AstClassifier", make_classifier)
+    monkeypatch.setattr(harness, "SileroVAD", lambda *a, **k: ScriptedVAD([0.9]))
+
+    original_classify_file = harness.classify_file
+    original_pipeline = harness.run_pipeline
+
+    def routed_classify_file(path, filt):
+        router.current = results[path.name]
+        return original_classify_file(path, filt)
+
+    def routed_pipeline(path, vad, filt):
+        router.current = results[path.name]
+        return original_pipeline(path, vad, filt)
+
+    monkeypatch.setattr(harness, "classify_file", routed_classify_file)
+    monkeypatch.setattr(harness, "run_pipeline", routed_pipeline)
+
+    argv = ["test_real_noise.py", "--speech", str(speech)]
+    if with_noise:
+        argv += ["--noise", str(noise)]
+    monkeypatch.setattr(sys, "argv", argv)
+    return harness.main()
+
+
+def test_main_runs_and_passes_on_healthy_inputs(monkeypatch, tmp_path, capsys):
+    assert run_main(monkeypatch, tmp_path, SPEECHY) == 0
+    out = capsys.readouterr().out
+    assert "RESULT: PASS" in out
+    assert "stub (cpu)" in out
+
+
+def test_main_fails_when_speech_is_thrown_away(monkeypatch, tmp_path, capsys):
+    assert run_main(monkeypatch, tmp_path, KEYBOARD) == 1
+    assert "RESULT: FAIL" in capsys.readouterr().out
+
+
+def test_main_runs_without_any_noise_file(monkeypatch, tmp_path, capsys):
+    assert run_main(monkeypatch, tmp_path, SPEECHY, with_noise=False) == 0
+    assert "the drop side is unproven" in capsys.readouterr().out
+
+
+def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
+    def explode(**_kwargs):
+        raise harness.NoiseFilterError("Could not load 'MIT/ast-...'")
+
+    monkeypatch.setattr(harness, "AstClassifier", explode)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["x", "--speech", str(write_wav(tmp_path / "speech.wav", 2.0))],
+    )
+    assert harness.main() == 2
+    assert "Could not load" in capsys.readouterr().out

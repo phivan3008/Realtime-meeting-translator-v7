@@ -1,18 +1,18 @@
-"""REAL TEST - YAMNet Deep Noise Filter on real recorded audio.
+"""REAL TEST - the Deep Noise Filter (AST) on real recorded audio.
 
 MUST RUN ON: the GPU Server pod.
 DO NOT RUN ON: the Dev PC agent loop.
 
 Silero removes silence but not noise: it is a voice activity detector, and it
-fires happily on a cough or a keyboard. YAMNet gets the last word on whether
-an utterance is worth transcribing, so this checks it on the two things
+fires happily on a cough or a keyboard. AST gets the last word on whether an
+utterance is worth transcribing, so this checks it on the two things
 ``DESIGN.md`` names - keyboard clatter and coughing - plus real speech.
 
 What it proves
 --------------
-1. YAMNet loads on the pod and names its source (TF Hub or a local copy).
-2. It runs on the CPU, fast enough that the filter costs nothing next to the
-   ASR call it saves.
+1. AST loads on the pod and names its source and device.
+2. It is fast enough that the filter costs nothing next to the ASR call it
+   saves.
 3. Real speech is kept, with a high speech score.
 4. Recorded keyboard and cough audio is dropped, and the label it is dropped
    under is a sensible one.
@@ -47,6 +47,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from server.config import (  # noqa: E402
+    AST_MODEL_ID,
     CHANNELS,
     CHUNK_BYTES,
     NOISE_MIN_SPEECH_SCORE,
@@ -55,10 +56,10 @@ from server.config import (  # noqa: E402
 )
 from server.pipeline.buffer import BufferManager  # noqa: E402
 from server.pipeline.noise import (  # noqa: E402
+    AstClassifier,
     Classification,
     NoiseFilter,
     NoiseFilterError,
-    YamnetClassifier,
 )
 from server.pipeline.vad import SileroVAD, VADError, VADSegmenter  # noqa: E402
 
@@ -167,9 +168,11 @@ def main() -> int:
                         help="WAV of real meeting speech")
     parser.add_argument("--noise", type=Path, action="append", default=[],
                         help="WAV of keyboard, coughing, ... (repeatable)")
-    parser.add_argument("--model-dir", default="",
-                        help="local YAMNet SavedModel directory, for an "
-                             "offline pod")
+    parser.add_argument("--model-id", default="",
+                        help="override the AST checkpoint, or point at a "
+                             "local directory on an offline pod")
+    parser.add_argument("--device", default="",
+                        help='"cuda" or "cpu"; auto by default')
     args = parser.parse_args()
 
     print("=" * 72)
@@ -180,16 +183,17 @@ def main() -> int:
 
     report = Report()
     try:
-        print("\n  Loading YAMNet ...")
+        print()
+        print(f"  Loading {args.model_id or AST_MODEL_ID} ...")
         started = time.perf_counter()
-        classifier = YamnetClassifier(model_dir=args.model_dir)
-        print(f"  YAMNet ready in {time.perf_counter() - started:.1f} s "
+        classifier = AstClassifier(model_id=args.model_id, device=args.device)
+        print(f"  Classifier ready in {time.perf_counter() - started:.1f} s "
               f"from {classifier.source}")
         print(f"  {len(classifier.labels)} classes, "
               f"e.g. {classifier.labels[:3]}")
-        report.add("YAMNet loads on the pod", True, classifier.source)
-        report.add("The class map looks like AudioSet",
-                   len(classifier.labels) == 521,
+        report.add("The classifier loads on the pod", True, classifier.source)
+        report.add("The label set looks like AudioSet",
+                   len(classifier.labels) >= 500,
                    f"{len(classifier.labels)} labels")
 
         filt = NoiseFilter(classifier=classifier)
