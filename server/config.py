@@ -124,16 +124,23 @@ SPEAKER_CACHE_DIR = os.environ.get("SPEAKER_CACHE_DIR", "models/speaker")
 # 0.25 is SpeechBrain's own default for this checkpoint - see the `threshold`
 # argument of SpeakerRecognition.verify_batch - which is a tuned operating
 # point rather than a guess, and a long way below the 0.55 first put here.
-# Measured on two single-speaker recordings (45 s each, different people):
-# same voice ranged 0.394 to 0.994, different voices -0.129 to 0.199, so any
-# threshold in (0.199, 0.394) separates them and 0.25 sits inside it.
+# Measured on three single-speaker recordings, 45 s each, two of them the
+# same gender:
 #
-# Kept at SpeechBrain's 0.25 rather than moved to the measured midpoint of
-# 0.296. Two speakers is not enough to tune on, and the two failures are not
-# equal: too low merges two people under one name, too high splits one person
-# into Speaker_01 through Speaker_06, which is what the first broken run
-# looked like and is far uglier. 0.25 leans towards merging on purpose.
-SPEAKER_MATCH_THRESHOLD = 0.25
+#   same voice        0.361 .. 0.994
+#   different voices -0.129 .. 0.232
+#
+# so any threshold in (0.232, 0.361) separates them. 0.30 is close to the
+# midpoint of 0.296 that two separate runs agreed on.
+#
+# Sitting in the middle rather than at either edge is the point. That window
+# can only shrink as more people join: adding a third voice, one of the same
+# gender as the first, moved the different-voice ceiling from 0.199 to 0.232
+# and the same-voice floor from 0.394 to 0.361. SpeechBrain's own default of
+# 0.25 was inside the window but left only 0.018 of room above the
+# different-voice ceiling - one more similar pair and it would merge two
+# people. 0.30 leaves about 0.06 on both sides instead.
+SPEAKER_MATCH_THRESHOLD = 0.30
 
 # Shorter than this there is not enough voice for a trustworthy print, and a
 # wrong speaker label is worse than an honest "unknown".
@@ -149,3 +156,27 @@ SPEAKER_CENTROID_MOMENTUM = 0.7
 
 #: Label used when an utterance is too short to identify.
 SPEAKER_UNKNOWN = "Speaker_unknown"
+
+# --- 6. Language ID (DESIGN.md section 3.6) ---------------------------------
+LID_MODEL = os.environ.get("LID_MODEL", "speechbrain/lang-id-voxlingua107-ecapa")
+LID_DEVICE = os.environ.get("LID_DEVICE", "")
+LID_CACHE_DIR = os.environ.get("LID_CACHE_DIR", "models/lid")
+
+# The meeting is Vietnamese and Japanese, so the decision is between those two
+# and nothing else. VoxLingua107 knows 107 languages, and letting it pick
+# freely means a Japanese sentence can come back as Korean or Chinese - a
+# plausible mistake for the model and a useless answer for us, because the
+# only thing downstream does with this is force Whisper's language.
+LID_LANGUAGES = ("vi", "ja")
+
+# How far apart the two have to be before the answer is trusted. Below this
+# the languages are reported as unknown and Whisper detects for itself, which
+# is better than forcing the wrong one: forced Japanese on Vietnamese audio
+# does not fail, it quietly transcribes nonsense.
+LID_MIN_MARGIN = 0.30
+
+# Shorter than this there is not enough speech to tell the languages apart.
+LID_MIN_DURATION_MS = 600
+
+#: Reported when the languages cannot be told apart; Whisper then auto-detects.
+LID_UNKNOWN = ""

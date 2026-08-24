@@ -32,6 +32,7 @@ from common.protocol import (
 )
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
+from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
 from server.pipeline.vad import VADSegmenter
@@ -64,6 +65,7 @@ class ServerSessionStats:
     utterances_dropped: int = 0
     utterances_shaped: int = 0
     utterances_identified: int = 0
+    utterances_with_language: int = 0
     partials: int = 0
     protocol_errors: int = 0
 
@@ -82,6 +84,7 @@ class ServerSession:
         noise_filter: Optional[NoiseFilter] = None,
         overlap_resolver: Optional[OverlapResolver] = None,
         speaker_identifier: Optional[SpeakerIdentifier] = None,
+        language_identifier: Optional[LanguageIdentifier] = None,
         strict_chunk_size: bool = True,
     ) -> None:
         self._segmenter_factory = segmenter_factory
@@ -91,6 +94,7 @@ class ServerSession:
         self.noise_filter = noise_filter
         self.overlap_resolver = overlap_resolver
         self.speaker_identifier = speaker_identifier
+        self.language_identifier = language_identifier
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
@@ -149,6 +153,8 @@ class ServerSession:
         if self.speaker_identifier is not None:
             # A new meeting starts with nobody known.
             self.speaker_identifier.reset()
+        if self.language_identifier is not None:
+            self.language_identifier.reset()
         self.state = SessionState.STREAMING
         log.info("Session %s ready (client=%r)", hello.session_id, hello.client)
         return Response(messages=[make_ready(hello.session_id)])
@@ -211,6 +217,16 @@ class ServerSession:
                 speaker_id = assignment.speaker_id
                 self.stats.utterances_identified += 1
 
+            lang_code = ""
+            if keep and self.language_identifier is not None:
+                # Raw audio again, for the same reason: the gate removes quiet
+                # phonemes, and those carry the cues that tell the two
+                # languages apart.
+                decision = self.language_identifier.identify(utterance.pcm)
+                lang_code = decision.lang_code
+                if decision.known:
+                    self.stats.utterances_with_language += 1
+
             messages.append(
                 make_utterance(
                     index=utterance.index,
@@ -222,6 +238,7 @@ class ServerSession:
                     label=label,
                     speech_score=score,
                     speaker_id=speaker_id,
+                    lang_code=lang_code,
                 )
             )
         self.stats.utterances += len(result.finals)

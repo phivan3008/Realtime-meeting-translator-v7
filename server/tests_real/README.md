@@ -41,6 +41,7 @@ an afternoon once already.
 | `test_real_noise.py` | Deep Noise Filter (AST): loads on the pod, keeps real speech, drops recorded keyboard and coughing, costs almost nothing |
 | `test_real_overlap.py` | Overlap Resolver: a clean voice survives untouched, a voice 20 dB under it is squashed |
 | `test_real_diarization.py` | Speaker voiceprints: measures the same-speaker and different-speaker cosine distributions. **Every `--voice` file must hold exactly one person** |
+| `test_real_lid.py` | Language ID: Vietnamese against Japanese, per sentence, with the margin behind every verdict |
 
 ```bash
 python3.11 server/tests_real/test_real_vad.py \
