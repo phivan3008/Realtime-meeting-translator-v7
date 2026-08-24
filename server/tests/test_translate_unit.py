@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from server.config import TRANSLATE_HISTORY, TRANSLATE_PAIR
+from server.config import TRANSLATE_HISTORY, TRANSLATE_MODEL, TRANSLATE_PAIR
 from server.pipeline.translate import (
     TranslationContext,
     TranslationError,
@@ -292,3 +292,41 @@ def test_reset_forgets_the_meeting_and_the_counters():
     translator.reset()
     assert translator.context.turns == []
     assert translator.stats.seen == 0
+
+
+# ---------------------------------------------------------------------------
+# Which checkpoint is actually serving
+# ---------------------------------------------------------------------------
+def test_the_configured_checkpoint_is_the_one_design_md_names():
+    assert TRANSLATE_MODEL == "Qwen/Qwen3.5-9B"
+
+
+def choose(wanted: str, served: list[str]) -> str:
+    from server.pipeline.translate import choose_model
+
+    return choose_model(wanted, served, "http://stub/v1")
+
+
+def test_the_configured_model_is_taken_when_the_server_has_it():
+    assert choose("Qwen/Qwen3.5-9B",
+                  ["Qwen/Qwen3.5-9B"]) == "Qwen/Qwen3.5-9B"
+
+
+def test_a_server_running_the_wrong_checkpoint_is_refused():
+    """Started on the wrong model, vLLM answers happily and only the
+    translations are worse - which no log would ever show."""
+    with pytest.raises(TranslationError) as caught:
+        choose("Qwen/Qwen3.5-9B", ["Qwen/Qwen2.5-7B-Instruct"])
+    message = str(caught.value)
+    assert "Qwen/Qwen3.5-9B" in message
+    assert "Qwen/Qwen2.5-7B-Instruct" in message
+    assert "--model" in message
+
+
+def test_an_empty_setting_accepts_whatever_is_running():
+    assert choose("", ["some/model", "other/model"]) == "some/model"
+
+
+def test_a_server_with_no_model_is_refused():
+    with pytest.raises(TranslationError, match="serving no model"):
+        choose("Qwen/Qwen3.5-9B", [])

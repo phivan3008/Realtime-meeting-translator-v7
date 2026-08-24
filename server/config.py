@@ -223,9 +223,12 @@ ASR_CONDITION_ON_PREVIOUS = False
 # cost is one more process to start.
 TRANSLATE_BASE_URL = os.environ.get("TRANSLATE_BASE_URL",
                                     "http://127.0.0.1:8001/v1")
-# Empty means "whatever that server is serving", asked at connect time. The
-# model name lives in the vLLM launch command, which is where it belongs.
-TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "")
+# The checkpoint DESIGN.md section 3.8 names. It has to match what vLLM was
+# started with: the client checks at connect time and refuses a server that is
+# serving something else, because a quietly substituted model is a difference
+# nobody would see in the logs and everybody would see in the translations.
+# Set to empty to accept whatever the server happens to be serving.
+TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "Qwen/Qwen3.5-9B")
 TRANSLATE_TIMEOUT_S = float(os.environ.get("TRANSLATE_TIMEOUT_S", "20"))
 
 # Translation is not a creative task and the same sentence twice should give

@@ -104,6 +104,27 @@ def clean(answer: str) -> str:
     return text
 
 
+def choose_model(wanted: str, served: list[str], where: str = "") -> str:
+    """Insist on the configured checkpoint, or take what there is.
+
+    Started against the wrong model, vLLM answers happily and the only symptom
+    is translations that are worse than they should be - exactly the kind of
+    difference that survives every log and every dashboard. So it is checked
+    once, by name, at connect time.
+    """
+    if not served:
+        raise TranslationError(f"{where or 'the server'} is serving no model")
+    if not wanted:
+        return served[0]
+    if wanted in served:
+        return wanted
+    raise TranslationError(
+        f"{where or 'the server'} is serving {served} but this pipeline is "
+        f"configured for {wanted!r}. Start vLLM with --model {wanted}, or set "
+        "TRANSLATE_MODEL to accept what is running."
+    )
+
+
 def target_language(lang_code: str) -> str:
     """Which language this sentence should become."""
     return TRANSLATE_PAIR.get(lang_code, "")
@@ -308,12 +329,14 @@ class VllmClient:
                  timeout: float = TRANSLATE_TIMEOUT_S) -> None:
         self.base_url = (base_url or TRANSLATE_BASE_URL).rstrip("/")
         self.timeout = timeout
-        self.model = model or TRANSLATE_MODEL or self._first_served_model()
+        wanted = model or TRANSLATE_MODEL
+        served = self.served_models()
+        self.model = choose_model(wanted, served, self.base_url)
         log.info("Translation backend ready: %s at %s", self.model,
                  self.base_url)
 
-    def _first_served_model(self) -> str:
-        """Ask the server what it is serving rather than hard-coding a name."""
+    def served_models(self) -> list[str]:
+        """What this server is actually serving."""
         try:
             with urllib.request.urlopen(f"{self.base_url}/models",
                                         timeout=self.timeout) as response:
@@ -321,13 +344,11 @@ class VllmClient:
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             raise TranslationError(
                 f"No translation server at {self.base_url}: {exc}. Start vLLM "
-                "with `python3.11 -m vllm.entrypoints.openai.api_server "
-                "--model <checkpoint> --port 8001`."
+                f"with `python3.11 -m vllm.entrypoints.openai.api_server "
+                f"--model {TRANSLATE_MODEL or '<checkpoint>'} --port 8001`."
             ) from exc
-        models = payload.get("data") or []
-        if not models:
-            raise TranslationError(f"{self.base_url} is serving no model")
-        return str(models[0].get("id", ""))
+        return [str(entry.get("id", "")) for entry in (payload.get("data") or [])]
+
 
     def complete(self, system: str, user: str) -> str:
         body = json.dumps({
