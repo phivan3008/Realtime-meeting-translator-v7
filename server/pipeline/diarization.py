@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Protocol
 
 import numpy as np
@@ -51,6 +52,7 @@ import numpy as np
 from server.config import (
     SAMPLE_RATE,
     SAMPLE_WIDTH,
+    SPEAKER_CACHE_DIR,
     SPEAKER_CENTROID_MOMENTUM,
     SPEAKER_DEVICE,
     SPEAKER_EMBEDDING_MODEL,
@@ -176,17 +178,27 @@ class Embedder(Protocol):
 
 
 class EcapaEmbedder:
-    """ECAPA-TDNN voiceprints via pyannote's speaker embedding wrapper."""
+    """ECAPA-TDNN voiceprints, straight from SpeechBrain.
+
+    ``DESIGN.md`` names pyannote.audio for this stage, and pyannote does ship
+    a wrapper - ``PretrainedSpeakerEmbedding`` - around this very checkpoint.
+    It cannot be used here: pyannote 4.0.7 calls SpeechBrain with ``token``,
+    ``huggingface_cache_dir`` and ``revision``, and SpeechBrain 1.1.0 accepts
+    none of the three, so the wrapper raises before it ever loads a model.
+    pyannote declares no version bound on SpeechBrain either, so no resolver
+    and no ``pip check`` can see the mismatch - only running it does.
+
+    Calling SpeechBrain directly loads the same weights through one less
+    layer, and the layer removed is the broken one.
+    """
 
     def __init__(self, model_id: str = "", device: str = "") -> None:
         try:
             import torch
-            from pyannote.audio.pipelines.speaker_verification import (
-                PretrainedSpeakerEmbedding,
-            )
+            from speechbrain.inference.classifiers import EncoderClassifier
         except ImportError as exc:                      # pragma: no cover
             raise DiarizationError(
-                "pyannote.audio / torch are not installed. Run "
+                "speechbrain / torch are not installed. Run "
                 "`python3.11 -m pip install -r server/requirements.txt`."
             ) from exc
 
@@ -197,8 +209,10 @@ class EcapaEmbedder:
             chosen = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = chosen
         try:
-            self._model = PretrainedSpeakerEmbedding(
-                self.model_id, device=torch.device(self.device)
+            self._model = EncoderClassifier.from_hparams(
+                source=self.model_id,
+                savedir=str(Path(SPEAKER_CACHE_DIR) / self.model_id.replace("/", "_")),
+                run_opts={"device": self.device},
             )
         except Exception as exc:                        # pragma: no cover
             raise DiarizationError(
@@ -209,10 +223,10 @@ class EcapaEmbedder:
     def embed(self, pcm: bytes) -> np.ndarray:
         """One voiceprint for one utterance of 16 kHz mono 16-bit PCM."""
         samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-        # The model wants (batch, channels, samples).
-        waveform = self._torch.from_numpy(samples).reshape(1, 1, -1)
-        embedding = self._model(waveform.to(self.device))
-        return np.asarray(embedding, dtype=np.float64).reshape(-1)
+        waveform = self._torch.from_numpy(samples).unsqueeze(0)   # (1, samples)
+        with self._torch.no_grad():
+            embedding = self._model.encode_batch(waveform.to(self.device))
+        return np.asarray(embedding.squeeze().cpu(), dtype=np.float64).reshape(-1)
 
     @property
     def source(self) -> str:

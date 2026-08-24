@@ -117,6 +117,8 @@ SPEAKER_EMBEDDING_MODEL = os.environ.get(
     "SPEAKER_EMBEDDING_MODEL", "speechbrain/spkrec-ecapa-voxceleb"
 )
 SPEAKER_DEVICE = os.environ.get("SPEAKER_DEVICE", "")
+# Where SpeechBrain unpacks the checkpoint it downloads.
+SPEAKER_CACHE_DIR = os.environ.get("SPEAKER_CACHE_DIR", "models/speaker")
 
 # Cosine similarity above which two voiceprints are called the same person.
 # A guess until server/tests_real/test_real_diarization.py measures the real
