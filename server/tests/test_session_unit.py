@@ -11,7 +11,9 @@ Run with::
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -692,3 +694,66 @@ def test_an_undecided_sentence_does_not_overwrite_what_was_established():
     lid.code = LID_UNKNOWN
     speak_then_pause(session)
     assert session._last_language == "ja"
+
+
+# ---------------------------------------------------------------------------
+# Where the time goes
+#
+# Every stage runs on the thread that reads the socket, so a slow sentence is
+# a stalled connection. One run showed VAD events arriving 12.6 s late and
+# nothing on the server said which stage had taken it.
+# ---------------------------------------------------------------------------
+class SlowDecoder(StubDecoder):
+    def __init__(self, seconds: float, **kwargs):
+        super().__init__(**kwargs)
+        self.seconds = seconds
+
+    def decode(self, samples, lang_code: str = "", beam_size: int = 1):
+        time.sleep(self.seconds)
+        return super().decode(samples, lang_code, beam_size)
+
+
+def test_each_stage_is_charged_for_its_own_time():
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    speak_then_pause(session)
+    assert set(session.stats.stage_seconds) >= {"asr", "translate"}
+    assert all(value >= 0 for value in session.stats.stage_seconds.values())
+
+
+def test_the_slowest_sentence_is_remembered():
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    speak_then_pause(session)
+    assert session.stats.slowest_utterance_seconds > 0
+
+
+def test_a_slow_sentence_names_the_stage_that_took_the_time(caplog):
+    """The log has to say *which* stage, or it only repeats what the client
+    already knew: that the connection stalled."""
+    from server.pipeline.asr import Transcriber
+    from server.pipeline.translate import Translator
+
+    vad = ScriptedVAD([0.9] * 14 + [0.02])
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        transcriber=Transcriber(decoder=SlowDecoder(1.1)),
+        translator=Translator(backend=StubBackend()),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    with caplog.at_level(logging.WARNING, logger="server.net.session"):
+        speak_then_pause(session)
+    assert "held the socket for" in caplog.text
+    assert "asr took" in caplog.text
+
+
+def test_a_fast_sentence_says_nothing(caplog):
+    """A warning on every sentence is a warning on none."""
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    with caplog.at_level(logging.WARNING, logger="server.net.session"):
+        speak_then_pause(session)
+    assert "held the socket" not in caplog.text
+
+
+def test_the_threshold_is_a_few_chunks_of_audio():
+    """At 200 ms a chunk, a second is five chunks the socket did not read."""
+    from server.net.session import SLOW_UTTERANCE_SECONDS
+    assert SLOW_UTTERANCE_SECONDS == 1.0

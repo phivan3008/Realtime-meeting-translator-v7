@@ -15,6 +15,8 @@ The session is a small state machine::
 from __future__ import annotations
 
 import logging
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
@@ -77,10 +79,21 @@ class ServerSessionStats:
     #: Sentences lost because a pipeline stage raised. Not protocol errors:
     #: the client did nothing wrong and the meeting carries on without them.
     pipeline_errors: int = 0
+    #: Seconds spent in each stage, summed over the meeting, and the worst
+    #: single sentence. Every stage runs on the thread that reads audio, so
+    #: this is exactly the time the socket was not being read.
+    stage_seconds: dict = field(default_factory=dict)
+    slowest_utterance_seconds: float = 0.0
 
     @property
     def audio_seconds(self) -> float:
         return self.bytes_received / 2 / 16_000
+
+
+#: A sentence taking longer than this stalls the whole connection, because
+#: every stage runs on the thread that reads audio. At 200 ms per chunk, one
+#: second is five chunks the socket did not get to.
+SLOW_UTTERANCE_SECONDS = 1.0
 
 
 class ServerSession:
@@ -247,13 +260,34 @@ class ServerSession:
                 self.session_id or "?", len(result.finals))
             return []
 
+    @contextmanager
+    def _timed(self, stage: str, into: dict):
+        """Charge the wall time of one stage to that stage.
+
+        Everything here runs on the thread that reads the socket, so these
+        numbers are not curiosity: they are the time the connection spent not
+        reading audio. A run where one sentence took 12 s showed up on the
+        client as VAD events arriving 12 s late, and nothing in the pipeline
+        said which stage had taken it.
+        """
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            spent = time.perf_counter() - started
+            into[stage] = into.get(stage, 0.0) + spent
+            self.stats.stage_seconds[stage] = (
+                self.stats.stage_seconds.get(stage, 0.0) + spent)
+
     def _announce(self, result: BufferOutput) -> list[str]:
         """Classify each finished sentence, then put it on the wire."""
         messages = []
         for utterance in result.finals:
+            spent: dict[str, float] = {}
             keep, label, score = True, "", 0.0
             if self.noise_filter is not None:
-                verdict = self.noise_filter.judge(utterance.pcm)
+                with self._timed("noise", spent):
+                    verdict = self.noise_filter.judge(utterance.pcm)
                 keep = verdict.keep
                 label = verdict.classification.noise_label if not keep else ""
                 score = verdict.classification.speech_score
@@ -263,7 +297,8 @@ class ServerSession:
             if keep and self.overlap_resolver is not None:
                 # Only what survives is worth shaping; a dropped sentence goes
                 # nowhere. The shaped audio is what the ASR stage will read.
-                shaped = self.overlap_resolver.resolve(audio)
+                with self._timed("overlap", spent):
+                    shaped = self.overlap_resolver.resolve(audio)
                 audio = shaped.pcm
                 if shaped.shaped:
                     self.stats.utterances_shaped += 1
@@ -276,7 +311,8 @@ class ServerSession:
                 # the gate removes quiet syllables inside a sentence, and those
                 # carry voice. The resolver is there to help the ASR, and the
                 # bleed it removes is not worth a known loss of identity.
-                assignment = self.speaker_identifier.identify(utterance.pcm)
+                with self._timed("speaker", spent):
+                    assignment = self.speaker_identifier.identify(utterance.pcm)
                 speaker_id = assignment.speaker_id
                 self.stats.utterances_identified += 1
 
@@ -285,7 +321,8 @@ class ServerSession:
                 # Raw audio again, for the same reason: the gate removes quiet
                 # phonemes, and those carry the cues that tell the two
                 # languages apart.
-                decision = self.language_identifier.identify(utterance.pcm)
+                with self._timed("language", spent):
+                    decision = self.language_identifier.identify(utterance.pcm)
                 if decision.known:
                     self.stats.utterances_with_language += 1
                     self._last_language = decision.lang_code
@@ -295,8 +332,9 @@ class ServerSession:
             if keep and self.transcriber is not None:
                 # The shaped audio, not the raw: gating is what the overlap
                 # resolver is for, and this is the stage it was for.
-                transcript = self.transcriber.transcribe(audio, lang_code,
-                                                         is_final=True)
+                with self._timed("asr", spent):
+                    transcript = self.transcriber.transcribe(audio, lang_code,
+                                                             is_final=True)
                 if transcript.has_text:
                     self.stats.transcripts += 1
 
@@ -329,8 +367,9 @@ class ServerSession:
                     # `.finals` off a Translation. It crashed the session on the
                     # first sentence that reached the translator, which is every
                     # sentence that would have produced a final.
-                    translated = self.translator.translate(
-                        transcript.text, transcript.lang_code, speaker_id)
+                    with self._timed("translate", spent):
+                        translated = self.translator.translate(
+                            transcript.text, transcript.lang_code, speaker_id)
                     translation = translated.text
                     translation_reason = translated.reason
                     if not translated.ok:
@@ -345,12 +384,35 @@ class ServerSession:
                     translation_reason=translation_reason,
                     translation_raw=translation_raw,
                 ))
+            self._report_if_slow(utterance, spent)
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
         if result.partial is not None:
             self.stats.partials += 1
             messages += self._transcribe_partial(result.partial)
         return messages
+
+    def _report_if_slow(self, utterance, spent: dict) -> None:
+        """Name the stage that stalled the connection, while it is still known.
+
+        Without this a slow sentence is invisible on the server and shows up
+        on the client only as VAD events arriving late - which says the
+        connection stalled but not on what.
+        """
+        total = sum(spent.values())
+        self.stats.slowest_utterance_seconds = max(
+            self.stats.slowest_utterance_seconds, total)
+        if total < SLOW_UTTERANCE_SECONDS:
+            return
+        worst = max(spent, key=spent.get)
+        log.warning(
+            "Session %s: sentence %d (%.1f s of audio) held the socket for "
+            "%.1f s - %s took %.1f s of it. Breakdown: %s",
+            self.session_id or "?", utterance.index,
+            (utterance.end_ms - utterance.start_ms) / 1000.0,
+            total, worst, spent[worst],
+            {stage: round(value, 2) for stage, value in spent.items()},
+        )
 
     def _transcribe_partial(self, partial) -> list[str]:
         """The grey running text, replaced by the next one a second later.
