@@ -292,13 +292,29 @@ TRANSLATE_ENABLE_THINKING = False
 # into summarising the meeting.
 TRANSLATE_HISTORY = 3
 
-# How the history is written into the prompt. See
-# TranslationContext.as_prompt: written with its translations it reads as
-# worked examples, and when several turns run the same way the model
-# follows the examples over the instruction and answers in the wrong
-# language. "labelled" names each translation's language; "sources" drops
-# the translations entirely, leaving nothing to imitate.
-HISTORY_STYLE = "labelled"
+# How the history is written into the prompt.
+#
+# Written with its translations, the history reads as worked examples. When
+# several turns run the same way every example ends in the same language, and
+# the model follows the examples over the instruction. Measured against the
+# live model on two sentences the pipeline lost, three Vietnamese turns of
+# history behind each:
+#
+#     none      translated      translated
+#     plain     REFUSED         REFUSED
+#     labelled  REFUSED         REFUSED
+#     sources   translated      translated
+#
+# The "none" column is what rules out the other explanation: both sentences
+# had also been cut mid-sentence by the 7 s limit, and a model cannot
+# translate half a sentence - but with no history at all it translated both.
+#
+# Naming each translation's language ("labelled") was not enough; at three
+# turns deep it failed exactly as the original did. Removing the translations
+# works, because there is then nothing to imitate. The history is kept to say
+# what "that one" refers to, and the source lines carry that alone - the
+# answers still change with the history, they just stop copying its language.
+HISTORY_STYLE = "sources"
 
 # A translation runs a little longer than its source, never many times longer.
 # Far past this and the model has started explaining itself or looping.

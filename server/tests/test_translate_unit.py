@@ -128,16 +128,25 @@ def test_the_history_prompt_names_the_speaker_and_the_language():
     context.remember(turn("xin chào", "こんにちは"))
     text = context.as_prompt()
     assert "Speaker_01 (vi): xin chào" in text
-    assert "-> (ja) こんにちは" in text
 
 
-def test_every_history_line_says_which_language_its_translation_is_in():
-    """Unlabelled, the history reads as worked examples that all end in the
-    same language, and the model follows that over the system prompt."""
+def test_the_history_carries_no_translations_by_default():
+    """The default is "sources": with the translations in it, the history
+    reads as worked examples and the model copies their language."""
+    context = TranslationContext()
+    context.remember(turn("xin chào", "こんにちは"))
+    text = context.as_prompt()
+    assert "こんにちは" not in text
+    assert "->" not in text
+
+
+def test_the_labelled_history_says_which_language_each_translation_is_in():
+    """Kept as a measuring device. It was not enough on its own: at three
+    turns deep it failed exactly as the unlabelled form did."""
     context = TranslationContext()
     context.remember(turn("xin chào", "こんにちは"))
     context.remember(Turn("Speaker_02", "ja", "はい。", "Vâng."))
-    text = context.as_prompt()
+    text = context.as_prompt(style="labelled")
     assert "-> (ja) こんにちは" in text
     assert "-> (vi) Vâng." in text
 

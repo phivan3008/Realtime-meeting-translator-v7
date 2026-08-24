@@ -372,7 +372,7 @@ def test_a_model_that_ignores_the_history_passes():
 
 
 def test_a_model_steered_only_by_the_plain_history_passes():
-    """The styles do their job, so nothing is reported against them."""
+    """The style in use does its job, so nothing is reported against it."""
     class Steered:
         def complete(self, system: str, user: str) -> str:
             if "and into Vietnamese only" in user:
@@ -403,9 +403,9 @@ def test_a_style_that_does_not_fix_it_is_caught():
 
     report = harness.Report()
     harness.check_what_the_history_does(SteeredByAnyHistory(), report)
-    failed = [c.name for c in report.failed]
-    assert "The 'labelled' history does not steer the language" in failed
-    assert "The 'sources' history does not steer the language" in failed
+    assert [c.name for c in report.failed] == [
+        f"The {harness.HISTORY_STYLE!r} history does not steer the language"
+    ]
 
 
 def test_a_sentence_that_fails_without_history_is_not_blamed_on_the_history(capsys):
@@ -424,9 +424,9 @@ def test_a_sentence_that_fails_without_history_is_not_blamed_on_the_history(caps
     assert "the cut is the cause, not the history" in capsys.readouterr().out
 
 
-def test_a_plain_history_that_also_works_is_reported_as_such(capsys):
-    """Then the styles are solving a problem this run does not show, and
-    saying so matters more than keeping them."""
+def test_a_style_that_is_not_earning_its_place_is_reported_as_such(capsys):
+    """If every other style works too, HISTORY_STYLE is solving a problem
+    this run does not show - and saying so matters more than keeping it."""
     class Working:
         def complete(self, system: str, user: str) -> str:
             if "Write it in Japanese" in system:
@@ -434,7 +434,7 @@ def test_a_plain_history_that_also_works_is_reported_as_such(capsys):
             return "Đang tạo ở đây à?"
 
     harness.check_what_the_history_does(Working(), harness.Report())
-    assert "the plain history translated everything" in capsys.readouterr().out
+    assert "every other style translated them too" in capsys.readouterr().out
 
 
 def test_every_variant_is_printed(capsys):

@@ -44,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from server.config import TRANSLATE_HISTORY  # noqa: E402
+from server.config import HISTORY_STYLE, TRANSLATE_HISTORY  # noqa: E402
 from server.pipeline.translate import (  # noqa: E402
     TranslationContext,
     TranslationError,
@@ -165,12 +165,23 @@ MEETING_REFUSALS = [
 #   no history        - if it translates here, the sentence is fine and the
 #                       history is the problem
 #   plain history     - the form before labelling
-#   labelled history  - the form in the pipeline now
+#   labelled history  - the first attempt at a fix
 #   sources only      - the history with its translations removed, so there
 #                       are no worked examples left to imitate
 #
 # If "no history" fails too, the sentence being cut is the cause, the history
 # is not, and no amount of prompt work will help.
+#
+# It answered. Against the live model, on both Japanese sentences:
+#
+#     none      translated      translated
+#     plain     REFUSED         REFUSED
+#     labelled  REFUSED         REFUSED
+#     sources   translated      translated
+#
+# So the cut was not the cause, labelling was not enough at three turns deep,
+# and HISTORY_STYLE is now "sources". These stay as the regression test for
+# that, and the check judges whichever style the pipeline is set to.
 CUT_HISTORY = [
     Turn("Speaker_02", "vi", "Cái tab này đều viết theo cái template có được.",
          "このタブはすべて、取得したテンプレートに従って記述されています。"),
@@ -363,16 +374,26 @@ def check_what_the_history_does(client, report: Report) -> None:
 
     # Only sentences that a bare model can translate are the history's fault.
     steerable = [source for source in japanese if source not in broken]
-    for name in ("labelled", "sources"):
-        failed = [source for source in steerable if not answers[source][name].ok]
-        report.add(f"The {name!r} history does not steer the language",
-                   not failed,
-                   f"{len(failed)} of {len(steerable)} refused")
 
-    if steerable and all(answers[source]["plain"].ok for source in steerable):
-        print("\n    NOTE: the plain history translated everything the model "
-              "can translate. The history is then not steering anything here, "
-              "and the styles are solving a problem this run does not show.")
+    def refused_by(name: str) -> list[str]:
+        return [source for source in steerable if not answers[source][name].ok]
+
+    # Only the style the pipeline actually uses is judged. The others are
+    # measuring devices: "plain" is the original and "labelled" the first
+    # attempt at fixing it, and both are printed above so a reader can see
+    # whether the style in use is still earning its place.
+    failed = refused_by(HISTORY_STYLE)
+    report.add(f"The {HISTORY_STYLE!r} history does not steer the language",
+               not failed, f"{len(failed)} of {len(steerable)} refused")
+
+    others = {name: len(refused_by(name)) for name in TranslationContext.STYLES
+              if name != HISTORY_STYLE}
+    print(f"\n    For comparison, of {len(steerable)} sentence(s) the model "
+          f"can translate: {others}")
+    if steerable and not any(others.values()):
+        print("    NOTE: every other style translated them too. The history "
+              "is then not steering anything here, and HISTORY_STYLE is "
+              "solving a problem this run does not show.")
 
 
 def check_meeting_refusals(client, report: Report) -> None:
