@@ -469,3 +469,226 @@ def test_a_session_without_the_filter_keeps_everything():
     payload = of_type(session.finish(), "utterance")[0]
     assert payload["kept"] is True
     assert session.stats.utterances_dropped == 0
+
+
+# ---------------------------------------------------------------------------
+# The whole pipeline, transcriber and translator included
+#
+# Nothing below existed until a 60 s meeting died seven times on
+# ``AttributeError: 'Translation' object has no attribute 'finals'``. The
+# session had never been unit-tested with a translator wired in, so the one
+# line that needed both a committed sentence and a translator to run was the
+# one line no test reached.
+# ---------------------------------------------------------------------------
+class StubDecoder:
+    """Whisper's shape, minus Whisper."""
+
+    def __init__(self, text: str = "xin chào mọi người", lang: str = "vi"):
+        self.text = text
+        self.lang = lang
+        self.calls: list[tuple[int, str, bool]] = []
+
+    def decode(self, samples, lang_code: str = "", beam_size: int = 1):
+        self.calls.append((len(samples), lang_code, beam_size))
+        from server.pipeline.asr import Piece
+        piece = Piece(text=self.text, no_speech_prob=0.01,
+                      avg_logprob=-0.2, compression_ratio=1.2)
+        return [piece], (lang_code or self.lang)
+
+
+class StubBackend:
+    def __init__(self, answer: str = "こんにちは"):
+        self.answer = answer
+        self.calls: list[str] = []
+
+    def complete(self, system: str, user: str) -> str:
+        self.calls.append(user)
+        return self.answer
+
+
+def full_session(probabilities=(0.9,), decoder=None, backend=None):
+    from server.pipeline.asr import Transcriber
+    from server.pipeline.translate import Translator
+
+    decoder = decoder if decoder is not None else StubDecoder()
+    backend = backend if backend is not None else StubBackend()
+    vad = ScriptedVAD(probabilities)
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        transcriber=Transcriber(decoder=decoder),
+        translator=Translator(backend=backend),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    return session, decoder, backend
+
+
+def speak_then_pause(session, speech_chunks: int = 2, silence_chunks: int = 8):
+    """Drive a whole sentence through ``handle_binary`` and let a pause end it.
+
+    ``finish()`` closes a segment too, but it is not the path that crashed:
+    the sentences a real meeting commits are committed mid-stream.
+    """
+    responses = []
+    for _ in range(speech_chunks + silence_chunks):
+        responses.append(session.handle_binary(chunk()))
+    return responses
+
+
+def test_a_committed_sentence_survives_the_translator():
+    """The regression itself: `result` was reassigned inside the loop, so the
+    line after it read `.finals` off a Translation."""
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    responses = speak_then_pause(session)
+    finals = [p for r in responses for p in of_type(r, "final")]
+    assert finals, "the sentence never reached the wire"
+    assert finals[0]["transcript"] == "xin chào mọi người"
+    assert finals[0]["translation"] == "こんにちは"
+
+
+def test_the_utterance_count_survives_the_translator():
+    """The crashing line was a statistic. It still has to be right."""
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    speak_then_pause(session)
+    assert session.stats.utterances == 1
+    assert session.stats.translations == 1
+    # `transcripts` counts partials too, so it runs ahead of the sentences.
+    assert session.stats.transcripts >= 1
+    assert session.stats.partials >= 1
+
+
+def test_a_second_sentence_still_counts():
+    """One reassignment would have made the count wrong rather than loud."""
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    speak_then_pause(session)
+    for _ in range(14):
+        session.handle_binary(chunk())
+    assert session.stats.utterances >= 1
+
+
+def test_a_refused_translation_still_sends_the_sentence():
+    """The transcript is worth showing even when the model gives nothing."""
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02],
+                                               backend=StubBackend(answer=""))
+    responses = speak_then_pause(session)
+    finals = [p for r in responses for p in of_type(r, "final")]
+    assert finals
+    assert finals[0]["transcript"] == "xin chào mọi người"
+    assert finals[0]["translation"] == ""
+    assert session.stats.translations == 0
+
+
+def test_the_translator_reads_the_language_the_pipeline_decided():
+    backend = StubBackend()
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02],
+                                               backend=backend)
+    speak_then_pause(session)
+    assert backend.calls, "the translator was never called"
+
+
+def test_a_stage_that_raises_does_not_end_the_meeting():
+    """One broken sentence costs one sentence, not the connection."""
+    class Exploding:
+        def complete(self, system: str, user: str) -> str:
+            raise RuntimeError("the translator fell over")
+
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02],
+                                               backend=Exploding())
+    responses = speak_then_pause(session)
+    assert session.state is SessionState.STREAMING
+    assert all(r.close is False for r in responses)
+    assert session.stats.pipeline_errors == 1
+    # And the next chunk is still accepted.
+    assert session.handle_binary(chunk()).close is False
+
+
+def test_a_healthy_run_reports_no_pipeline_errors():
+    """So the counter above means something when it is not zero."""
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    speak_then_pause(session)
+    assert session.stats.pipeline_errors == 0
+
+
+# ---------------------------------------------------------------------------
+# The language handed to the ASR
+# ---------------------------------------------------------------------------
+class SwitchableLID:
+    """Answers with whatever ``code`` currently is, so a test can change its
+    mind halfway through a meeting the way a short clip makes the real one."""
+
+    def __init__(self, code: str = "vi"):
+        self.code = code
+        self.calls = 0
+
+    def reset(self) -> None:
+        self.calls = 0
+
+    def identify(self, pcm: bytes):
+        from server.pipeline.lid import LanguageDecision
+        self.calls += 1
+        return LanguageDecision(lang_code=self.code, confidence=0.9,
+                                margin=0.5, reason="scripted")
+
+
+def lang_session(code: str = "vi", decoder=None):
+    from server.pipeline.asr import Transcriber
+    from server.pipeline.translate import Translator
+
+    decoder = decoder if decoder is not None else StubDecoder()
+    lid = SwitchableLID(code)
+    vad = ScriptedVAD(([0.9] * 14 + [0.02] * 48) * 3)
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        language_identifier=lid,
+        transcriber=Transcriber(decoder=decoder),
+        translator=Translator(backend=StubBackend()),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    return session, decoder, lid
+
+
+def forced_languages(decoder) -> list[str]:
+    return [lang for _n, lang, _beam in decoder.calls]
+
+
+def test_a_confident_verdict_is_forced_on_the_asr():
+    session, decoder, _lid = lang_session("vi")
+    speak_then_pause(session)
+    assert forced_languages(decoder)
+    assert set(forced_languages(decoder)) == {"vi"}
+    assert session._last_language == "vi"
+
+
+def test_an_undecided_sentence_reuses_the_meetings_last_language():
+    """Whisper's own detector answered Swedish (0.66) for this meeting."""
+    from server.pipeline.lid import LID_UNKNOWN
+
+    session, decoder, lid = lang_session("vi")
+    speak_then_pause(session)                   # the meeting establishes itself
+    assert session._last_language == "vi"
+
+    lid.code = LID_UNKNOWN                      # now a clip too short to judge
+    decoder.calls.clear()
+    speak_then_pause(session)
+    assert forced_languages(decoder), "the ASR was never called"
+    assert "" not in forced_languages(decoder),         "an undecided sentence was handed to Whisper's own detector"
+    assert set(forced_languages(decoder)) == {"vi"}
+
+
+def test_an_undecided_first_sentence_still_falls_back_to_the_detector():
+    """Nothing has been established yet, and inventing a language is worse."""
+    from server.pipeline.lid import LID_UNKNOWN
+
+    session, decoder, _lid = lang_session(LID_UNKNOWN)
+    speak_then_pause(session)
+    assert forced_languages(decoder)
+    assert set(forced_languages(decoder)) == {""}
+
+
+def test_an_undecided_sentence_does_not_overwrite_what_was_established():
+    from server.pipeline.lid import LID_UNKNOWN
+
+    session, _decoder, lid = lang_session("ja")
+    speak_then_pause(session)
+    lid.code = LID_UNKNOWN
+    speak_then_pause(session)
+    assert session._last_language == "ja"

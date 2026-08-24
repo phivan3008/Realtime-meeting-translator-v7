@@ -249,7 +249,7 @@ async def stream(socket: WebSocket) -> None:
             "%d utterances (%d dropped as noise, %d shaped, %d identified, "
             "%d with a language), %d transcripts, %d translations, "
             "%d partials, "
-            "%d events, %d protocol errors",
+            "%d events, %d protocol errors, %d pipeline errors",
             session.session_id or "?",
             session.stats.chunks,
             session.stats.audio_seconds,
@@ -264,4 +264,5 @@ async def stream(socket: WebSocket) -> None:
             session.stats.partials,
             session.stats.events_sent,
             session.stats.protocol_errors,
+            session.stats.pipeline_errors,
         )

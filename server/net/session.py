@@ -74,6 +74,9 @@ class ServerSessionStats:
     translations: int = 0
     partials: int = 0
     protocol_errors: int = 0
+    #: Sentences lost because a pipeline stage raised. Not protocol errors:
+    #: the client did nothing wrong and the meeting carries on without them.
+    pipeline_errors: int = 0
 
     @property
     def audio_seconds(self) -> float:
@@ -111,6 +114,9 @@ class ServerSession:
         self.segmenter: Optional[VADSegmenter] = None
         self.buffer: Optional[BufferManager] = None
         self.stats = ServerSessionStats()
+        #: The last language this meeting was confidently in, used when the
+        #: LID cannot decide. See :meth:`_language_for`.
+        self._last_language = ""
 
     @property
     def session_id(self) -> str:
@@ -196,8 +202,50 @@ class ServerSession:
         ]
         self.stats.events_sent += len(messages)
         self.stats.speech_segments = self.segmenter.stats.segments
-        messages += self._announce(self.buffer.push(out))
+        messages += self._safely_announce(self.buffer.push(out))
         return Response(messages=messages)
+
+    def _language_for(self, decision) -> str:
+        """The language to force on the ASR when the LID could not decide.
+
+        A meeting holds two languages, and the LID is asked about clips as
+        short as 400 ms, where it often cannot separate them. Passing "" hands
+        the choice to Whisper's own detector, which is choosing between
+        ninety-nine - on a live run it answered Swedish (0.66), Finnish (0.50),
+        Chinese (0.18) and English (0.29) for a Vietnamese-Japanese meeting,
+        and a sentence decoded as Swedish is worthless.
+
+        Falling back to the last language this meeting was confidently in is
+        wrong at worst half the time, and only at the moment a speaker
+        switches. Whisper's guess was wrong every time.
+        """
+        if decision.known:
+            return decision.lang_code
+        if self._last_language:
+            log.debug("Language undecided (%s); falling back to the meeting's "
+                      "last known language %r", decision.reason,
+                      self._last_language)
+        return self._last_language
+
+    def _safely_announce(self, result: BufferOutput) -> list[str]:
+        """Run the pipeline, and let the meeting outlive a bug in one sentence.
+
+        A bug that reaches here is a bug in this project, not bad input, so it
+        is logged with its traceback and counted rather than swallowed. What it
+        must not do is end the connection: an ``AttributeError`` on one line
+        once killed a 60 s meeting seven times over, and each reconnect threw
+        away the audio queued behind it. Losing one sentence beats losing the
+        rest of the meeting.
+        """
+        try:
+            return self._announce(result)
+        except Exception:
+            self.stats.pipeline_errors += 1
+            log.exception(
+                "Session %s: the pipeline raised on %d sentence(s); "
+                "dropping them and carrying on",
+                self.session_id or "?", len(result.finals))
+            return []
 
     def _announce(self, result: BufferOutput) -> list[str]:
         """Classify each finished sentence, then put it on the wire."""
@@ -238,9 +286,10 @@ class ServerSession:
                 # phonemes, and those carry the cues that tell the two
                 # languages apart.
                 decision = self.language_identifier.identify(utterance.pcm)
-                lang_code = decision.lang_code
                 if decision.known:
                     self.stats.utterances_with_language += 1
+                    self._last_language = decision.lang_code
+                lang_code = self._language_for(decision)
 
             transcript = None
             if keep and self.transcriber is not None:
@@ -273,10 +322,15 @@ class ServerSession:
                     # measures what that costs; if it turns out to matter, the
                     # fix is to send the sentence now and the translation as a
                     # follow-up, not to translate less carefully.
-                    result = self.translator.translate(
+                    # Not named `result`: that shadowed this method's own
+                    # `result` argument, and the line after the loop then read
+                    # `.finals` off a Translation. It crashed the session on the
+                    # first sentence that reached the translator, which is every
+                    # sentence that would have produced a final.
+                    translated = self.translator.translate(
                         transcript.text, transcript.lang_code, speaker_id)
-                    translation = result.text
-                    if result.ok:
+                    translation = translated.text
+                    if translated.ok:
                         self.stats.translations += 1
                 messages.append(make_final(
                     speaker_id=speaker_id,
@@ -302,7 +356,11 @@ class ServerSession:
             return []
         lang_code = ""
         if self.language_identifier is not None:
-            lang_code = self.language_identifier.identify(partial.pcm).lang_code
+            # A partial is a fragment of a sentence and shorter still than the
+            # utterances the LID already struggles with, so the fallback below
+            # matters more here, not less.
+            lang_code = self._language_for(
+                self.language_identifier.identify(partial.pcm))
         transcript = self.transcriber.transcribe(partial.pcm, lang_code,
                                                  is_final=False)
         if not transcript.has_text:
@@ -329,7 +387,7 @@ class ServerSession:
         messages = [make_vad(event.kind.value, event.at_ms) for event in out.events]
         self.stats.events_sent += len(messages)
         if self.buffer is not None:
-            messages += self._announce(
+            messages += self._safely_announce(
                 self.buffer.flush(FinalizeReason.END_OF_STREAM)
             )
         return messages
