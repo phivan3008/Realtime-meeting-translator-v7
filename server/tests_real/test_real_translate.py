@@ -51,6 +51,7 @@ from server.pipeline.translate import (  # noqa: E402
     Translator,
     Turn,
     VllmClient,
+    looks_like_echo,
 )
 
 # A translation is the last thing between a sentence being committed and it
@@ -107,14 +108,22 @@ SAMPLES = [
     ("vi", "Anh có thể gửi lại tài liệu đó cho tôi không?"),
 ]
 
-# The context test: on its own this could be about anything.
+# The context test needs a sentence whose *translation* changes with the
+# history, not merely one that reads oddly without it. Japanese drops subjects
+# and objects as freely as Vietnamese does, so "Vậy thì tôi duyệt nó" came back
+# as 「では、承認します。」 either way - a perfectly good translation that proved
+# nothing.
+#
+# A bare Japanese "終わりました" going into Vietnamese is a sharper probe: with
+# the history the subject is available to name, without it there is nothing to
+# name.
 CONTEXT_HISTORY = [
-    Turn("Speaker_01", "vi", "Chúng ta cần chốt ngân sách cho quý sau.",
-         "来四半期の予算を決める必要があります。"),
-    Turn("Speaker_02", "ja", "その金額は妥当だと思います。",
-         "Tôi nghĩ số tiền đó là hợp lý."),
+    Turn("Speaker_01", "vi", "Bản dựng thứ ba đang chạy trên máy chủ thử nghiệm.",
+         "三番目のビルドがテストサーバーで実行中です。"),
+    Turn("Speaker_02", "ja", "ビルドにはどのくらい時間がかかりますか。",
+         "Bản dựng mất khoảng bao lâu?"),
 ]
-CONTEXT_SENTENCE = ("vi", "Vậy thì tôi duyệt nó.")
+CONTEXT_SENTENCE = ("ja", "終わりました。")
 
 
 def attempt(translator: Translator, lang_code: str, source: str) -> Attempt:
@@ -153,10 +162,14 @@ def check_answers(attempts: list[Attempt], report: Report) -> None:
     translated = [item for item in attempts if item.result.ok]
     if not translated:
         return
+    # Compared without punctuation: a model that echoes often swaps the full
+    # stop for the other language's, and that one character was enough to slip
+    # an untranslated Vietnamese sentence past a plain equality check.
     unchanged = [item for item in translated
-                 if item.result.text.strip() == item.source.strip()]
+                 if looks_like_echo(item.source, item.result.text)]
     report.add("Nothing came back as its own input", not unchanged,
-               f"{len(unchanged)} unchanged")
+               f"{len(unchanged)} unchanged: "
+               f"{[item.source[:30] for item in unchanged][:2]}")
 
     worst = max(translated, key=lambda item: item.expansion)
     report.add("No answer is far longer than its sentence",
@@ -213,10 +226,18 @@ def check_context(client, report: Report) -> None:
     second = without.translate(source, lang)
     print(f"      with   : {first.text}")
     print(f"      without: {second.text}")
-    report.add("The history reaches the model", first.ok and second.ok,
-               "both attempts answered")
-    print("    Read both. The first should resolve what \"nó\" refers to; if "
-          "they are identical, the history is being ignored.")
+    report.add("Both attempts answered", first.ok and second.ok,
+               f"{first.reason or 'ok'} / {second.reason or 'ok'}")
+    # Asserting only that both answered was a check that could not fail. The
+    # question is whether the history changed anything.
+    report.add(
+        "The history changes the translation",
+        first.ok and second.ok and first.text.strip() != second.text.strip(),
+        f"{first.text!r} vs {second.text!r}",
+    )
+    print("    Read both. With the history the subject is available to name; "
+          "without it there is nothing to name. Identical output means the "
+          "history is not reaching the model, or is being ignored.")
 
 
 # ---------------------------------------------------------------------------

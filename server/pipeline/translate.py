@@ -135,6 +135,22 @@ def choose_model(wanted: str, served: list[str], where: str = "") -> str:
     )
 
 
+#: Anything that is punctuation, a symbol, or a space. Two sentences that
+#: differ only in these are the same sentence.
+_IGNORABLE = re.compile(r"[\s\W_]+", re.UNICODE)
+
+
+def looks_like_echo(source: str, text: str) -> bool:
+    """Did the model hand the sentence back instead of translating it?
+
+    Compared without punctuation, because a model that echoes often swaps the
+    full stop for the other language's - and one character was enough to slip
+    a completely untranslated Vietnamese sentence past a plain equality check.
+    """
+    return (_IGNORABLE.sub("", source).casefold()
+            == _IGNORABLE.sub("", text).casefold())
+
+
 def target_language(lang_code: str) -> str:
     """Which language this sentence should become."""
     return TRANSLATE_PAIR.get(lang_code, "")
@@ -231,11 +247,10 @@ class Backend(Protocol):
 
 SYSTEM_PROMPT = (
     "You are a translator inside a live meeting transcript. "
-    "Translate the final line from {source_name} into {target_name}. "
-    "Reply with the translation alone: no preface, no quotes, no notes, no "
-    "explanation, no romanisation. Keep names, numbers and technical terms "
-    "exactly as they are. If the line is already in {target_name}, repeat it "
-    "unchanged."
+    "The final line is in {source_name}. Write it in {target_name}. "
+    "Reply with the {target_name} translation alone: no preface, no quotes, no "
+    "notes, no explanation, no romanisation. Keep names, numbers and technical "
+    "terms exactly as they are. Never repeat the line back in {source_name}."
 )
 
 
@@ -309,6 +324,10 @@ class Translator:
     def _refuse_reason(self, source: str, text: str) -> str:
         if not text:
             return "the model returned nothing"
+        if looks_like_echo(source, text):
+            # Handed back untranslated. Showing it would put the same sentence
+            # in both columns and read as though the translation succeeded.
+            return "the model returned the sentence untranslated"
         if len(text) > len(source) * self.max_expansion:
             # Not a translation any more: the model started explaining, or
             # looped, or answered a question nobody asked.

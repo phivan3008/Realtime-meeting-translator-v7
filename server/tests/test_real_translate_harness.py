@@ -35,21 +35,30 @@ harness = load_harness()
 
 
 class StubClient:
-    """Answers every request with the same short line."""
+    """A model that translates, and that reads the history when given one.
+
+    Answering identically with and without context would model a model that
+    ignores it - which is the thing the context check exists to catch.
+    """
 
     model = "stub/qwen"
     source = "stub/qwen at http://stub/v1"
 
-    def __init__(self, answer: str = "こんにちは", chatty: bool = False):
+    def __init__(self, answer: str = "こんにちは", chatty: bool = False,
+                 ignores_history: bool = False):
         self.answer = answer
         self.chatty = chatty
+        self.ignores_history = ignores_history
         self.calls: list[tuple[str, str]] = []
 
     def complete(self, system: str, user: str) -> str:
         self.calls.append((system, user))
+        answer = self.answer
+        if "do not translate" in user and not self.ignores_history:
+            answer = f"{answer}(その件)"
         if self.chatty:
-            return f"Sure! Here is the translation: {self.answer}"
-        return self.answer
+            return f"Sure! Here is the translation: {answer}"
+        return answer
 
 
 class BrokenClient:
@@ -76,9 +85,10 @@ def test_the_samples_cover_both_directions():
 
 
 def test_the_context_case_needs_its_history_to_make_sense():
-    """"Vậy thì tôi duyệt nó" means nothing without the previous lines."""
+    """A bare Japanese "終わりました" has no subject to carry into Vietnamese
+    unless the history supplies one."""
     assert harness.CONTEXT_HISTORY
-    assert harness.CONTEXT_SENTENCE[1]
+    assert harness.CONTEXT_SENTENCE == ("ja", "終わりました。")
 
 
 def test_expansion_is_measured_against_the_source():
@@ -191,9 +201,19 @@ def test_the_context_case_sends_the_history_to_the_model(capsys):
     with_history_prompt = client.calls[0][1]
     without_history_prompt = client.calls[1][1]
     assert "do not translate" in with_history_prompt
-    assert "ngân sách" in with_history_prompt
+    assert "Bản dựng thứ ba" in with_history_prompt
     assert "do not translate" not in without_history_prompt
-    assert "if they are identical" in capsys.readouterr().out
+    assert "Identical output means" in capsys.readouterr().out
+
+
+def test_a_model_that_ignores_the_history_is_caught():
+    """The old check asserted only that both attempts answered, which no
+    model could fail."""
+    report = harness.Report()
+    harness.check_context(StubClient(ignores_history=True), report)
+    assert [c.name for c in report.failed] == [
+        "The history changes the translation"
+    ]
 
 
 # ---------------------------------------------------------------------------

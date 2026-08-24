@@ -26,6 +26,7 @@ from server.pipeline.translate import (
     Translator,
     Turn,
     clean,
+    looks_like_echo,
     target_language,
 )
 
@@ -374,3 +375,39 @@ def test_thinking_is_switched_off_in_the_request():
     from server.config import TRANSLATE_ENABLE_THINKING
 
     assert TRANSLATE_ENABLE_THINKING is False
+
+
+# ---------------------------------------------------------------------------
+# Handing the sentence back untranslated
+# ---------------------------------------------------------------------------
+def test_an_identical_answer_is_an_echo():
+    assert looks_like_echo("xin chào", "xin chào") is True
+
+
+def test_swapping_the_full_stop_does_not_make_it_a_translation():
+    """Exactly what Qwen did: the Vietnamese sentence back, with a Japanese
+    full stop, which slipped past a plain equality check."""
+    source = "Bản dựng thứ ba sẽ xong trước ngày 15 tháng 4."
+    assert looks_like_echo(source, source[:-1] + "。") is True
+
+
+def test_punctuation_and_spacing_alone_never_count_as_translation():
+    assert looks_like_echo("Xin chào, mọi người!", "xin chào mọi người") is True
+
+
+def test_a_real_translation_is_not_an_echo():
+    assert looks_like_echo("xin chào", "こんにちは") is False
+
+
+def test_an_echoed_sentence_is_refused():
+    result = make("Bản dựng thứ ba。").translate("Bản dựng thứ ba.", "vi")
+    assert result.ok is False
+    assert "untranslated" in result.reason
+    assert result.raw == "Bản dựng thứ ba。"
+
+
+def test_the_prompt_no_longer_offers_to_repeat_the_line():
+    """That clause invited the echo it was meant to allow for."""
+    system, _user = make().build_prompt("xin chào", "vi")
+    assert "repeat it" not in system.lower()
+    assert "never repeat the line back" in system.lower()
