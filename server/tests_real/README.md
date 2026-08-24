@@ -43,6 +43,7 @@ an afternoon once already.
 | `test_real_diarization.py` | Speaker voiceprints: measures the same-speaker and different-speaker cosine distributions. **Every `--voice` file must hold exactly one person** |
 | `test_real_lid.py` | Language ID: Vietnamese against Japanese, per sentence, with the margin behind every verdict |
 | `test_real_asr.py` | Whisper large-v3: decodes far faster than real time, keeps the forced language, and prints the transcripts for you to read |
+| `test_real_translate.py` | Translation through vLLM: answers are translations rather than conversations, deterministic, history reaches the model, and what one costs |
 
 ```bash
 python3.11 server/tests_real/test_real_vad.py \
@@ -70,6 +71,20 @@ server.
 `test_real_buffer.py` writes one WAV per sentence into
 `server/tests_real/output/<name>_utterances/`. Listen to any file named
 `*_max_duration*.wav`: the cut must fall between words, not through one.
+
+## The translation server
+
+Translation runs in its own vLLM process, not inside the audio server. vLLM
+reserves a slice of the GPU at load, and in-process it would have to be tuned
+by hand against Whisper's allocation; out of process each side sees a GPU it
+can reason about, and the LLM can be restarted without dropping a meeting.
+
+```bash
+python3.11 -m vllm.entrypoints.openai.api_server     --model Qwen/Qwen2.5-7B-Instruct     --port 8001 --gpu-memory-utilization 0.55
+```
+
+Leave headroom: Whisper large-v3 and the three small models want a few GB of
+the same card. `TRANSLATE_BASE_URL` points the audio server at it.
 
 ## Online: serve the client
 

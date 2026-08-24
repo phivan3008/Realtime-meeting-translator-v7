@@ -38,6 +38,7 @@ from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
+from server.pipeline.translate import Translator
 from server.pipeline.vad import VADSegmenter
 
 log = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ class ServerSessionStats:
     utterances_identified: int = 0
     utterances_with_language: int = 0
     transcripts: int = 0
+    translations: int = 0
     partials: int = 0
     protocol_errors: int = 0
 
@@ -90,6 +92,7 @@ class ServerSession:
         speaker_identifier: Optional[SpeakerIdentifier] = None,
         language_identifier: Optional[LanguageIdentifier] = None,
         transcriber: Optional[Transcriber] = None,
+        translator: Optional[Translator] = None,
         strict_chunk_size: bool = True,
     ) -> None:
         self._segmenter_factory = segmenter_factory
@@ -101,6 +104,7 @@ class ServerSession:
         self.speaker_identifier = speaker_identifier
         self.language_identifier = language_identifier
         self.transcriber = transcriber
+        self.translator = translator
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
@@ -163,6 +167,9 @@ class ServerSession:
             self.language_identifier.reset()
         if self.transcriber is not None:
             self.transcriber.reset()
+        if self.translator is not None:
+            # A new meeting carries none of the last one's context.
+            self.translator.reset()
         self.state = SessionState.STREAMING
         log.info("Session %s ready (client=%r)", hello.session_id, hello.client)
         return Response(messages=[make_ready(hello.session_id)])
@@ -259,13 +266,23 @@ class ServerSession:
                 )
             )
             if transcript is not None and transcript.has_text:
-                # The translation arrives with the next stage; the sentence
-                # itself is worth showing before it does.
+                translation = ""
+                if self.translator is not None:
+                    # Runs inline, which puts an LLM call on the path that also
+                    # reads audio. server/tests_real/test_real_translate.py
+                    # measures what that costs; if it turns out to matter, the
+                    # fix is to send the sentence now and the translation as a
+                    # follow-up, not to translate less carefully.
+                    result = self.translator.translate(
+                        transcript.text, transcript.lang_code, speaker_id)
+                    translation = result.text
+                    if result.ok:
+                        self.stats.translations += 1
                 messages.append(make_final(
                     speaker_id=speaker_id,
                     lang_code=transcript.lang_code,
                     transcript=transcript.text,
-                    translation="",
+                    translation=translation,
                 ))
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)

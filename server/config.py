@@ -209,3 +209,40 @@ ASR_MAX_COMPRESSION_RATIO = 2.4
 # the prompt for the next. Each utterance here is already a complete thought,
 # so it is decoded alone.
 ASR_CONDITION_ON_PREVIOUS = False
+
+# --- 8. Translation (DESIGN.md section 3.8) ---------------------------------
+# vLLM runs as its own process behind its OpenAI-compatible API, and this
+# talks to it over HTTP rather than importing it.
+#
+# The reason is memory, not taste. vLLM profiles the GPU at load and reserves
+# a fraction of it up front; in-process it would do that alongside Whisper
+# large-v3, AST, ECAPA and VoxLingua, and the two allocators would have to be
+# tuned against each other by hand. Out of process each side sees a GPU it can
+# reason about, the LLM can be restarted or swapped without dropping a
+# meeting, and a crash in it does not take the audio pipeline with it. The
+# cost is one more process to start.
+TRANSLATE_BASE_URL = os.environ.get("TRANSLATE_BASE_URL",
+                                    "http://127.0.0.1:8001/v1")
+# Empty means "whatever that server is serving", asked at connect time. The
+# model name lives in the vLLM launch command, which is where it belongs.
+TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "")
+TRANSLATE_TIMEOUT_S = float(os.environ.get("TRANSLATE_TIMEOUT_S", "20"))
+
+# Translation is not a creative task and the same sentence twice should give
+# the same answer twice.
+TRANSLATE_TEMPERATURE = 0.0
+
+# DESIGN.md asks for two or three previous sentences of context. Enough for
+# pronouns and carried-over subjects, short enough that the model cannot drift
+# into summarising the meeting.
+TRANSLATE_HISTORY = 3
+
+# A translation runs a little longer than its source, never many times longer.
+# Far past this and the model has started explaining itself or looping.
+TRANSLATE_MAX_EXPANSION = 4.0
+TRANSLATE_MAX_TOKENS = 512
+
+#: Which language each one becomes.
+TRANSLATE_PAIR = {"vi": "ja", "ja": "vi"}
+#: Human names, for the prompt.
+LANGUAGE_NAMES = {"vi": "Vietnamese", "ja": "Japanese"}

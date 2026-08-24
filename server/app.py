@@ -39,6 +39,7 @@ from server.pipeline.diarization import DiarizationError, SpeakerIdentifier
 from server.pipeline.lid import LanguageIdError, LanguageIdentifier
 from server.pipeline.noise import AstClassifier, NoiseFilter, NoiseFilterError
 from server.pipeline.overlap import OverlapError, OverlapResolver
+from server.pipeline.translate import TranslationError, Translator
 from server.pipeline.vad import SileroVAD, VADSegmenter
 
 logging.basicConfig(
@@ -62,6 +63,8 @@ class AppState:
         self.language_error: str = ""
         self.transcriber: Optional[Transcriber] = None
         self.asr_error: str = ""
+        self.translator: Optional[Translator] = None
+        self.translate_error: str = ""
         self.active_session_id: Optional[str] = None
 
     def load_models(self) -> None:
@@ -120,6 +123,17 @@ class AppState:
                 # silent, but a meeting served in this state carries no text.
                 self.asr_error = str(exc)
                 log.error("ASR unavailable: %s", exc)
+        if self.translator is None and not self.translate_error:
+            try:
+                log.info("Connecting to the translation server ...")
+                self.translator = Translator()
+                log.info("Translation ready")
+            except TranslationError as exc:
+                # vLLM runs as its own process, so it may simply not be up
+                # yet. The meeting still gets transcripts; /health says why
+                # there are no translations.
+                self.translate_error = str(exc)
+                log.error("Translation unavailable: %s", exc)
 
     def make_segmenter(self) -> VADSegmenter:
         if self.vad is None:                    # pragma: no cover - startup order
@@ -162,6 +176,8 @@ def health() -> dict:
         "language_model_error": state.language_error,
         "asr_loaded": state.transcriber is not None,
         "asr_error": state.asr_error,
+        "translation_loaded": state.translator is not None,
+        "translation_error": state.translate_error,
         "noise_filter_error": state.noise_error,
         "session_active": state.active_session_id is not None,
     }
@@ -192,7 +208,8 @@ async def stream(socket: WebSocket) -> None:
                             overlap_resolver=state.overlap_resolver,
                             speaker_identifier=state.speaker_identifier,
                             language_identifier=state.language_identifier,
-                            transcriber=state.transcriber)
+                            transcriber=state.transcriber,
+                            translator=state.translator)
     claimed = False
     try:
         while True:
@@ -230,7 +247,7 @@ async def stream(socket: WebSocket) -> None:
         log.info(
             "Session %s finished: %d chunks, %.1f s audio, %d segments, "
             "%d utterances (%d dropped as noise, %d shaped, %d identified, "
-            "%d with a language), %d transcripts, "
+            "%d with a language), %d transcripts, %d translations, "
             "%d partials, "
             "%d events, %d protocol errors",
             session.session_id or "?",
@@ -243,6 +260,7 @@ async def stream(socket: WebSocket) -> None:
             session.stats.utterances_identified,
             session.stats.utterances_with_language,
             session.stats.transcripts,
+            session.stats.translations,
             session.stats.partials,
             session.stats.events_sent,
             session.stats.protocol_errors,
