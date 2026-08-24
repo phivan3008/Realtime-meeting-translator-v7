@@ -180,3 +180,32 @@ LID_MIN_DURATION_MS = 600
 
 #: Reported when the languages cannot be told apart; Whisper then auto-detects.
 LID_UNKNOWN = ""
+
+# --- 7. ASR (DESIGN.md section 3.7) -----------------------------------------
+ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
+ASR_DEVICE = os.environ.get("ASR_DEVICE", "")
+# float16 halves the memory and the latency on an H100 and costs nothing that
+# survives being turned back into text. CPU falls back to int8.
+ASR_COMPUTE_TYPE = os.environ.get("ASR_COMPUTE_TYPE", "")
+ASR_CACHE_DIR = os.environ.get("ASR_CACHE_DIR", "models/whisper")
+
+# A partial is thrown away as soon as the next one arrives, so it is decoded
+# greedily; the final answer is worth a beam search.
+ASR_BEAM_SIZE_PARTIAL = 1
+ASR_BEAM_SIZE_FINAL = 5
+
+# Whisper's own guards, passed through so they are visible here rather than
+# buried in a default.
+ASR_NO_SPEECH_THRESHOLD = 0.6
+ASR_LOG_PROB_THRESHOLD = -1.0
+
+# Repetition guard. Whisper answers near-silence with confident invented text
+# and sometimes locks into a loop; a segment whose text compresses far better
+# than real speech is that loop. gzip on natural speech lands near 1.5-2.0.
+ASR_MAX_COMPRESSION_RATIO = 2.4
+
+# Whisper carries the previous sentence into the next by default, which is
+# where streaming hallucination loops come from: one invented sentence becomes
+# the prompt for the next. Each utterance here is already a complete thought,
+# so it is decoded alone.
+ASR_CONDITION_ON_PREVIOUS = False

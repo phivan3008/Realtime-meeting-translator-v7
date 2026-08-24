@@ -34,6 +34,7 @@ from common.protocol import (
     make_error,
 )
 from server.net.session import Response, ServerSession
+from server.pipeline.asr import AsrError, Transcriber
 from server.pipeline.diarization import DiarizationError, SpeakerIdentifier
 from server.pipeline.lid import LanguageIdError, LanguageIdentifier
 from server.pipeline.noise import AstClassifier, NoiseFilter, NoiseFilterError
@@ -59,6 +60,8 @@ class AppState:
         self.speaker_error: str = ""
         self.language_identifier: Optional[LanguageIdentifier] = None
         self.language_error: str = ""
+        self.transcriber: Optional[Transcriber] = None
+        self.asr_error: str = ""
         self.active_session_id: Optional[str] = None
 
     def load_models(self) -> None:
@@ -106,6 +109,17 @@ class AppState:
                 # The ASR can detect the language itself, just more slowly.
                 self.language_error = str(exc)
                 log.error("Language ID unavailable: %s", exc)
+        if self.transcriber is None and not self.asr_error:
+            try:
+                log.info("Loading Whisper ...")
+                self.transcriber = Transcriber()
+                log.info("Whisper ready")
+            except AsrError as exc:
+                # Nothing downstream works without this one. The server still
+                # starts, so /health can say why instead of the pod going
+                # silent, but a meeting served in this state carries no text.
+                self.asr_error = str(exc)
+                log.error("ASR unavailable: %s", exc)
 
     def make_segmenter(self) -> VADSegmenter:
         if self.vad is None:                    # pragma: no cover - startup order
@@ -146,6 +160,8 @@ def health() -> dict:
         "speaker_model_error": state.speaker_error,
         "language_model_loaded": state.language_identifier is not None,
         "language_model_error": state.language_error,
+        "asr_loaded": state.transcriber is not None,
+        "asr_error": state.asr_error,
         "noise_filter_error": state.noise_error,
         "session_active": state.active_session_id is not None,
     }
@@ -175,7 +191,8 @@ async def stream(socket: WebSocket) -> None:
                             noise_filter=state.noise_filter,
                             overlap_resolver=state.overlap_resolver,
                             speaker_identifier=state.speaker_identifier,
-                            language_identifier=state.language_identifier)
+                            language_identifier=state.language_identifier,
+                            transcriber=state.transcriber)
     claimed = False
     try:
         while True:
@@ -213,7 +230,7 @@ async def stream(socket: WebSocket) -> None:
         log.info(
             "Session %s finished: %d chunks, %.1f s audio, %d segments, "
             "%d utterances (%d dropped as noise, %d shaped, %d identified, "
-            "%d with a language), "
+            "%d with a language), %d transcripts, "
             "%d partials, "
             "%d events, %d protocol errors",
             session.session_id or "?",
@@ -225,6 +242,7 @@ async def stream(socket: WebSocket) -> None:
             session.stats.utterances_shaped,
             session.stats.utterances_identified,
             session.stats.utterances_with_language,
+            session.stats.transcripts,
             session.stats.partials,
             session.stats.events_sent,
             session.stats.protocol_errors,

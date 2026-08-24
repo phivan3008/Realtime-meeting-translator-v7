@@ -241,7 +241,12 @@ class VoxLinguaClassifier:
         policy would read that as "undecided" forever - a filter that looks
         like it is working while deciding nothing.
         """
-        labels = self._model.hparams.label_encoder.ind2lab
+        encoder = self._model.hparams.label_encoder
+        # SpeechBrain warns on every load unless told the length is known to
+        # be right. We only read the mapping, never resize it.
+        if hasattr(encoder, "ignore_len"):
+            encoder.ignore_len()
+        labels = encoder.ind2lab
         found: dict[str, int] = {}
         for index in sorted(labels):
             code = language_code(str(labels[index]))

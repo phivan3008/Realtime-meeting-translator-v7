@@ -24,12 +24,15 @@ from common.protocol import (
     Hello,
     ProtocolError,
     make_error,
+    make_final,
+    make_partial,
     make_ready,
     make_utterance,
     make_vad,
     parse_message,
     validate_audio_chunk,
 )
+from server.pipeline.asr import Transcriber
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.lid import LanguageIdentifier
@@ -66,6 +69,7 @@ class ServerSessionStats:
     utterances_shaped: int = 0
     utterances_identified: int = 0
     utterances_with_language: int = 0
+    transcripts: int = 0
     partials: int = 0
     protocol_errors: int = 0
 
@@ -85,6 +89,7 @@ class ServerSession:
         overlap_resolver: Optional[OverlapResolver] = None,
         speaker_identifier: Optional[SpeakerIdentifier] = None,
         language_identifier: Optional[LanguageIdentifier] = None,
+        transcriber: Optional[Transcriber] = None,
         strict_chunk_size: bool = True,
     ) -> None:
         self._segmenter_factory = segmenter_factory
@@ -95,6 +100,7 @@ class ServerSession:
         self.overlap_resolver = overlap_resolver
         self.speaker_identifier = speaker_identifier
         self.language_identifier = language_identifier
+        self.transcriber = transcriber
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
@@ -155,6 +161,8 @@ class ServerSession:
             self.speaker_identifier.reset()
         if self.language_identifier is not None:
             self.language_identifier.reset()
+        if self.transcriber is not None:
+            self.transcriber.reset()
         self.state = SessionState.STREAMING
         log.info("Session %s ready (client=%r)", hello.session_id, hello.client)
         return Response(messages=[make_ready(hello.session_id)])
@@ -227,6 +235,15 @@ class ServerSession:
                 if decision.known:
                     self.stats.utterances_with_language += 1
 
+            transcript = None
+            if keep and self.transcriber is not None:
+                # The shaped audio, not the raw: gating is what the overlap
+                # resolver is for, and this is the stage it was for.
+                transcript = self.transcriber.transcribe(audio, lang_code,
+                                                         is_final=True)
+                if transcript.has_text:
+                    self.stats.transcripts += 1
+
             messages.append(
                 make_utterance(
                     index=utterance.index,
@@ -241,13 +258,40 @@ class ServerSession:
                     lang_code=lang_code,
                 )
             )
+            if transcript is not None and transcript.has_text:
+                # The translation arrives with the next stage; the sentence
+                # itself is worth showing before it does.
+                messages.append(make_final(
+                    speaker_id=speaker_id,
+                    lang_code=transcript.lang_code,
+                    transcript=transcript.text,
+                    translation="",
+                ))
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
         if result.partial is not None:
-            # Nothing goes on the wire for a partial yet: it becomes a
-            # `partial` transcript once the ASR stage exists.
             self.stats.partials += 1
+            messages += self._transcribe_partial(result.partial)
         return messages
+
+    def _transcribe_partial(self, partial) -> list[str]:
+        """The grey running text, replaced by the next one a second later.
+
+        No speaker label goes out with it. Identity can wait for the final:
+        showing a name and then correcting it reads worse than showing none.
+        The language cannot wait, because it changes the text itself.
+        """
+        if self.transcriber is None:
+            return []
+        lang_code = ""
+        if self.language_identifier is not None:
+            lang_code = self.language_identifier.identify(partial.pcm).lang_code
+        transcript = self.transcriber.transcribe(partial.pcm, lang_code,
+                                                 is_final=False)
+        if not transcript.has_text:
+            return []
+        self.stats.transcripts += 1
+        return [make_partial("", transcript.lang_code, transcript.text)]
 
     # -- teardown -----------------------------------------------------------
     def finish(self) -> Response:

@@ -42,6 +42,7 @@ an afternoon once already.
 | `test_real_overlap.py` | Overlap Resolver: a clean voice survives untouched, a voice 20 dB under it is squashed |
 | `test_real_diarization.py` | Speaker voiceprints: measures the same-speaker and different-speaker cosine distributions. **Every `--voice` file must hold exactly one person** |
 | `test_real_lid.py` | Language ID: Vietnamese against Japanese, per sentence, with the margin behind every verdict |
+| `test_real_asr.py` | Whisper large-v3: decodes far faster than real time, keeps the forced language, and prints the transcripts for you to read |
 
 ```bash
 python3.11 server/tests_real/test_real_vad.py \
