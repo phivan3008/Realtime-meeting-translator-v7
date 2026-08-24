@@ -166,10 +166,13 @@ def test_unrecognisable_audio_is_kept_rather_than_guessed_away():
 
 
 def test_a_faint_noise_hint_is_not_enough_to_drop_a_sentence():
-    """Found on the pod: a real sentence dropped on a 0.05 "Breathing" score.
+    """The exact scores of a real sentence the old rule deleted.
 
-    Both scores were near zero, which the old rule read as "noise won". It was
-    not a win, it was the model having no idea, and a sentence was lost for it.
+    A 1.2 s Japanese interjection - "ah, I see" - scored 0.00 for speech with
+    its best label of any kind at 0.13. The old rule only asked whether noise
+    beat speech, so a near-zero hint of "Breathing" was enough to throw a real
+    sentence out of the meeting. Short expressive interjections are a blind
+    spot of this classifier and must survive it.
     """
     verdict = make_filter(
         noisy(speech=0.00, noise=0.13, label="Breathing")

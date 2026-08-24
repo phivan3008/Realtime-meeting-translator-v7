@@ -29,6 +29,14 @@ unless *both* halves of the case are made: the speech score is low **and** the
 classifier is confident about what it heard instead.  Two near-zero scores are
 not a case - they are the model saying it has no idea, and no idea means keep.
 
+This is not hypothetical caution.  On a real recording, a 1.2 second Japanese
+interjection - the conversational beat that means roughly "ah, I see" - scored
+**0.00** for speech, with its highest label of any kind at 0.13.  A rule that
+merely compared the two scores deleted it from the meeting.  Short expressive
+interjections are a blind spot of this classifier, and they are exactly the
+utterances a VI-JA translator must not lose, so any future tightening of these
+thresholds has to be checked against a recording containing them.
+
 Layering
 --------
 ``NoiseFilter``
