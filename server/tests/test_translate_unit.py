@@ -143,12 +143,53 @@ def test_every_history_line_says_which_language_its_translation_is_in():
 
 
 def test_the_old_unlabelled_history_can_still_be_built():
-    """Kept so the real test can put both versions to a live model."""
+    """Kept so the real test can put every version to a live model."""
     context = TranslationContext()
     context.remember(turn("xin chào", "こんにちは"))
-    text = context.as_prompt(label_languages=False)
+    text = context.as_prompt(style="plain")
     assert "-> こんにちは" in text
     assert "(ja)" not in text
+
+
+def test_the_sources_only_history_drops_the_translations():
+    """No worked examples left, so nothing for the model to imitate."""
+    context = TranslationContext()
+    context.remember(turn("xin chào", "こんにちは"))
+    text = context.as_prompt(style="sources")
+    assert "Speaker_01 (vi): xin chào" in text
+    assert "こんにちは" not in text
+    assert "->" not in text
+
+
+def test_the_sources_only_history_still_says_who_said_what():
+    """It is kept for resolving "that one", and that needs the speaker."""
+    context = TranslationContext()
+    context.remember(turn("xin chào", "こんにちは"))
+    context.remember(Turn("Speaker_02", "ja", "はい。", "Vâng."))
+    text = context.as_prompt(style="sources")
+    assert "Speaker_01 (vi):" in text
+    assert "Speaker_02 (ja):" in text
+
+
+def test_an_unknown_history_style_is_refused():
+    with pytest.raises(ValueError):
+        TranslationContext().as_prompt(style="freestyle")
+    with pytest.raises(ValueError):
+        Translator(backend=StubBackend("x"), history_style="freestyle")
+
+
+@pytest.mark.parametrize("style", ["plain", "labelled", "sources"])
+def test_every_style_still_names_the_target_language(style):
+    """Except "plain", which is only kept to reproduce the bug."""
+    context = TranslationContext()
+    context.remember(turn("xin chào", "こんにちは"))
+    translator = Translator(backend=StubBackend("x"), context=context,
+                            history_style=style)
+    _system, user = translator.build_prompt("はい。", "ja")
+    if style == "plain":
+        assert "into Vietnamese, and into Vietnamese only" not in user
+    else:
+        assert "into Vietnamese, and into Vietnamese only" in user
 
 
 def test_an_empty_history_contributes_nothing():

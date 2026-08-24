@@ -292,6 +292,14 @@ TRANSLATE_ENABLE_THINKING = False
 # into summarising the meeting.
 TRANSLATE_HISTORY = 3
 
+# How the history is written into the prompt. See
+# TranslationContext.as_prompt: written with its translations it reads as
+# worked examples, and when several turns run the same way the model
+# follows the examples over the instruction and answers in the wrong
+# language. "labelled" names each translation's language; "sources" drops
+# the translations entirely, leaving nothing to imitate.
+HISTORY_STYLE = "labelled"
+
 # A translation runs a little longer than its source, never many times longer.
 # Far past this and the model has started explaining itself or looping.
 #

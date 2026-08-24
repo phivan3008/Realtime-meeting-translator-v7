@@ -328,63 +328,117 @@ def test_the_raw_answer_is_printed_for_every_refusal(capsys):
 
 
 # ---------------------------------------------------------------------------
-# Does the history steer the output language?
+# What is the history doing?
 # ---------------------------------------------------------------------------
-def test_the_steering_history_is_all_one_direction():
-    """The shape that appears to cause it: every translation in the history
-    lands in the language the next sentence is *coming from*."""
-    assert {turn.lang_code for turn in harness.STEERING_HISTORY} == {"vi"}
-    assert harness.STEERED_SENTENCE[0] == "ja"
+def test_the_cut_history_is_all_one_direction():
+    """The shape under suspicion: every translation in the history lands in
+    the language the next sentence is coming *from*."""
+    assert {turn.lang_code for turn in harness.CUT_HISTORY} == {"vi"}
+    assert [lang for lang, _s in harness.CUT_SENTENCES].count("ja") == 2
+
+
+def test_the_cut_sentences_include_a_control_in_the_other_direction():
+    """Cut by the same limit, going the other way, and the run translated it.
+    Without it the cut and the direction cannot be told apart."""
+    assert [lang for lang, _s in harness.CUT_SENTENCES].count("vi") == 1
+
+
+def test_the_none_variant_carries_no_history():
+    """It is the control; if it carried history it would prove nothing."""
+    client = StubClient()
+    harness.ask(client, "ja", "はい。", "none")
+    assert "Earlier in the meeting" not in client.calls[0][1]
+
+
+@pytest.mark.parametrize("variant", ["plain", "labelled", "sources"])
+def test_every_other_variant_carries_the_history(variant):
+    client = StubClient()
+    harness.ask(client, "ja", "はい。", variant)
+    assert "Earlier in the meeting" in client.calls[0][1]
+
+
+def test_the_sources_variant_sends_no_translations():
+    client = StubClient()
+    harness.ask(client, "ja", "はい。", "sources")
+    prompt = client.calls[0][1]
+    assert "Cảm ơn." in prompt          # the source line is there
+    assert "ありがとう" not in prompt   # its translation is not
 
 
 def test_a_model_that_ignores_the_history_passes():
     report = harness.Report()
-    harness.check_history_does_not_steer_the_language(StubClient(), report)
+    harness.check_what_the_history_does(StubClient(), report)
     assert report.failed == []
 
 
-def test_a_model_steered_by_the_unlabelled_history_is_caught():
-    """Answers in whichever language the history's last translation used,
-    unless the prompt names the target after the history."""
-
+def test_a_model_steered_only_by_the_plain_history_passes():
+    """The styles do their job, so nothing is reported against them."""
     class Steered:
         def complete(self, system: str, user: str) -> str:
             if "and into Vietnamese only" in user:
-                return "Đang làm ở đây à?"
-            return "ここに作っているのですか?"
+                return "Đang tạo ở đây à?"
+            if "Write it in Japanese" in system:
+                return "はい。"
+            return "ここに作っているの？"
 
     report = harness.Report()
-    harness.check_history_does_not_steer_the_language(Steered(), report)
-    assert report.failed == []       # the new prompt gets it right
+    harness.check_what_the_history_does(Steered(), report)
+    assert report.failed == []
 
 
-def test_a_model_steered_by_both_prompts_is_caught():
-    """If the new prompt does not fix it either, the check has to fail."""
+def test_a_style_that_does_not_fix_it_is_caught():
+    """Steered by any history at all, however it is written.
 
-    class AlwaysJapanese:
+    It must translate without one, or the sentence drops out of the reckoning
+    as too broken - which is what an earlier version of this stub did, and it
+    made the test pass while proving nothing.
+    """
+    class SteeredByAnyHistory:
         def complete(self, system: str, user: str) -> str:
-            return "ここに作っているのですか?"
+            if "Write it in Japanese" in system:
+                return "はい、承知しました。"
+            if "Earlier in the meeting" not in user:
+                return "Đang tạo ở đây à?"
+            return "ここに作っているの？"
 
     report = harness.Report()
-    harness.check_history_does_not_steer_the_language(AlwaysJapanese(), report)
-    assert "The history does not steer the output language" in [
-        c.name for c in report.failed
-    ]
+    harness.check_what_the_history_does(SteeredByAnyHistory(), report)
+    failed = [c.name for c in report.failed]
+    assert "The 'labelled' history does not steer the language" in failed
+    assert "The 'sources' history does not steer the language" in failed
 
 
-def test_an_old_prompt_that_also_works_is_reported_as_such(capsys):
-    """Then the diagnosis was wrong, and the change is unjustified. Saying so
-    matters more than keeping the change."""
+def test_a_sentence_that_fails_without_history_is_not_blamed_on_the_history(capsys):
+    """Then the cut is the cause and no prompt change will translate it. It
+    must also stop counting against the styles, or the check can never pass.
+    """
+    class CannotTranslateJapanese:
+        def complete(self, system: str, user: str) -> str:
+            if "Write it in Japanese" in system:
+                return "はい。"
+            return ""            # refuses every ja -> vi sentence
+
+    report = harness.Report()
+    harness.check_what_the_history_does(CannotTranslateJapanese(), report)
+    assert report.failed == []
+    assert "the cut is the cause, not the history" in capsys.readouterr().out
+
+
+def test_a_plain_history_that_also_works_is_reported_as_such(capsys):
+    """Then the styles are solving a problem this run does not show, and
+    saying so matters more than keeping them."""
     class Working:
         def complete(self, system: str, user: str) -> str:
-            return "Đang làm ở đây à?"
+            if "Write it in Japanese" in system:
+                return "はい。"
+            return "Đang tạo ở đây à?"
 
-    harness.check_history_does_not_steer_the_language(Working(), harness.Report())
-    assert "the old prompt answered correctly too" in capsys.readouterr().out
+    harness.check_what_the_history_does(Working(), harness.Report())
+    assert "the plain history translated everything" in capsys.readouterr().out
 
 
-def test_both_answers_are_printed(capsys):
-    harness.check_history_does_not_steer_the_language(StubClient(), harness.Report())
+def test_every_variant_is_printed(capsys):
+    harness.check_what_the_history_does(StubClient(), harness.Report())
     out = capsys.readouterr().out
-    assert "old prompt:" in out
-    assert "new prompt:" in out
+    for variant in harness.HISTORY_VARIANTS:
+        assert variant in out

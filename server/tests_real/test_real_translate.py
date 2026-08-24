@@ -153,30 +153,38 @@ MEETING_REFUSALS = [
      "the ASR misheard the whole sentence"),
 ]
 
-# The turns that were in the history when ここに作っているの? was refused,
-# taken from the same run. Both are Vietnamese, so both translations in it
-# are Japanese - which is exactly the shape that appears to have taught the
-# model to answer in Japanese as well.
+# Labelling the history fixed that sentence and took the fourth end-to-end run
+# from 6 of 10 sentences translated to 14 of 17. Two Japanese sentences were
+# still refused as "not written in vi", and both had three Vietnamese turns
+# behind them rather than two - every translated line in the history Japanese,
+# three deep instead of two.
 #
-# Run on its own, with no history at all, that sentence translates correctly:
+# But both were also cut mid-sentence by the 7 s limit, so there are two
+# candidate causes and the run cannot separate them. This does:
 #
-#     ここに作っているの?  ->  Đang làm ở đây à?
+#   no history        - if it translates here, the sentence is fine and the
+#                       history is the problem
+#   plain history     - the form before labelling
+#   labelled history  - the form in the pipeline now
+#   sources only      - the history with its translations removed, so there
+#                       are no worked examples left to imitate
 #
-# So the history is the only thing that differs, and this replays it.
-STEERING_HISTORY = [
-    Turn("Speaker_01", "vi",
-         "Đang thiếu cái phần đó. Tại vì "
-         "cái chỗ câu hỏi câu trả lời của "
-         "hai bên phần đó rất là quan trọng.",
-         "その部分が不足しています。"
-         "なぜなら、双方の質問と回答"
-         "の部分は非常に重要だからです。"),
-    Turn("Speaker_01", "vi",
-         "Cái phần đó chưa mô tả ở bên này.",
-         "その部分は、こちら側でまだ"
-         "記述されていません。"),
+# If "no history" fails too, the sentence being cut is the cause, the history
+# is not, and no amount of prompt work will help.
+CUT_HISTORY = [
+    Turn("Speaker_02", "vi", "Cái tab này đều viết theo cái template có được.",
+         "このタブはすべて、取得したテンプレートに従って記述されています。"),
+    Turn("Speaker_02", "vi", "Cái đó thì mình chưa xem, sẽ mình xem.",
+         "その件は確認していませんが、確認します。"),
+    Turn("Speaker_03", "vi", "Cảm ơn.", "ありがとうございます。"),
 ]
-STEERED_SENTENCE = ("ja", "ここに作っているの?")
+CUT_SENTENCES = [
+    ("ja", "はい、画面を視聴しながら、そうなんですけど、今、薬師さんが作ったので、"),
+    ("ja", "FT1のほうは意識していますが直近、FC3からまた全面更新する"),
+    # Cut the same way by the same limit, but going the other way, and this
+    # one the run did translate. If the cut were the cause, it would fail too.
+    ("vi", "các FCG có tặng một cái thêm kết cho cái xong thì bác muốn tất cả các"),
+]
 
 
 def attempt(translator: Translator, lang_code: str, source: str) -> Attempt:
@@ -296,48 +304,75 @@ def check_context(client, report: Report) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def check_history_does_not_steer_the_language(client, report: Report) -> None:
-    """Put both prompts to the same model on the same history.
+#: The four ways the same sentence can be put to the model. "none" is the
+#: control: it is the only one that carries no history at all.
+HISTORY_VARIANTS = ("none", "plain", "labelled", "sources")
 
-    Asserting only that the new prompt works would leave the interesting
-    question unanswered: was the old one really at fault, or did that run just
-    go badly? So both are sent, and both answers are printed. If the old
-    prompt now answers correctly too, the diagnosis was wrong and the change
-    is unjustified - say so rather than keeping it.
-    """
-    lang, source = STEERED_SENTENCE
-    print("\n  Does the history steer the output language?")
-    print(f"    history: {len(STEERING_HISTORY)} Vietnamese turns, so every "
-          "translation in it is Japanese")
-    print(f"    line   : {source}  ({lang} -> vi)")
 
-    answers = {}
-    for style, steer in (("old prompt", False), ("new prompt", True)):
-        context = TranslationContext(size=TRANSLATE_HISTORY)
-        for turn in STEERING_HISTORY:
+def ask(client, lang: str, source: str, variant: str):
+    """One sentence, one way of writing the history."""
+    context = TranslationContext(size=TRANSLATE_HISTORY)
+    if variant != "none":
+        for turn in CUT_HISTORY:
             context.remember(turn)
-        translator = Translator(backend=client, context=context,
-                                steer_language=steer)
-        result = translator.translate(source, lang)
-        answers[style] = result
-        print(f"\n    {style}:")
-        if result.ok:
-            print(f"      out    : {result.text}")
-        else:
-            print(f"      refused: {result.reason}")
-            print(f"      raw    : {result.raw[:200]!r}")
+    style = "labelled" if variant == "none" else variant
+    return Translator(backend=client, context=context,
+                      history_style=style).translate(source, lang)
 
-    report.add("The history does not steer the output language",
-               answers["new prompt"].ok,
-               f"{answers['new prompt'].reason or answers['new prompt'].text}")
 
-    if answers["old prompt"].ok:
-        print("\n    NOTE: the old prompt answered correctly too. The history "
-              "is then not the cause, the labelling change is unjustified, "
-              "and the real cause is still unknown.")
-    else:
-        print("\n    The old prompt failed and the new one did not, on the "
-              "same model and the same history.")
+def check_what_the_history_does(client, report: Report) -> None:
+    """Separate two explanations for the same failure.
+
+    The fourth end-to-end run refused two Japanese sentences as "not written
+    in vi". Both had three Vietnamese turns behind them - every translation in
+    the history Japanese - and both had also been cut mid-sentence by the 7 s
+    limit. Either could be the cause.
+
+    Only the "none" column can tell them apart. If a sentence translates with
+    no history and fails with it, the history is the cause. If it fails with
+    no history either, the sentence is simply too broken to translate and no
+    prompt will change that.
+
+    The third sentence is the control in the other direction: cut by the same
+    limit, but going vi -> ja, and the run translated it.
+    """
+    print("\n  What is the history doing?")
+    print(f"    history: {len(CUT_HISTORY)} Vietnamese turns, so every "
+          "translation in it is Japanese")
+
+    answers: dict[str, dict[str, object]] = {}
+    for lang, source in CUT_SENTENCES:
+        target = "vi" if lang == "ja" else "ja"
+        print(f"\n    [{lang} -> {target}] {source}")
+        answers[source] = {}
+        for variant in HISTORY_VARIANTS:
+            result = ask(client, lang, source, variant)
+            answers[source][variant] = result
+            if result.ok:
+                print(f"      {variant:<9}: {result.text}")
+            else:
+                print(f"      {variant:<9}: REFUSED ({result.reason}) "
+                      f"raw={result.raw[:80]!r}")
+
+    japanese = [source for lang, source in CUT_SENTENCES if lang == "ja"]
+    broken = [source for source in japanese if not answers[source]["none"].ok]
+    if broken:
+        print("\n    NOTE: a sentence failed with no history at all. For that "
+              "one the cut is the cause, not the history, and no prompt "
+              "change will translate it.")
+
+    # Only sentences that a bare model can translate are the history's fault.
+    steerable = [source for source in japanese if source not in broken]
+    for name in ("labelled", "sources"):
+        failed = [source for source in steerable if not answers[source][name].ok]
+        report.add(f"The {name!r} history does not steer the language",
+                   not failed,
+                   f"{len(failed)} of {len(steerable)} refused")
+
+    if steerable and all(answers[source]["plain"].ok for source in steerable):
+        print("\n    NOTE: the plain history translated everything the model "
+              "can translate. The history is then not steering anything here, "
+              "and the styles are solving a problem this run does not show.")
 
 
 def check_meeting_refusals(client, report: Report) -> None:
@@ -402,7 +437,7 @@ def main() -> int:
         check_latency(attempts, report)
         check_repeatable(lambda: Translator(backend=client), report)
         check_context(client, report)
-        check_history_does_not_steer_the_language(client, report)
+        check_what_the_history_does(client, report)
         check_meeting_refusals(client, report)
 
         print(f"\n  Translator stats: {translator.stats.seen} seen, "

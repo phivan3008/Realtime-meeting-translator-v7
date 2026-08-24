@@ -55,6 +55,7 @@ from server.config import (
     LANGUAGE_NAMES,
     TRANSLATE_BASE_URL,
     TRANSLATE_ENABLE_THINKING,
+    HISTORY_STYLE,
     TRANSLATE_HISTORY,
     TRANSLATE_EXPANSION_SLACK,
     TRANSLATE_MAX_EXPANSION,
@@ -225,35 +226,53 @@ class TranslationContext:
     def turns(self) -> list[Turn]:
         return list(self._turns)
 
-    def as_prompt(self, label_languages: bool = True) -> str:
+    #: How the history is written into the prompt.
+    #:
+    #: ``plain``     source and translation, translation unmarked. The original.
+    #: ``labelled``  the same, with each translation's language named.
+    #: ``sources``   the source lines only. No translations, so no worked
+    #:               examples, so nothing to imitate.
+    STYLES = ("plain", "labelled", "sources")
+
+    def as_prompt(self, style: str = HISTORY_STYLE) -> str:
         """The history, laid out for the model to read but not to translate.
 
-        ``label_languages`` marks which language each translated line is in.
-        Without it the history reads as a run of worked examples that all end
-        in the same language, and the model follows the examples rather than
-        the instruction. Measured against the live model, same history, same
+        The history sits between the system prompt and the sentence to
+        translate, which makes it the last thing the model reads before
+        answering - and written with its translations it reads as worked
+        examples. When several turns in a row go the same way, every example
+        ends in the same language and the model follows the examples over the
+        instruction. Measured against the live model, same history, same
         moment, on ここに作っているの? going into Vietnamese::
 
-            unlabelled  ->  ここで作っているの？
-            labelled    ->  Đang tạo ở đây à?
+            plain     ->  ここで作っているの？
+            labelled  ->  Đang tạo ở đây à?
 
-        Note what the unlabelled answer is. Not the sentence handed back: に
-        became で and ? became ？. The model translated it - into Japanese,
-        because two Vietnamese turns of history had put two Japanese
-        translations in front of it. That is also why ``looks_like_echo`` is
-        blind here and only ``wrong_script`` caught it.
+        Note what the plain answer is. Not the sentence handed back: に became
+        で and ? became ？. The model translated it - into Japanese, because
+        two Vietnamese turns of history had put two Japanese translations in
+        front of it. That is also why ``looks_like_echo`` is blind here and
+        only ``wrong_script`` caught it.
 
-        Pass False to reproduce that.
+        Labelling was not enough on its own: it took the fourth end-to-end run
+        from 6 of 10 sentences translated to 14 of 17, and the two that still
+        came back in Japanese had three such turns behind them rather than
+        two. ``sources`` removes the examples instead of annotating them. The
+        history is there to say what "that one" refers to, and the source
+        lines carry that on their own.
         """
+        if style not in self.STYLES:
+            raise ValueError(f"unknown history style {style!r}, "
+                             f"expected one of {self.STYLES}")
         if not self._turns:
             return ""
         lines = []
         for turn in self._turns:
             who = turn.speaker_id or "someone"
             lines.append(f"{who} ({turn.lang_code}): {turn.source}")
-            if turn.translation:
+            if turn.translation and style != "sources":
                 target = target_language(turn.lang_code)
-                tag = f"({target}) " if label_languages and target else ""
+                tag = f"({target}) " if style == "labelled" and target else ""
                 lines.append(f"  -> {tag}{turn.translation}")
         return "\n".join(lines)
 
@@ -326,7 +345,7 @@ class Translator:
         context: Optional[TranslationContext] = None,
         max_expansion: dict[str, float] | float = TRANSLATE_MAX_EXPANSION,
         expansion_slack: int = TRANSLATE_EXPANSION_SLACK,
-        steer_language: bool = True,
+        history_style: str = HISTORY_STYLE,
     ) -> None:
         if isinstance(max_expansion, (int, float)):
             max_expansion = {code: float(max_expansion)
@@ -337,41 +356,40 @@ class Translator:
         self.context = context if context is not None else TranslationContext()
         self.max_expansion = dict(max_expansion)
         self.expansion_slack = expansion_slack
-        self.steer_language = steer_language
+        if history_style not in TranslationContext.STYLES:
+            raise ValueError(f"unknown history style {history_style!r}")
+        self.history_style = history_style
         self.stats = TranslationStats()
 
     def build_prompt(self, source: str, lang_code: str,
-                     steer_language: bool = True) -> tuple[str, str]:
+                     history_style: str = "") -> tuple[str, str]:
         """The system and user messages, so a test can read them.
 
-        ``steer_language=False`` rebuilds the prompt exactly as it was before
-        the history was found to be steering the output language. It exists so
-        ``server/tests_real/test_real_translate.py`` can put both versions to
-        a real model on the same history and show that the difference is the
-        prompt, not the weather. It has done so: the old form came back in
-        Japanese and the new one in Vietnamese, on one run of one model.
-        Nothing in the pipeline passes False.
+        ``history_style`` overrides this translator's own, so
+        ``server/tests_real/test_real_translate.py`` can put every version to
+        a real model on the same history and read the answers side by side.
+        ``"plain"`` rebuilds the prompt exactly as it was before any of this,
+        which is how the diagnosis was confirmed rather than assumed.
         """
+        style = history_style or self.history_style
         target = target_language(lang_code)
         target_name = LANGUAGE_NAMES.get(target, "the other language")
         system = SYSTEM_PROMPT.format(
             source_name=LANGUAGE_NAMES.get(lang_code, "the source language"),
             target_name=target_name,
         )
-        history = self.context.as_prompt(label_languages=steer_language)
+        history = self.context.as_prompt(style=style)
         if not history:
             return system, f"Translate this line into {target_name}:\n{source}"
-        if not steer_language:
+        if style == "plain":
             return system, (
                 "Earlier in the meeting, for context only - do not translate "
                 f"these:\n{history}\n\nTranslate this line:\n{source}"
             )
-        # Two changes, and both are about the same thing: the history is the
-        # last text the model reads before answering, and a run of lines all
-        # ending in the same language outweighed a system prompt asking for
-        # the other one. So each history line now says which language it is
-        # in, and the instruction is repeated where the model will read it
-        # last.
+        # The instruction is repeated after the history as well as in the
+        # system message. The history is the last text the model reads before
+        # answering, and a run of lines all going the same way outweighed a
+        # system prompt asking for the other one.
         user = (
             "Earlier in the meeting, for context only - do not translate "
             f"these:\n{history}\n\nNow translate the following line "
@@ -391,8 +409,7 @@ class Translator:
             return self._refuse(source, lang_code, target,
                                 "the language was undecided")
 
-        system, user = self.build_prompt(source, lang_code,
-                                         self.steer_language)
+        system, user = self.build_prompt(source, lang_code)
         try:
             answer = self.backend.complete(system, user)
         except TranslationError as exc:
