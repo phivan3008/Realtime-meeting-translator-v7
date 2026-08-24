@@ -9,13 +9,8 @@ annotated-types==0.8.0
 anyio==4.14.2
     # via
     #   -c server/requirements.lock.txt
-    #   httpx
+    #   httpx2
     #   starlette
-certifi==2026.7.22
-    # via
-    #   -c server/requirements.lock.txt
-    #   httpcore
-    #   httpx
 colorama==0.4.6
     # via pytest
 fastapi==0.136.3
@@ -25,12 +20,12 @@ fastapi==0.136.3
 h11==0.16.0
     # via
     #   -c server/requirements.lock.txt
-    #   httpcore
-httpcore==1.0.9
+    #   httpcore2
+httpcore2==2.12.0
     # via
     #   -c server/requirements.lock.txt
-    #   httpx
-httpx==0.28.1
+    #   httpx2
+httpx2==2.12.0
     # via
     #   -c server/requirements.lock.txt
     #   -r requirements-dev.txt
@@ -38,7 +33,7 @@ idna==3.19
     # via
     #   -c server/requirements.lock.txt
     #   anyio
-    #   httpx
+    #   httpx2
 iniconfig==2.3.0
     # via pytest
 numpy==2.3.5
@@ -83,11 +78,17 @@ starlette==1.6.0
     # via
     #   -c server/requirements.lock.txt
     #   fastapi
+truststore==0.10.4
+    # via
+    #   -c server/requirements.lock.txt
+    #   httpcore2
+    #   httpx2
 typing-extensions==4.16.0
     # via
     #   -c server/requirements.lock.txt
     #   anyio
     #   fastapi
+    #   httpx2
     #   pydantic
     #   pydantic-core
     #   pytest-asyncio

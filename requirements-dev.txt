@@ -25,8 +25,9 @@ fastapi==0.136.3
 # --- Test tooling ---
 pytest==9.1.1
 pytest-asyncio==1.4.0
-httpx==0.28.1              # required by starlette's TestClient;
-                           # the version the server stack already pins
+httpx2==2.12.0             # starlette's TestClient backend. It warns that
+                           # plain httpx is deprecated, and the server stack
+                           # already carries httpx2 through vllm.
 
 # --- Dependency management ---
 # Used to re-resolve requirements for a platform this machine is not:
