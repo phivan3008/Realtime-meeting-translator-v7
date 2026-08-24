@@ -19,6 +19,15 @@ Sentences come from the real chain - VAD, buffer manager, noise filter,
 overlap resolver - so the voiceprints are taken from exactly the audio the
 live server would embed, bleed already attenuated.
 
+Before any of that means anything, three diagnostics run. A low
+sentence-to-sentence score has three possible causes and the number alone
+cannot tell them apart: the embedder is being called wrongly, the overlap
+resolver is damaging the audio before it is embedded, or the recording holds
+more than one speaker. So the test measures whether the same audio gives the
+same voiceprint, whether the two halves of one sentence match each other
+(they are the same person by definition), and whether shaped audio scores
+worse than raw. Only once those are known does the threshold mean anything.
+
 Usage
 -----
     python3.11 server/tests_real/test_real_diarization.py \\
@@ -96,7 +105,9 @@ class Voice:
 
     path: Path
     utterances: list[Utterance] = field(default_factory=list)
+    raw_utterances: list[Utterance] = field(default_factory=list)
     embeddings: list[np.ndarray] = field(default_factory=list)
+    raw_embeddings: list[np.ndarray] = field(default_factory=list)
     embed_seconds: float = 0.0
 
     @property
@@ -120,7 +131,7 @@ def read_pcm(path: Path) -> bytes:
 
 
 def sentences_of(path: Path, vad: SileroVAD,
-                 resolver: OverlapResolver) -> list[Utterance]:
+                 resolver: Optional[OverlapResolver]) -> list[Utterance]:
     """Run the real chain, so the voiceprints see what the server would."""
     pcm = read_pcm(path)
     vad.reset()
@@ -131,6 +142,8 @@ def sentences_of(path: Path, vad: SileroVAD,
         finals += buffer.push(segmenter.push(pcm[offset : offset + CHUNK_BYTES])).finals
     segmenter.close()
     finals += buffer.flush().finals
+    if resolver is None:
+        return finals
     return [
         Utterance(index=u.index, pcm=resolver.resolve(u.pcm).pcm,
                   start_ms=u.start_ms, reason=u.reason,
@@ -141,14 +154,38 @@ def sentences_of(path: Path, vad: SileroVAD,
 
 def embed_all(path: Path, embedder: EcapaEmbedder, vad: SileroVAD,
               resolver: OverlapResolver) -> Voice:
-    voice = Voice(path=path, utterances=sentences_of(path, vad, resolver))
-    usable = [u for u in voice.utterances
-              if u.duration_ms >= SPEAKER_MIN_DURATION_MS]
+    raw = sentences_of(path, vad, resolver=None)
+    shaped = sentences_of(path, vad, resolver)
+    keep = [i for i, u in enumerate(raw)
+            if u.duration_ms >= SPEAKER_MIN_DURATION_MS]
+
+    voice = Voice(path=path)
+    voice.utterances = [shaped[i] for i in keep]
+    voice.raw_utterances = [raw[i] for i in keep]
     started = time.perf_counter()
-    voice.embeddings = [embedder.embed(u.pcm) for u in usable]
+    voice.embeddings = [embedder.embed(u.pcm) for u in voice.utterances]
     voice.embed_seconds = time.perf_counter() - started
-    voice.utterances = usable
+    voice.raw_embeddings = [embedder.embed(u.pcm) for u in voice.raw_utterances]
     return voice
+
+
+def half_similarities(utterances: list[Utterance],
+                      embedder: EcapaEmbedder) -> list[float]:
+    """Cosine between the two halves of each sentence.
+
+    The strongest same-speaker ground truth available without a labelled
+    recording: whoever said the first half of a sentence said the second.
+    If these score low, the voiceprints are wrong; if they score high, low
+    scores between sentences mean the sentences really are different people.
+    """
+    scores = []
+    for utterance in utterances:
+        if utterance.duration_ms < 2 * SPEAKER_MIN_DURATION_MS:
+            continue
+        middle = len(utterance.pcm) // 2 // SAMPLE_WIDTH * SAMPLE_WIDTH
+        scores.append(cosine_similarity(embedder.embed(utterance.pcm[:middle]),
+                                        embedder.embed(utterance.pcm[middle:])))
+    return scores
 
 
 def describe(voice: Voice) -> None:
@@ -176,6 +213,59 @@ def summarise(name: str, scores: list[float]) -> None:
     print(f"    {name}: n={len(scores)} "
           f"min {min(scores):.3f}  median {statistics.median(scores):.3f}  "
           f"max {max(scores):.3f}")
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+#
+# When sentence-to-sentence similarity comes out low there are three possible
+# reasons and no way to tell them apart from that number alone: the embedder
+# is being called wrongly, the overlap resolver is damaging the audio before
+# it is embedded, or the recording simply holds more than one speaker. These
+# measure all three at once rather than picking one to guess at.
+# ---------------------------------------------------------------------------
+def check_deterministic(voice: Voice, embedder: EcapaEmbedder,
+                        report: Report) -> None:
+    """The same audio twice must give the same voiceprint."""
+    if not voice.utterances:
+        return
+    pcm = voice.utterances[0].pcm
+    score = cosine_similarity(embedder.embed(pcm), embedder.embed(pcm))
+    report.add("The same audio gives the same voiceprint", score > 0.999,
+               f"cosine {score:.4f}")
+
+
+def check_halves(same_utterance: list[float], report: Report) -> bool:
+    """Both halves of one sentence are the same person, by definition."""
+    if not same_utterance:
+        print("    (no sentence long enough to split in half)")
+        return True
+    median = statistics.median(same_utterance)
+    passed = report.add(
+        "The two halves of one sentence match each other",
+        median > SPEAKER_MATCH_THRESHOLD,
+        f"median {median:.3f} > {SPEAKER_MATCH_THRESHOLD}, "
+        f"worst {min(same_utterance):.3f}",
+    )
+    if not passed:
+        print("    -> the voiceprints themselves are wrong. Nothing about the "
+              "threshold or the recordings can be concluded until this passes.")
+    return passed
+
+
+def check_shaping(shaped: list[float], raw: list[float],
+                  report: Report) -> None:
+    """Does gating the audio before embedding help or hurt?"""
+    if not shaped or not raw:
+        return
+    shaped_median, raw_median = statistics.median(shaped), statistics.median(raw)
+    print(f"    shaped median {shaped_median:.3f} vs raw median "
+          f"{raw_median:.3f} ({shaped_median - raw_median:+.3f})")
+    report.add(
+        "Shaping the audio does not damage the voiceprints",
+        shaped_median >= raw_median - 0.05,
+        f"shaped {shaped_median:.3f}, raw {raw_median:.3f}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -313,9 +403,21 @@ def main() -> int:
         different = crosswise(first.embeddings,
                               second.embeddings) if second else []
 
+        halves = half_similarities(first.utterances, embedder)
+        raw_same = pairwise(first.raw_embeddings)
+        if second is not None:
+            halves += half_similarities(second.utterances, embedder)
+            raw_same += pairwise(second.raw_embeddings)
+
         print("\n  Cosine similarity:")
-        summarise("same speaker     ", same)
-        summarise("different speakers", different)
+        summarise("two halves of one sentence", halves)
+        summarise("sentence to sentence, same recording", same)
+        summarise("sentence to sentence, across recordings", different)
+
+        print("\nDiagnostics:")
+        check_deterministic(first, embedder, report)
+        halves_ok = check_halves(halves, report)
+        check_shaping(same, raw_same, report)
 
         print("\nChecks:")
         check_embeddings(first, report)
@@ -323,6 +425,13 @@ def main() -> int:
             check_embeddings(second, report)
         check_separation(same, different, report)
         check_labelling(first, second, report)
+
+        if halves_ok and same and statistics.median(same) < SPEAKER_MATCH_THRESHOLD:
+            print("\n  The voiceprints are sound (both halves of a sentence "
+                  "match) but sentences within one recording do not.")
+            print("  That points at the recordings rather than the code: a "
+                  "file with several voices in it cannot be used as the "
+                  "same-speaker ground truth.")
 
         print("\n" + "=" * 72)
         if report.failed:

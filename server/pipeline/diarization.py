@@ -207,7 +207,9 @@ class EcapaEmbedder:
         chosen = device or SPEAKER_DEVICE
         if not chosen:
             chosen = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = chosen
+        # SpeechBrain parses this itself and wants an index: a bare "cuda"
+        # makes it warn and fall back to device 0.
+        self.device = "cuda:0" if chosen == "cuda" else chosen
         try:
             self._model = EncoderClassifier.from_hparams(
                 source=self.model_id,
@@ -218,7 +220,13 @@ class EcapaEmbedder:
             raise DiarizationError(
                 f"Could not load {self.model_id!r}: {exc}"
             ) from exc
+        self.warmup()
         log.info("Speaker embedding ready on %s: %s", self.device, self.model_id)
+
+    def warmup(self, seconds: float = 1.0) -> None:
+        """Pay the first-inference cost now, not on the meeting's first word."""
+        silence = np.zeros(int(seconds * SAMPLE_RATE), dtype="<i2")
+        self.embed(silence.tobytes())
 
     def embed(self, pcm: bytes) -> np.ndarray:
         """One voiceprint for one utterance of 16 kHz mono 16-bit PCM."""

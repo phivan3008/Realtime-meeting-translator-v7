@@ -315,3 +315,95 @@ def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
     )
     assert harness.main() == 2
     assert "Could not load" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+class WanderingEmbedder:
+    """Returns a different voiceprint every call - a broken model."""
+
+    source = "wandering stub"
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, pcm: bytes) -> np.ndarray:
+        self.calls += 1
+        return np.array([1.0, float(self.calls), 0.0])
+
+
+def test_a_deterministic_embedder_passes():
+    report = harness.Report()
+    harness.check_deterministic(voice_of([ALICE]), StubEmbedder(ALICE, jitter=0.0),
+                                report)
+    assert report.failed == []
+
+
+def test_an_embedder_that_wanders_is_caught():
+    """Two identical inputs giving different voiceprints explains everything else."""
+    report = harness.Report()
+    harness.check_deterministic(voice_of([ALICE]), WanderingEmbedder(), report)
+    assert [c.name for c in report.failed] == [
+        "The same audio gives the same voiceprint"
+    ]
+
+
+def test_halves_that_match_pass():
+    report = harness.Report()
+    assert harness.check_halves([0.88, 0.91], report) is True
+    assert report.failed == []
+
+
+def test_halves_that_do_not_match_point_at_the_voiceprints(capsys):
+    report = harness.Report()
+    assert harness.check_halves([0.20, 0.15], report) is False
+    out = capsys.readouterr().out
+    assert "the voiceprints themselves are wrong" in out
+
+
+def test_no_sentence_long_enough_to_split_is_not_a_failure(capsys):
+    report = harness.Report()
+    assert harness.check_halves([], report) is True
+    assert report.failed == []
+    assert "long enough to split" in capsys.readouterr().out
+
+
+def test_shaping_that_helps_or_leaves_things_alone_passes():
+    report = harness.Report()
+    harness.check_shaping([0.80, 0.82], [0.78, 0.79], report)
+    assert report.failed == []
+
+
+def test_shaping_that_damages_the_voiceprints_is_caught():
+    """If gating hurts, the answer is to embed the raw audio instead."""
+    report = harness.Report()
+    harness.check_shaping([0.30, 0.32], [0.80, 0.82], report)
+    assert [c.name for c in report.failed] == [
+        "Shaping the audio does not damage the voiceprints"
+    ]
+
+
+def test_shaping_is_not_judged_without_both_measurements():
+    report = harness.Report()
+    harness.check_shaping([], [0.8], report)
+    assert report.checks == []
+
+
+def test_half_similarities_skips_sentences_too_short_to_split():
+    from server.pipeline.buffer import FinalizeReason, Utterance
+
+    short = Utterance(index=0, pcm=bytes(16_000), start_ms=0.0,
+                      reason=FinalizeReason.PAUSE)          # 0.5 s
+    long = Utterance(index=1, pcm=bytes(96_000), start_ms=0.0,
+                     reason=FinalizeReason.PAUSE)           # 3.0 s
+    scores = harness.half_similarities([short, long], StubEmbedder(ALICE))
+    assert len(scores) == 1
+
+
+def test_embed_all_keeps_a_raw_copy_of_every_sentence(tmp_path):
+    path = write_wav(tmp_path / "alice.wav", 12.0)
+    voice = harness.embed_all(path, StubEmbedder(ALICE), ScriptedVAD([0.9]),
+                              make_resolver())
+    assert len(voice.raw_utterances) == len(voice.utterances)
+    assert len(voice.raw_embeddings) == len(voice.embeddings)
