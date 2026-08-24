@@ -645,6 +645,11 @@ def test_a_real_sentence_containing_the_phrase_is_not_caught():
     assert not harness.is_invented(real)
 
 
-def test_a_short_goodbye_is_not_caught():
-    """Nobody has shown it to be invented, so nothing may delete it."""
-    assert not harness.is_invented("Ch\u00e0o t\u1ea1m bi\u1ec7t.")
+def test_the_confirmed_goodbye_is_caught():
+    """Confirmed absent from the recording it was transcribed from."""
+    assert harness.is_invented("Chào tạm biệt.")
+
+
+def test_a_goodbye_with_anything_attached_survives():
+    assert not harness.is_invented("Chào tạm biệt nhé.")
+    assert not harness.is_invented("Tạm biệt.")

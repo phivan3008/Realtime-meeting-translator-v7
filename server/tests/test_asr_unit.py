@@ -305,11 +305,26 @@ def test_a_real_sentence_containing_the_phrase_is_kept():
     assert transcript.text == real
 
 
-def test_a_short_goodbye_is_kept():
-    """"Chào tạm biệt." is not on the list: nobody has shown it to be
-    invented, and guessing would silently delete a real sentence."""
-    goodbye = "Ch\u00e0o t\u1ea1m bi\u1ec7t."
-    assert make([confident(goodbye)]).transcribe(audio()).text == goodbye
+def test_the_confirmed_goodbye_is_refused():
+    """Committed as a sentence at 55.3 s of the second end-to-end run. The
+    recording was played back over 54-56 s and nobody spoke it."""
+    goodbye = "Chào tạm biệt."
+    assert make([confident(goodbye)]).transcribe(audio()).text == ""
+
+
+@pytest.mark.parametrize("said", [
+    "Chào tạm biệt nhé.",
+    "Thôi chào tạm biệt mọi người.",
+    "Ok chào tạm biệt.",
+    "Tạm biệt.",
+])
+def test_a_goodbye_with_anything_attached_survives(said):
+    """Whole-segment matching is the only thing keeping that entry narrow.
+
+    Unlike the video sign-offs, this one blocks an ordinary Vietnamese
+    sentence, and these are the sentences that cost must not reach.
+    """
+    assert make([confident(said)]).transcribe(audio()).text == said
 
 
 def test_a_question_containing_you_is_kept():

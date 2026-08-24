@@ -229,7 +229,24 @@ ASR_HALLUCINATIONS = (
     # Whisper's answer to silence in English. A meeting where somebody says
     # exactly "you" and nothing else loses one word; that trade is worth it.
     "you",
+    # Committed as a whole sentence at 55.3 s of the second end-to-end run,
+    # attributed to Speaker_02 and translated to さようなら。 The recording
+    # was played back over 54-56 s and nobody says it.
+    #
+    # This entry is a different trade from the ones above. Those are video
+    # sign-offs that no meeting produces; this is an ordinary Vietnamese
+    # sentence, and blocking it means a real goodbye said in exactly these
+    # words and no others is deleted. Whole-segment matching is what keeps
+    # that narrow: "Chào tạm biệt nhé", "Thôi chào tạm biệt mọi người" and
+    # anything else with a word attached all survive.
+    "Ch\u00e0o t\u1ea1m bi\u1ec7t.",
 )
+
+# What this list cannot do: it only knows what has already been seen. Every
+# entry above was found by a person listening to a recording and reporting
+# that nobody said it. A confident invention this project has not met yet
+# will still reach the screen, because nothing in Whisper's own numbers
+# separates one from real speech.
 
 # Whisper carries the previous sentence into the next by default, which is
 # where streaming hallucination loops come from: one invented sentence becomes

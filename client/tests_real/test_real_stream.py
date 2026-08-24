@@ -364,6 +364,8 @@ KNOWN_HALLUCINATIONS = (
     "\u3054\u8996\u8074\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044"
     "\u307e\u3059\u3002",
     "you",
+    # Confirmed absent from the recording it was transcribed from.
+    "Chào tạm biệt.",
 )
 _UNSPOKEN = re.compile(
     r"[\s.,!?;:\-\u2010-\u2015\u3001\u3002\u30fb\uff01\uff1f\uff0c\uff0e"
