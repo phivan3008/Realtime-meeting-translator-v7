@@ -81,6 +81,11 @@ def test_the_noise_set_covers_what_design_md_names():
     assert "Cough" in NOISE_LABELS
 
 
+def test_silence_is_not_treated_as_noise_evidence():
+    """Every utterance ends with the VAD hangover, so silence is in all of them."""
+    assert "Silence" not in NOISE_LABELS
+
+
 def test_ambient_room_labels_are_not_treated_as_noise_evidence():
     """They score high under speech too, so they prove nothing."""
     for label in ("Inside, small room", "Inside, large room or hall"):
@@ -160,12 +165,36 @@ def test_unrecognisable_audio_is_kept_rather_than_guessed_away():
     assert "nothing conclusive" in verdict.reason
 
 
-def test_the_timid_rule_can_be_turned_off():
+def test_a_faint_noise_hint_is_not_enough_to_drop_a_sentence():
+    """Found on the pod: a real sentence dropped on a 0.05 "Breathing" score.
+
+    Both scores were near zero, which the old rule read as "noise won". It was
+    not a win, it was the model having no idea, and a sentence was lost for it.
+    """
     verdict = make_filter(
-        Classification(0.02, 0.01, noise_label="Silence"),
-        require_louder_noise=False,
+        noisy(speech=0.00, noise=0.13, label="Breathing")
     ).judge(audio())
+    assert verdict.keep is True
+    assert "nothing conclusive" in verdict.reason
+    assert "0.13" in verdict.reason
+
+
+def test_confident_noise_still_drops():
+    verdict = make_filter(noisy(speech=0.00, noise=0.83, label="Cough")).judge(audio())
     assert verdict.keep is False
+    assert "Cough" in verdict.reason
+    assert "0.83" in verdict.reason
+
+
+def test_the_noise_bar_is_configurable():
+    faint = noisy(speech=0.01, noise=0.25, label="Typing")
+    assert make_filter(faint, min_noise_score=0.5).judge(audio()).keep is True
+    assert make_filter(faint, min_noise_score=0.2).judge(audio()).keep is False
+
+
+def test_an_out_of_range_noise_bar_is_rejected():
+    with pytest.raises(ValueError, match="min_noise_score"):
+        make_filter(noisy(), min_noise_score=-0.1)
 
 
 def test_empty_audio_is_dropped_without_calling_the_model():
@@ -199,7 +228,7 @@ def test_an_out_of_range_threshold_is_rejected():
 # Bookkeeping
 # ---------------------------------------------------------------------------
 def test_stats_count_what_was_kept_and_dropped():
-    filt = make_filter(speechy(), noisy(), noisy(label="Cough"))
+    filt = make_filter(speechy(), noisy(), noisy(label="Cough"))    # noise 0.7
     for _ in range(3):
         filt.judge(audio())
     assert filt.stats.seen == 3

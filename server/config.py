@@ -66,8 +66,12 @@ NOISE_DEVICE = os.environ.get("NOISE_DEVICE", "")
 # sentence for good, while letting a cough through only costs one wasted ASR
 # call.
 NOISE_MIN_SPEECH_SCORE = 0.2
-# ... and even then, only when something non-speech actually scored higher.
-NOISE_REQUIRE_LOUDER_NOISE = True
+# ... and even then, only when the classifier is confident about what it heard
+# instead. Comparing two near-zero scores is not evidence: a real keyboard
+# scores 0.87 and a real cough 0.83, while audio the model cannot place at all
+# peaks around 0.1. Below this bar the answer is "no idea", and no idea means
+# keep.
+NOISE_MIN_NOISE_SCORE = 0.3
 # AST reads a fixed 10.24 s window. Longer audio is scored one window at a
 # time and the best score for each label wins.
 NOISE_WINDOW_SECONDS = 10.0

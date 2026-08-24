@@ -25,8 +25,9 @@ The filter is deliberately timid
 The two mistakes are not symmetric.  Letting a cough through costs one wasted
 Whisper call.  Dropping real speech loses a sentence from the meeting
 permanently, and the participant never learns why.  So an utterance survives
-unless the classifier is confident it contains no speech *and* something
-non-speech scored higher.  A borderline utterance is always kept.
+unless *both* halves of the case are made: the speech score is low **and** the
+classifier is confident about what it heard instead.  Two near-zero scores are
+not a case - they are the model saying it has no idea, and no idea means keep.
 
 Layering
 --------
@@ -50,8 +51,8 @@ import numpy as np
 from server.config import (
     AST_MODEL_ID,
     NOISE_DEVICE,
+    NOISE_MIN_NOISE_SCORE,
     NOISE_MIN_SPEECH_SCORE,
-    NOISE_REQUIRE_LOUDER_NOISE,
     NOISE_WINDOW_SECONDS,
     SAMPLE_RATE,
 )
@@ -80,6 +81,8 @@ SPEECH_LABELS = frozenset({
 #: Labels that mean "this is the meeting-room noise we are here to remove".
 #: Ambient classes such as "Inside, small room" are deliberately absent: they
 #: score high under everything, speech included, so they prove nothing.
+#: "Silence" is deliberately absent for the same reason: every utterance ends
+#: with the VAD's hangover, so silence is present in all of them by design.
 NOISE_LABELS = frozenset({
     "Typing",
     "Computer keyboard",
@@ -104,7 +107,6 @@ NOISE_LABELS = frozenset({
     "Rustle",
     "Tap",
     "Knock",
-    "Silence",
     "Music",
     "Musical instrument",
     "Air conditioning",
@@ -172,13 +174,15 @@ class NoiseFilter:
         self,
         classifier: Optional[Classifier] = None,
         min_speech_score: float = NOISE_MIN_SPEECH_SCORE,
-        require_louder_noise: bool = NOISE_REQUIRE_LOUDER_NOISE,
+        min_noise_score: float = NOISE_MIN_NOISE_SCORE,
     ) -> None:
         if not 0.0 <= min_speech_score <= 1.0:
             raise ValueError("min_speech_score must be between 0 and 1")
+        if not 0.0 <= min_noise_score <= 1.0:
+            raise ValueError("min_noise_score must be between 0 and 1")
         self.classifier = classifier if classifier is not None else AstClassifier()
         self.min_speech_score = min_speech_score
-        self.require_louder_noise = require_louder_noise
+        self.min_noise_score = min_noise_score
         self.stats = NoiseStats()
 
     def judge(self, pcm: bytes) -> Verdict:
@@ -199,12 +203,21 @@ class NoiseFilter:
     def _decide(self, result: Classification) -> Verdict:
         if result.speech_score >= self.min_speech_score:
             return Verdict(True, "speech detected", result)
-        if self.require_louder_noise and result.noise_score <= result.speech_score:
-            # Nothing recognisable at all. Whisper gets to decide, because
-            # silence costs one call while a lost sentence costs the meeting.
-            return Verdict(True, "nothing conclusive, keeping it", result)
+        if result.noise_score < self.min_noise_score:
+            # Low speech score and nothing else recognised either: the model
+            # has no idea what this is. Whisper gets to decide, because a
+            # wasted call is cheaper than a sentence nobody ever hears.
+            return Verdict(
+                True,
+                f"nothing conclusive (best non-speech "
+                f"{result.noise_score:.2f}), keeping it",
+                result,
+            )
         label = result.noise_label or result.top_label or "non-speech"
-        return Verdict(False, f"no speech, sounds like {label}", result)
+        return Verdict(
+            False, f"no speech, sounds like {label} ({result.noise_score:.2f})",
+            result,
+        )
 
     def reset(self) -> None:
         self.stats = NoiseStats()
