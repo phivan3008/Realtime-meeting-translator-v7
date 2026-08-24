@@ -204,6 +204,33 @@ ASR_LOG_PROB_THRESHOLD = -1.0
 # than real speech is that loop. gzip on natural speech lands near 1.5-2.0.
 ASR_MAX_COMPRESSION_RATIO = 2.4
 
+# Sentences Whisper invents out of near-silence, verbatim. Every guard above is
+# statistical, and these defeat all of them: Whisper is *confident* when it
+# writes them - low no_speech_prob, high avg_logprob, ordinary compression -
+# because they close a large share of the videos it was trained on.
+#
+# Only entries this project has actually seen are listed. Each is matched in
+# full, after punctuation and spacing are stripped, so a real sentence that
+# merely contains one of these phrases is kept.
+ASR_HALLUCINATIONS = (
+    # Seen in the 60 s end-to-end run, as running text over a Vietnamese
+    # meeting about task tables.
+    "C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i "
+    "v\u00e0 h\u1eb9n g\u1eb7p l\u1ea1i.",
+    # Seen in the Module 9 ASR test, and refused there by no_speech_prob.
+    # Listed because that refusal was luck, not policy.
+    "C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i.",
+    "\u3054\u8996\u8074\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044"
+    "\u307e\u3057\u305f\u3002",
+    # The same sign-off in the non-past. One character apart from the line
+    # above, and Whisper picks between them freely.
+    "\u3054\u8996\u8074\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044"
+    "\u307e\u3059\u3002",
+    # Whisper's answer to silence in English. A meeting where somebody says
+    # exactly "you" and nothing else loses one word; that trade is worth it.
+    "you",
+)
+
 # Whisper carries the previous sentence into the next by default, which is
 # where streaming hallucination loops come from: one invented sentence becomes
 # the prompt for the next. Each utterance here is already a complete thought,

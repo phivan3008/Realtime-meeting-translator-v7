@@ -25,7 +25,13 @@ from server.config import (
     SAMPLE_RATE,
     SAMPLE_WIDTH,
 )
-from server.pipeline.asr import Piece, Transcriber, pcm_seconds
+from server.pipeline.asr import (
+    Piece,
+    Transcriber,
+    normalise_for_match,
+    pcm_seconds,
+)
+from server.config import ASR_HALLUCINATIONS
 
 
 class StubDecoder:
@@ -224,3 +230,110 @@ def test_reset_clears_the_counters():
     transcriber.reset()
     assert transcriber.stats.finals == 0
     assert transcriber.stats.dropped_reasons == {}
+
+
+# ---------------------------------------------------------------------------
+# Sign-offs Whisper invents out of near-silence
+#
+# The 60 s end-to-end run put "Cảm ơn các bạn đã theo dõi và hẹn gặp lại." on
+# screen as running text over a meeting about task tables. It passed every
+# check in _refuse, because Whisper writes its sign-offs with a *lower*
+# no_speech_prob and a *higher* avg_logprob than it writes real speech.
+# ---------------------------------------------------------------------------
+SIGN_OFF_VI = ("C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i "
+               "v\u00e0 h\u1eb9n g\u1eb7p l\u1ea1i.")
+SIGN_OFF_JA = "\u3054\u8996\u8074\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044\u307e\u3057\u305f\u3002"
+
+
+def confident(text: str) -> Piece:
+    """What Whisper's numbers look like when it invents a sign-off: better
+    than its numbers on real speech."""
+    return Piece(text=f" {text}", avg_logprob=-0.15, no_speech_prob=0.02,
+                 compression_ratio=1.5)
+
+
+def test_the_fixtures_survived_being_written_to_disk():
+    assert SIGN_OFF_VI.startswith("C\u1ea3m \u01a1n")
+    assert SIGN_OFF_JA.startswith("\u3054\u8996\u8074")
+
+
+def test_the_statistical_guards_would_have_kept_it():
+    """The reason a content rule had to exist at all: with the list emptied,
+    every other guard waves this line straight through."""
+    transcript = make([confident(SIGN_OFF_VI)],
+                      hallucinations=()).transcribe(audio())
+    assert transcript.text == SIGN_OFF_VI
+    assert transcript.dropped == ()
+
+
+def test_the_list_is_not_empty():
+    """An empty list would make every test above pass for the wrong reason."""
+    assert ASR_HALLUCINATIONS
+
+
+def test_the_vietnamese_sign_off_is_refused():
+    transcript = make([confident(SIGN_OFF_VI)]).transcribe(audio())
+    assert transcript.text == ""
+    assert [reason for _p, reason in transcript.dropped] == [
+        "known hallucination"
+    ]
+
+
+def test_the_japanese_sign_off_is_refused():
+    transcript = make([confident(SIGN_OFF_JA)]).transcribe(audio())
+    assert transcript.text == ""
+
+
+def test_the_english_answer_to_silence_is_refused():
+    transcript = make([confident("you")]).transcribe(audio())
+    assert transcript.text == ""
+
+
+def test_punctuation_and_case_do_not_let_it_through():
+    """Whisper punctuates its own inventions inconsistently."""
+    for variant in (SIGN_OFF_VI, SIGN_OFF_VI.rstrip("."),
+                    SIGN_OFF_VI.upper(), f"  {SIGN_OFF_VI}  "):
+        transcript = make([confident(variant)]).transcribe(audio())
+        assert transcript.text == "", variant
+
+
+def test_a_real_sentence_containing_the_phrase_is_kept():
+    """Matched in full, so a meeting may still thank people for watching."""
+    real = ("C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i "
+            "b\u00e1o c\u00e1o n\u00e0y.")
+    transcript = make([confident(real)]).transcribe(audio())
+    assert transcript.text == real
+
+
+def test_a_short_goodbye_is_kept():
+    """"Chào tạm biệt." is not on the list: nobody has shown it to be
+    invented, and guessing would silently delete a real sentence."""
+    goodbye = "Ch\u00e0o t\u1ea1m bi\u1ec7t."
+    assert make([confident(goodbye)]).transcribe(audio()).text == goodbye
+
+
+def test_a_question_containing_you_is_kept():
+    assert make([confident("Are you there?")]).transcribe(audio()).text == \
+        "Are you there?"
+
+
+def test_the_refusal_is_counted_under_its_own_reason():
+    transcriber = make([confident(SIGN_OFF_VI)])
+    transcriber.transcribe(audio())
+    assert transcriber.stats.dropped_reasons == {"known hallucination": 1}
+
+
+def test_the_refused_text_reaches_the_log(caplog):
+    """A guard that hides what it refused turns one bug into two."""
+    import logging
+    with caplog.at_level(logging.INFO, logger="server.pipeline.asr"):
+        make([confident(SIGN_OFF_VI)]).transcribe(audio())
+    assert "known hallucination" in caplog.text
+    assert "theo d\u00f5i" in caplog.text
+
+
+def test_normalising_keeps_vietnamese_letters_apart():
+    """Diacritics are letters here, not punctuation: folding them would run
+    different words together."""
+    assert normalise_for_match("t\u1eaft") != normalise_for_match("tab")
+    assert normalise_for_match("\u0111\u00f3") != normalise_for_match("do")

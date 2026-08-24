@@ -603,3 +603,48 @@ def test_a_final_arriving_before_any_partial_is_caught():
     assert "The first partial beat the first final" in [
         c.name for c in report.failed
     ]
+
+
+# ---------------------------------------------------------------------------
+# Whisper sign-offs, checked independently of the server
+# ---------------------------------------------------------------------------
+SIGN_OFF_VI = ("C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i "
+               "v\u00e0 h\u1eb9n g\u1eb7p l\u1ea1i.")
+
+
+def test_the_sign_off_fixture_survived_being_written_to_disk():
+    assert SIGN_OFF_VI.startswith("C\u1ea3m \u01a1n")
+    assert harness.is_invented(SIGN_OFF_VI)
+
+
+def test_a_sign_off_reaching_the_running_text_is_caught():
+    """It never became a sentence on the real run, and still got read."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial(transcript=SIGN_OFF_VI)), (2.0, final())),
+        report)
+    assert "No running text is a Whisper sign-off" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_sign_off_reaching_a_committed_sentence_is_caught():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(transcript=SIGN_OFF_VI, translation="\u3055\u3088\u3046\u306a\u3089"))),
+        report)
+    assert "No committed sentence is a Whisper sign-off" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_real_sentence_containing_the_phrase_is_not_caught():
+    real = ("C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i "
+            "b\u00e1o c\u00e1o n\u00e0y.")
+    assert not harness.is_invented(real)
+
+
+def test_a_short_goodbye_is_not_caught():
+    """Nobody has shown it to be invented, so nothing may delete it."""
+    assert not harness.is_invented("Ch\u00e0o t\u1ea1m bi\u1ec7t.")

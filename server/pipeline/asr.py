@@ -42,8 +42,9 @@ into a paragraph of them. Every utterance here is already a complete thought.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Iterable, Optional, Protocol
 
 import numpy as np
 
@@ -57,6 +58,7 @@ from server.config import (
     ASR_LOG_PROB_THRESHOLD,
     ASR_MAX_COMPRESSION_RATIO,
     ASR_MODEL,
+    ASR_HALLUCINATIONS,
     ASR_NO_SPEECH_THRESHOLD,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
@@ -126,6 +128,24 @@ class AsrStats:
             self.dropped_reasons[reason] = self.dropped_reasons.get(reason, 0) + 1
 
 
+# Punctuation and spacing only. Vietnamese diacritics are letters and stay:
+# stripping them would fold real words together.
+_UNSPOKEN = re.compile(
+    r"[\s.,!?;:\-\u2010-\u2015\u3001\u3002\u30fb\uff01\uff1f\uff0c\uff0e"
+    r"\"'\u2018\u2019\u201c\u201d()\[\]]+"
+)
+
+
+def normalise_for_match(text: str) -> str:
+    """Reduce a segment to what was said, for comparing against a known line.
+
+    Whisper punctuates its own inventions inconsistently - the same sign-off
+    arrives with and without the full stop - so punctuation cannot be part of
+    the comparison.
+    """
+    return _UNSPOKEN.sub("", text).casefold()
+
+
 class Decoder(Protocol):
     """What :class:`Transcriber` needs; a stub satisfies it in the tests."""
 
@@ -146,11 +166,15 @@ class Transcriber:
         no_speech_threshold: float = ASR_NO_SPEECH_THRESHOLD,
         log_prob_threshold: float = ASR_LOG_PROB_THRESHOLD,
         max_compression_ratio: float = ASR_MAX_COMPRESSION_RATIO,
+        hallucinations: Iterable[str] = ASR_HALLUCINATIONS,
     ) -> None:
         self.decoder = decoder if decoder is not None else WhisperDecoder()
         self.no_speech_threshold = no_speech_threshold
         self.log_prob_threshold = log_prob_threshold
         self.max_compression_ratio = max_compression_ratio
+        self.hallucinations = frozenset(
+            normalise_for_match(phrase) for phrase in hallucinations
+        )
         self.stats = AsrStats()
 
     def transcribe(self, pcm: bytes, lang_code: str = "",
@@ -182,8 +206,12 @@ class Transcriber:
         self.stats.record(transcript)
         self.stats.audio_seconds += samples.size / SAMPLE_RATE
         if dropped:
+            # The text, not just the count and the reason. A refusal that
+            # hides what it refused turns one bug into two, and this project
+            # has paid for that lesson twice.
             log.info("ASR dropped %d segment(s): %s", len(dropped),
-                     {reason for _piece, reason in dropped})
+                     [(reason, piece.text.strip()[:60])
+                      for piece, reason in dropped])
         return transcript
 
     def _refuse(self, piece: Piece) -> Optional[str]:
@@ -196,6 +224,11 @@ class Transcriber:
             return "low confidence"
         if piece.compression_ratio > self.max_compression_ratio:
             return "repetition"
+        if normalise_for_match(piece.text) in self.hallucinations:
+            # Every check above is statistical, and this line passes all of
+            # them: Whisper writes its sign-offs with more confidence than it
+            # writes real speech.
+            return "known hallucination"
         return None
 
     def reset(self) -> None:
