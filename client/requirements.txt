@@ -1,24 +1,44 @@
 # ---------------------------------------------------------------------------
 # Client requirements - Windows Client PC - Python 3.11
-# Install:  py -3.11 -m pip install -r client/requirements.txt
+#
+#     py -3.11 -m pip install -r client/requirements.txt
+#
+# These are the direct dependencies only. client/requirements.lock.txt holds
+# the full resolved set for Windows x86_64 / cp311.
+#
+# Every package shared with the server is pinned to the same version there,
+# on purpose: the two sides exchange raw PCM and JSON built by the same
+# common/protocol.py, so a numpy or websockets that behaves differently on
+# one end is a bug that only shows up across the wire.
 # ---------------------------------------------------------------------------
 
 # --- Audio capture (WASAPI loopback) ---
-PyAudioWPatch==0.2.12.7
+pyaudiowpatch==0.2.12.8
 
 # --- DSP / array math ---
-numpy==1.26.4
-soxr==0.5.0.post1          # High quality streaming resampler (48k -> 16k)
-scipy==1.14.1              # Fallback resampler + WAV helpers
-
-# --- No ML on the client: VAD runs on the GPU server ---
+numpy==2.3.5
+soxr==1.1.0                # high quality streaming resampler (48k -> 16k)
+scipy==1.17.1              # fallback resampler when soxr is unavailable
 
 # --- Networking ---
-websockets==13.1
+websockets==17.0.1
 
 # --- UI ---
-PySide6==6.7.3
+pyside6==6.11.2
 
 # --- Utilities ---
-python-dotenv==1.0.1
-rich==13.9.2               # Console logging / test reports
+python-dotenv==1.2.3
+rich==15.0.0
+
+# ---------------------------------------------------------------------------
+# The client runs no ML. Silero VAD and the noise classifier live on the GPU
+# server, so torch never has to be installed here - which is the whole reason
+# the earlier torchaudio DLL failure on this machine stopped mattering.
+#
+# To re-resolve after editing, keeping the shared pins aligned with the
+# server:
+#   uv pip compile --python-version 3.11 \
+#       --python-platform x86_64-pc-windows-msvc \
+#       --constraint server/requirements.lock.txt \
+#       client/requirements.txt -o client/requirements.lock.txt
+# ---------------------------------------------------------------------------

@@ -1,0 +1,53 @@
+markdown-it-py==4.2.0
+    # via
+    #   -c server/requirements.lock.txt
+    #   rich
+mdurl==0.1.2
+    # via
+    #   -c server/requirements.lock.txt
+    #   markdown-it-py
+numpy==2.3.5
+    # via
+    #   -c server/requirements.lock.txt
+    #   -r client/requirements.txt
+    #   scipy
+    #   soxr
+pyaudiowpatch==0.2.12.8
+    # via -r client/requirements.txt
+pygments==2.21.0
+    # via
+    #   -c server/requirements.lock.txt
+    #   rich
+pyside6==6.11.2
+    # via -r client/requirements.txt
+pyside6-addons==6.11.2
+    # via pyside6
+pyside6-essentials==6.11.2
+    # via
+    #   pyside6
+    #   pyside6-addons
+python-dotenv==1.2.3
+    # via
+    #   -c server/requirements.lock.txt
+    #   -r client/requirements.txt
+rich==15.0.0
+    # via
+    #   -c server/requirements.lock.txt
+    #   -r client/requirements.txt
+scipy==1.17.1
+    # via
+    #   -c server/requirements.lock.txt
+    #   -r client/requirements.txt
+shiboken6==6.11.2
+    # via
+    #   pyside6
+    #   pyside6-addons
+    #   pyside6-essentials
+soxr==1.1.0
+    # via
+    #   -c server/requirements.lock.txt
+    #   -r client/requirements.txt
+websockets==17.0.1
+    # via
+    #   -c server/requirements.lock.txt
+    #   -r client/requirements.txt

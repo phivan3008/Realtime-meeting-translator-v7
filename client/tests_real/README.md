@@ -9,8 +9,11 @@ them on the Dev PC agent loop or on the GPU server.
 git pull
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -3.11 -m pip install -r client\requirements.txt
 python --version          # must print 3.11.x
+
+# The lock file is the exact resolved set for Windows x86_64 / cp311.
+# client\requirements.txt lists intent; the lock is what reproduces.
+py -3.11 -m pip install -r client\requirements.lock.txt
 ```
 
 The client runs no ML. Silero VAD lives on the GPU server - see

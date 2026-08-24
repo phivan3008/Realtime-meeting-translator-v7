@@ -15,9 +15,22 @@ needed.
 git pull
 python3.11 -m venv .venv
 source .venv/bin/activate
-python3.11 -m pip install -r server/requirements.txt
 python --version          # must print 3.11.x
+
+# The lock file is the exact resolved set for linux x86_64 / cp311.
+# Prefer it: server/requirements.txt lists intent, the lock is reproducible.
+python3.11 -m pip install -r server/requirements.lock.txt
 ```
+
+Check the resolution before committing to the download:
+
+```bash
+python3.11 -m pip install --dry-run -r server/requirements.lock.txt
+```
+
+Never install into the system interpreter as root. That downgrades numpy and
+protobuf underneath anything else sharing it, which is how this project lost
+an afternoon once already.
 
 ## Offline: the pipeline on recorded audio
 
@@ -25,7 +38,7 @@ python --version          # must print 3.11.x
 | --- | --- |
 | `test_real_vad.py` | Silero VAD: model loads, runs far faster than real time, no false trigger on a quiet recording, correct speech segments and timestamps |
 | `test_real_buffer.py` | Stream Buffer Manager: sentences partition the speech exactly, none outstays 7 s, timestamps line up, partials keep cadence |
-| `test_real_noise.py` | YAMNet: loads on the pod, keeps real speech, drops recorded keyboard and coughing, costs almost nothing |
+| `test_real_noise.py` | Deep Noise Filter (AST): loads on the pod, keeps real speech, drops recorded keyboard and coughing, costs almost nothing |
 
 ```bash
 python3.11 server/tests_real/test_real_vad.py \
@@ -45,9 +58,10 @@ python3.11 server/tests_real/test_real_noise.py \
     --noise recordings/cough.wav
 ```
 
-If the pod has no internet access, YAMNet cannot come from TF Hub. Download
-the SavedModel once elsewhere, copy it over, and either pass `--model-dir` or
-export `YAMNET_MODEL_DIR` before starting the server.
+If the pod has no internet access it cannot pull the AST checkpoint from
+HuggingFace. Download it once elsewhere, copy the directory over, and either
+pass `--model-id <dir>` or export `AST_MODEL_ID=<dir>` before starting the
+server.
 
 `test_real_buffer.py` writes one WAV per sentence into
 `server/tests_real/output/<name>_utterances/`. Listen to any file named

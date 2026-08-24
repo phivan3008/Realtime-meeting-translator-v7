@@ -1,53 +1,83 @@
 # ---------------------------------------------------------------------------
-# Server requirements - GPU Pod (H100 80GB) - Python 3.11 + CUDA 12.x
-# Install:  python3.11 -m pip install -r server/requirements.txt
+# Server requirements - GPU Pod (H100 80GB) - Python 3.11 + CUDA
+#
+#     python3.11 -m pip install -r server/requirements.txt
+#
+# These are the direct dependencies only. server/requirements.lock.txt holds
+# the full resolved set (241 packages) for linux x86_64 / cp311 and is what
+# to install when an exact reproduction matters.
+#
+# The versions below are not a wish list: they are one resolved solution,
+# checked with `uv pip compile` against linux/cp311 and then installed for
+# real (minus the CUDA-only half, which cannot run on Windows). Do not bump
+# one line on its own - see "What binds what" at the bottom.
 # ---------------------------------------------------------------------------
 
 # --- Web / streaming ---
-fastapi==0.115.2
-uvicorn[standard]==0.31.1
-websockets==13.1
+fastapi==0.136.3
+uvicorn[standard]==0.52.4
+websockets==17.0.1
 
 # --- DSP / array math ---
-numpy==1.26.4
-soxr==0.5.0.post1
-scipy==1.14.1
-soundfile==0.12.1
+numpy==2.3.5
+soxr==1.1.0
+scipy==1.17.1
+soundfile==0.14.0
 
-# --- Torch stack (install the CUDA 12.1 build on the pod) ---
-# Pinned to 2.4.0 because vllm 0.6.3 requires exactly that; 2.4.1 conflicts.
-torch==2.4.0
-torchaudio==2.4.0
+# --- Torch stack -----------------------------------------------------------
+# These three must move together. torchaudio and torchvision are compiled
+# against a specific torch ABI, and pip will happily resolve a mismatched
+# trio because their metadata does not pin torch tightly enough. A resolver
+# run that produced torch 2.13 with torchaudio 2.11 is what put them here as
+# explicit pins rather than transitive ones.
+torch==2.11.0
+torchaudio==2.11.0
+torchvision==0.26.0
 
-# --- 1. Voice Activity Detection (moved here from the client) ---
-silero-vad==5.1.2
-onnxruntime==1.19.2        # Optional ONNX backend for Silero VAD
+# --- 1. Voice Activity Detection -------------------------------------------
+silero-vad==6.2.1
+onnxruntime==1.29.0        # optional ONNX backend for Silero VAD
 
-# --- 2. Deep Noise Filter: AST (AudioSet), see server/pipeline/noise.py ---
-# DESIGN.md allows YAMNet or a slimmed AST. AST is chosen because it runs on
-# the torch stack that is already here: YAMNet would mean TensorFlow, and TF
-# pins numpy < 2.1 and protobuf 4.x, which is a landmine for anything else
-# sharing the interpreter.
-transformers==4.44.2
+# --- 2. Deep Noise Filter: AST (AudioSet) ----------------------------------
+# See server/pipeline/noise.py for why AST and not YAMNet. In short: YAMNet
+# means TensorFlow, TF pins numpy < 2.1 and protobuf 4.x, and everything else
+# on this list needs numpy >= 2.
+transformers==5.15.1
 
 # --- 3. Overlap Resolver (DSP) ---
-pedalboard==0.9.16
+pedalboard==0.9.24
 
 # --- 4. Speaker Diarization / voiceprint ---
-pyannote.audio==3.3.2
+pyannote.audio==4.0.7
 
 # --- 5. Language ID ---
-speechbrain==1.0.1
+speechbrain==1.1.0
 
 # --- 6. ASR ---
-faster-whisper==1.0.3
+faster-whisper==1.2.1
 
 # --- 7. Translation LLM ---
-# datasets and pyarrow are pinned to versions vllm 0.6.3 accepts.
-datasets==3.0.1
-pyarrow==17.0.0
-vllm==0.6.3
+vllm==0.26.0
 
 # --- Utilities ---
-python-dotenv==1.0.1
-rich==13.9.2
+python-dotenv==1.2.3
+rich==15.0.0
+
+# ---------------------------------------------------------------------------
+# What binds what
+#
+# vllm is the tightest constraint in the file and decides most of it:
+#   vllm >= 0.26  ->  transformers >= 5.5.3   (so transformers 4.x is out)
+#   vllm          ->  a specific torch minor
+#
+# torch then decides torchaudio and torchvision, and numpy >= 2 follows from
+# torch 2.11, vllm and pyannote 4.x alike.
+#
+# The practical rule: change vllm or torch first, re-resolve the whole file,
+# and never pin a single line to fix one error.
+#
+# To re-resolve after editing:
+#   uv pip compile --python-version 3.11 \
+#       --python-platform x86_64-unknown-linux-gnu \
+#       server/requirements.txt -o server/requirements.lock.txt
+# ---------------------------------------------------------------------------
