@@ -106,6 +106,14 @@ class Collected:
     def utterances(self) -> list[dict]:
         return [m for _, m in self.messages if m.get("type") == "utterance"]
 
+    @property
+    def partials(self) -> list[tuple[float, dict]]:
+        return [(t, m) for t, m in self.messages if m.get("type") == "partial"]
+
+    @property
+    def finals(self) -> list[tuple[float, dict]]:
+        return [(t, m) for t, m in self.messages if m.get("type") == "final"]
+
     def lags_ms(self) -> list[float]:
         """How late each event arrived, relative to the audio it describes.
 
@@ -139,12 +147,20 @@ def check_health(base_url: str, report: Report) -> bool:
                f"status={payload.get('status')!r}")
     report.add("Server has the VAD model loaded", bool(payload.get("vad_loaded")),
                f"vad_loaded={payload.get('vad_loaded')}")
-    report.add(
-        "Server has the noise filter loaded",
-        bool(payload.get("noise_filter_loaded")),
-        payload.get("noise_filter_error")
-        or f"noise_filter_loaded={payload.get('noise_filter_loaded')}",
-    )
+    for flag, error_key, name in (
+        ("noise_filter_loaded", "noise_filter_error", "noise filter"),
+        ("overlap_resolver_loaded", "", "overlap resolver"),
+        ("speaker_model_loaded", "speaker_model_error", "speaker model"),
+        ("language_model_loaded", "language_model_error", "language model"),
+        ("asr_loaded", "asr_error", "ASR"),
+        ("translation_loaded", "translation_error", "translation server"),
+    ):
+        report.add(
+            f"Server has the {name} loaded",
+            bool(payload.get(flag)),
+            (payload.get(error_key) if error_key else "")
+            or f"{flag}={payload.get(flag)}",
+        )
     contract_ok = (
         payload.get("protocol_version") == PROTOCOL_VERSION
         and payload.get("sample_rate") == SAMPLE_RATE
@@ -333,6 +349,63 @@ def check_utterances(collected: Collected, report: Report) -> None:
     )
 
 
+def check_transcripts(collected: Collected, report: Report) -> None:
+    """The whole pipeline, judged by what actually reaches the client."""
+    partials, finals = collected.partials, collected.finals
+
+    print()
+    print("  Running text (partial):")
+    for arrived, payload in partials[-8:]:
+        print(f"    +{arrived - collected.stream_start:5.1f}s "
+              f"[{payload.get('lang_code') or '?'}] "
+              f"{payload.get('transcript', '')[:70]}")
+    if not partials:
+        print("    (none)")
+
+    print()
+    print("  Committed sentences (final):")
+    for arrived, payload in finals:
+        print(f"    +{arrived - collected.stream_start:5.1f}s "
+              f"{payload.get('speaker_id') or '?':<16} "
+              f"[{payload.get('lang_code') or '?'}]")
+        print(f"        said      : {payload.get('transcript', '')}")
+        print(f"        translated: {payload.get('translation', '') or '(none)'}")
+    if not finals:
+        print("    (none)")
+
+    report.add("The meeting produced committed sentences", bool(finals),
+               f"{len(finals)} final(s)")
+    if not finals:
+        return
+
+    report.add("Every committed sentence has text",
+               all(m.get("transcript", "").strip() for _t, m in finals), "")
+    report.add("Every committed sentence names a language",
+               all(m.get("lang_code") for _t, m in finals),
+               f"{sorted({m.get('lang_code') for _t, m in finals})}")
+    report.add("Every committed sentence names a speaker",
+               all(m.get("speaker_id") for _t, m in finals),
+               f"{sorted({m.get('speaker_id') for _t, m in finals})}")
+
+    translated = [m for _t, m in finals if m.get("translation", "").strip()]
+    report.add("Committed sentences come back translated",
+               len(translated) == len(finals),
+               f"{len(translated)}/{len(finals)} translated")
+    same = [m for m in translated
+            if m["translation"].strip() == m["transcript"].strip()]
+    report.add("A translation is not just the sentence again", not same,
+               f"{len(same)} identical")
+
+    report.add("Running text appeared before the sentences were committed",
+               bool(partials),
+               f"{len(partials)} partial(s)")
+    if partials and finals:
+        report.add("The first partial beat the first final",
+                   partials[0][0] < finals[0][0],
+                   f"partial at +{partials[0][0] - collected.stream_start:.1f}s, "
+                   f"final at +{finals[0][0] - collected.stream_start:.1f}s")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -360,6 +433,7 @@ async def main_async(args) -> int:
     check_stream(client, collected, args.seconds, report)
     check_events(collected, report)
     check_utterances(collected, report)
+    check_transcripts(collected, report)
 
     print("\n" + "=" * 72)
     if report.failed:

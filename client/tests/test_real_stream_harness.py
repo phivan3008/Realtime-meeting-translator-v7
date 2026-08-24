@@ -53,6 +53,15 @@ GOOD_HEALTH = {
     "vad_loaded": True,
     "noise_filter_loaded": True,
     "noise_filter_error": "",
+    "overlap_resolver_loaded": True,
+    "speaker_model_loaded": True,
+    "speaker_model_error": "",
+    "language_model_loaded": True,
+    "language_model_error": "",
+    "asr_loaded": True,
+    "asr_error": "",
+    "translation_loaded": True,
+    "translation_error": "",
     "session_active": False,
 }
 
@@ -373,7 +382,7 @@ def test_a_server_without_the_noise_filter_is_flagged():
     server, url = serve_health({
         **GOOD_HEALTH,
         "noise_filter_loaded": False,
-        "noise_filter_error": "Could not load YAMNet from 'https://...'",
+        "noise_filter_error": "Could not load 'MIT/ast-...'",
     })
     try:
         report = harness.Report()
@@ -404,5 +413,107 @@ def test_a_filter_that_drops_everything_is_caught():
     report = harness.Report()
     harness.check_utterances(collected, report)
     assert "The noise filter did not eat the whole meeting" in [
+        c.name for c in report.failed
+    ]
+
+
+# ---------------------------------------------------------------------------
+# A stage missing from the server
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("flag, name", [
+    ("overlap_resolver_loaded", "overlap resolver"),
+    ("speaker_model_loaded", "speaker model"),
+    ("language_model_loaded", "language model"),
+    ("asr_loaded", "ASR"),
+    ("translation_loaded", "translation server"),
+])
+def test_each_missing_stage_is_named(flag, name):
+    """A pod serving with a stage missing still answers; the client says which."""
+    server, url = serve_health({**GOOD_HEALTH, flag: False})
+    try:
+        report = harness.Report()
+        harness.check_health(url, report)
+        assert [c.name for c in report.failed] == [f"Server has the {name} loaded"]
+    finally:
+        server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Transcripts and translations
+# ---------------------------------------------------------------------------
+def final(transcript: str = "xin chào", translation: str = "こんにちは",
+          speaker: str = "Speaker_01", lang: str = "vi") -> dict:
+    return {"type": "final", "speaker_id": speaker, "lang_code": lang,
+            "transcript": transcript, "translation": translation}
+
+
+def partial(transcript: str = "xin", lang: str = "vi") -> dict:
+    return {"type": "partial", "speaker_id": "", "lang_code": lang,
+            "transcript": transcript}
+
+
+def collected_of(*stamped) -> "harness.Collected":
+    collected = harness.Collected(stream_start=0.0)
+    collected.messages = list(stamped)
+    return collected
+
+
+def test_a_healthy_run_of_transcripts_passes():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()), (2.0, final())), report)
+    assert report.failed == []
+
+
+def test_a_meeting_with_no_committed_sentence_is_caught():
+    report = harness.Report()
+    harness.check_transcripts(collected_of((1.0, partial())), report)
+    assert [c.name for c in report.failed] == [
+        "The meeting produced committed sentences"
+    ]
+
+
+def test_an_untranslated_sentence_is_caught():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()), (2.0, final(translation=""))), report)
+    assert "Committed sentences come back translated" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_translation_identical_to_the_sentence_is_caught():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(transcript="xin chào", translation="xin chào"))),
+        report)
+    assert "A translation is not just the sentence again" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_sentence_with_no_speaker_is_caught():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()), (2.0, final(speaker=""))), report)
+    assert "Every committed sentence names a speaker" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_running_text_that_never_appeared_is_caught():
+    report = harness.Report()
+    harness.check_transcripts(collected_of((2.0, final())), report)
+    assert "Running text appeared before the sentences were committed" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_final_arriving_before_any_partial_is_caught():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, final()), (2.0, partial())), report)
+    assert "The first partial beat the first final" in [
         c.name for c in report.failed
     ]

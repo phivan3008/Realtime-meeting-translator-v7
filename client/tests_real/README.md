@@ -24,7 +24,7 @@ The client runs no ML. Silero VAD lives on the GPU server - see
 | Script | What it proves |
 | --- | --- |
 | `test_real_audio_capture.py` | WASAPI loopback capture, 16 kHz mono PCM conversion, 200 ms chunking |
-| `test_real_stream.py` | End to end: live audio from this machine reaches the GPU server, and VAD events come back fast enough |
+| `test_real_stream.py` | End to end: live audio from this machine goes through all eight server stages and comes back as transcripts and translations |
 
 ```powershell
 # Module 1 - audio capture only
@@ -34,6 +34,11 @@ python client\tests_real\test_real_audio_capture.py --seconds 10
 # Module 3 - stream to the server (the server must already be running)
 python client\tests_real\test_real_stream.py --url ws://127.0.0.1:8000 --seconds 25
 ```
+
+The server must have every stage loaded before this test means anything -
+`/health` reports each one, and the test names whichever is missing. The
+translation stage needs vLLM running as a separate process; see
+`server/tests_real/README.md`.
 
 ### Reaching the GPU pod
 
