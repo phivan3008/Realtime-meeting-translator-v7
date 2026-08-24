@@ -18,10 +18,14 @@ is everything around that:
 Starting the server
 -------------------
     python3.11 -m vllm.entrypoints.openai.api_server \\
-        --model Qwen/Qwen2.5-7B-Instruct \\
+        --model Qwen/Qwen3.5-9B \\
         --port 8001 --gpu-memory-utilization 0.55
 
 Leave room for Whisper: the audio pipeline needs a few GB of the same card.
+
+The checkpoint has to match ``TRANSLATE_MODEL``. The client refuses a server
+running anything else, because vLLM would answer a wrong-model request
+perfectly happily and the only symptom would be worse translations.
 
 Usage
 -----

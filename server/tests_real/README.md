@@ -80,11 +80,18 @@ by hand against Whisper's allocation; out of process each side sees a GPU it
 can reason about, and the LLM can be restarted without dropping a meeting.
 
 ```bash
-python3.11 -m vllm.entrypoints.openai.api_server     --model Qwen/Qwen2.5-7B-Instruct     --port 8001 --gpu-memory-utilization 0.55
+python3.11 -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3.5-9B \
+    --port 8001 --gpu-memory-utilization 0.55
 ```
 
 Leave headroom: Whisper large-v3 and the three small models want a few GB of
 the same card. `TRANSLATE_BASE_URL` points the audio server at it.
+
+The checkpoint must match `TRANSLATE_MODEL` in `server/config.py`. The client
+checks at connect time and refuses a server running something else: vLLM would
+answer a wrong-model request perfectly happily, and the only symptom would be
+translations quietly worse than they should be.
 
 ## Online: serve the client
 
