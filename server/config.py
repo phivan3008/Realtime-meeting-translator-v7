@@ -124,9 +124,15 @@ SPEAKER_CACHE_DIR = os.environ.get("SPEAKER_CACHE_DIR", "models/speaker")
 # 0.25 is SpeechBrain's own default for this checkpoint - see the `threshold`
 # argument of SpeakerRecognition.verify_batch - which is a tuned operating
 # point rather than a guess, and a long way below the 0.55 first put here.
-# Still to be confirmed against real single-speaker recordings by
-# server/tests_real/test_real_diarization.py, which measures the two
-# distributions this number has to separate.
+# Measured on two single-speaker recordings (45 s each, different people):
+# same voice ranged 0.394 to 0.994, different voices -0.129 to 0.199, so any
+# threshold in (0.199, 0.394) separates them and 0.25 sits inside it.
+#
+# Kept at SpeechBrain's 0.25 rather than moved to the measured midpoint of
+# 0.296. Two speakers is not enough to tune on, and the two failures are not
+# equal: too low merges two people under one name, too high splits one person
+# into Speaker_01 through Speaker_06, which is what the first broken run
+# looked like and is far uglier. 0.25 leans towards merging on purpose.
 SPEAKER_MATCH_THRESHOLD = 0.25
 
 # Shorter than this there is not enough voice for a trustworthy print, and a

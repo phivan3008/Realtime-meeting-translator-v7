@@ -201,10 +201,13 @@ class ServerSession:
 
             speaker_id = ""
             if keep and self.speaker_identifier is not None:
-                # Identified from the shaped audio, not the raw utterance: the
-                # bleed the resolver just removed would otherwise be part of
-                # the voiceprint.
-                assignment = self.speaker_identifier.identify(audio)
+                # Identified from the *raw* utterance, not the shaped one.
+                # Measured on two single-speaker recordings, gating first cost
+                # 0.06 of same-speaker cosine (0.677 raw against 0.616 shaped):
+                # the gate removes quiet syllables inside a sentence, and those
+                # carry voice. The resolver is there to help the ASR, and the
+                # bleed it removes is not worth a known loss of identity.
+                assignment = self.speaker_identifier.identify(utterance.pcm)
                 speaker_id = assignment.speaker_id
                 self.stats.utterances_identified += 1
 

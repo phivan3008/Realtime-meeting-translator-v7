@@ -380,19 +380,20 @@ def test_no_sentence_long_enough_to_split_is_not_a_failure(capsys):
     assert "long enough to split" in capsys.readouterr().out
 
 
-def test_shaping_that_helps_or_leaves_things_alone_passes():
+def test_raw_scoring_better_than_shaped_confirms_the_wiring():
+    """Which is what was measured, and why the session embeds raw audio."""
     report = harness.Report()
-    harness.check_shaping([0.80, 0.82], [0.78, 0.79], report)
+    harness.check_shaping([0.616], [0.677], report)
     assert report.failed == []
 
 
-def test_shaping_that_damages_the_voiceprints_is_caught():
-    """If gating hurts, the answer is to embed the raw audio instead."""
+def test_shaped_overtaking_raw_asks_for_the_wiring_to_change():
     report = harness.Report()
-    harness.check_shaping([0.30, 0.32], [0.80, 0.82], report)
+    harness.check_shaping([0.80, 0.82], [0.30, 0.32], report)
     assert [c.name for c in report.failed] == [
-        "Shaping the audio does not damage the voiceprints"
+        "Raw audio is still the better source for voiceprints"
     ]
+    assert "embed the shaped audio" in report.failed[0].detail
 
 
 def test_shaping_is_not_judged_without_both_measurements():

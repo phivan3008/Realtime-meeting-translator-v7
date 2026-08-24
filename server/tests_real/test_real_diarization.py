@@ -248,16 +248,23 @@ def check_halves(same_utterance: list[float], report: Report) -> bool:
 
 def check_shaping(shaped: list[float], raw: list[float],
                   report: Report) -> None:
-    """Does gating the audio before embedding help or hurt?"""
+    """Confirm the pipeline embeds the audio that scores better.
+
+    Measured once, gating before embedding cost 0.06 of same-speaker cosine,
+    so the session embeds the raw utterance and lets the overlap resolver
+    serve the ASR alone. This check keeps that decision honest: if shaped
+    audio ever starts scoring better, the wiring should follow.
+    """
     if not shaped or not raw:
         return
     shaped_median, raw_median = statistics.median(shaped), statistics.median(raw)
-    print(f"    shaped median {shaped_median:.3f} vs raw median "
-          f"{raw_median:.3f} ({shaped_median - raw_median:+.3f})")
+    print(f"    raw median {raw_median:.3f} vs shaped median "
+          f"{shaped_median:.3f} ({raw_median - shaped_median:+.3f} for raw)")
     report.add(
-        "Shaping the audio does not damage the voiceprints",
-        shaped_median >= raw_median - 0.05,
-        f"shaped {shaped_median:.3f}, raw {raw_median:.3f}",
+        "Raw audio is still the better source for voiceprints",
+        raw_median >= shaped_median,
+        f"raw {raw_median:.3f}, shaped {shaped_median:.3f} - if this flips, "
+        "embed the shaped audio in server/net/session.py instead",
     )
 
 

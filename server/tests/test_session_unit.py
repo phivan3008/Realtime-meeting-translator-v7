@@ -412,6 +412,42 @@ def test_keyboard_clatter_is_announced_but_marked_dropped():
     assert session.stats.utterances_dropped == 1
 
 
+def test_the_voiceprint_is_taken_from_the_unshaped_audio():
+    """Gating first cost 0.06 of same-speaker cosine on real recordings."""
+    class RecordingEmbedder:
+        def __init__(self):
+            self.seen: list[bytes] = []
+
+        def embed(self, pcm: bytes):
+            self.seen.append(pcm)
+            return np.array([1.0, 0.0, 0.0])
+
+    class Halving:
+        """Stands in for the gate: unmistakably changes the audio."""
+
+        def process(self, samples, sample_rate, gate_threshold_db,
+                    compressor_threshold_db):
+            return samples * 0.5
+
+    from server.pipeline.diarization import SpeakerIdentifier
+    from server.pipeline.overlap import OverlapResolver
+
+    embedder = RecordingEmbedder()
+    vad = ScriptedVAD([0.9])
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        overlap_resolver=OverlapResolver(processor=Halving()),
+        speaker_identifier=SpeakerIdentifier(embedder=embedder,
+                                             min_duration_ms=0),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    session.finish()
+    assert embedder.seen, "the identifier was never called"
+    quietest = max(abs(v) for v in np.frombuffer(embedder.seen[0], dtype="<i2"))
+    assert quietest > 900, "the voiceprint was taken from gated audio"
+
+
 def test_the_filter_sees_the_committed_audio_not_the_raw_chunk():
     stub = StubClassifier(SPEECHY)
     vad = ScriptedVAD([0.9])
