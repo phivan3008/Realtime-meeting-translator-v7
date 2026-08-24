@@ -14,6 +14,13 @@ is set Whisper's ``language``.  So the model's opinion is read only for the
 two languages this meeting can contain, and the winner is whichever of those
 two scores higher.
 
+That forcing earns its keep.  Measured on a real recording, a Japanese
+sentence in which the speaker dropped an English phrase mid-way was detected
+by Whisper on its own as *Indonesian*, and transcribed as Indonesian nonsense.
+Forced to Japanese by this stage, the same audio came back as Japanese.  Code
+switching is exactly where a per-sentence guess goes wrong, and exactly what a
+VI-JA meeting is full of.
+
 Saying "I don't know" is a real answer
 --------------------------------------
 Forcing the wrong language does not fail loudly.  Whisper told to transcribe

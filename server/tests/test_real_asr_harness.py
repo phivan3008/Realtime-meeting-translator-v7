@@ -99,18 +99,24 @@ def write_wav(path: Path, seconds: float, amplitude: int = 6000) -> Path:
 
 
 def line_of(text: str, lang: str, expected: str, forced_s: float = 0.1,
-            partial_s: float = 0.05):
+            partial_s: float = 0.05, dropped=(), truncated: bool = False):
     from server.pipeline.asr import Transcript
     from server.pipeline.buffer import FinalizeReason, Utterance
 
+    reason = (FinalizeReason.END_OF_STREAM if truncated
+              else FinalizeReason.PAUSE)
     return harness.Line(
         utterance=Utterance(index=0, pcm=bytes(SAMPLE_RATE * SAMPLE_WIDTH),
-                            start_ms=0.0, reason=FinalizeReason.PAUSE),
-        forced=Transcript(text, lang, True),
+                            start_ms=0.0, reason=reason),
+        forced=Transcript(text, lang, True, dropped=tuple(dropped)),
         detected=Transcript(text, expected, True),
         forced_seconds=forced_s,
         partial_seconds=partial_s,
     )
+
+
+def refusal(text: str = " Thank you for watching!"):
+    return ((Piece(text, -0.3, 0.95, 1.3), "no speech"),)
 
 
 def reading_of(language: str, lines) -> "harness.Reading":
@@ -171,12 +177,51 @@ def test_a_healthy_reading_passes():
     assert report.failed == []
 
 
-def test_a_sentence_that_came_back_empty_is_caught():
+def test_a_sentence_lost_for_no_stated_reason_is_caught():
+    """Empty with nothing refused means Whisper simply said nothing."""
     report = harness.Report()
     harness.check_reading(reading_of("vi", [line_of("", "vi", "vi")]), report)
-    assert "vi.wav produced text for every sentence" in [
+    assert "vi.wav never loses a sentence without saying why" in [
         c.name for c in report.failed
     ]
+
+
+def test_a_refused_hallucination_is_not_a_failure():
+    """Silence answered with "Thank you for watching" and thrown away is the
+    stage doing its job, not losing a sentence."""
+    report = harness.Report()
+    harness.check_reading(
+        reading_of("vi", [line_of("hello", "vi", "vi"),
+                          line_of("hello", "vi", "vi"),
+                          line_of("", "vi", "vi", dropped=refusal())]),
+        report,
+    )
+    assert report.failed == []
+
+
+def test_guards_eating_most_of_a_recording_are_caught():
+    report = harness.Report()
+    harness.check_reading(
+        reading_of("vi", [line_of("", "vi", "vi", dropped=refusal()),
+                          line_of("", "vi", "vi", dropped=refusal()),
+                          line_of("hello", "vi", "vi")]),
+        report,
+    )
+    assert "vi.wav guards refuse a minority of sentences" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_sentence_cut_off_by_the_end_of_the_file_is_not_judged(capsys):
+    """A file stops mid-sentence; a meeting does not."""
+    report = harness.Report()
+    harness.check_reading(
+        reading_of("vi", [line_of("hello", "vi", "vi"),
+                          line_of("", "vi", "vi", truncated=True)]),
+        report,
+    )
+    assert report.failed == []
+    assert "cut off by the end of the recording" in capsys.readouterr().out
 
 
 def test_decoding_slower_than_the_budget_is_caught():

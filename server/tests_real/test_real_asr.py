@@ -47,7 +47,7 @@ from server.config import (  # noqa: E402
     SAMPLE_WIDTH,
 )
 from server.pipeline.asr import AsrError, Transcriber, WhisperDecoder, pcm_seconds  # noqa: E402
-from server.pipeline.buffer import BufferManager, Utterance  # noqa: E402
+from server.pipeline.buffer import BufferManager, FinalizeReason, Utterance  # noqa: E402
 from server.pipeline.overlap import OverlapResolver, PedalboardProcessor  # noqa: E402
 from server.pipeline.vad import SileroVAD, VADError, VADSegmenter  # noqa: E402
 
@@ -56,6 +56,10 @@ from server.pipeline.vad import SileroVAD, VADError, VADSegmenter  # noqa: E402
 MAX_FINAL_RTF = 0.35
 # A partial runs several times per sentence, so it has to be cheaper still.
 MAX_PARTIAL_RTF = 0.20
+# Sentences that come back empty because a guard refused invented text are a
+# success, not a failure - but if most of a recording disappears that way, the
+# guards have stopped telling invention from speech.
+MAX_REFUSED_SHARE = 0.35
 
 
 @dataclass
@@ -112,6 +116,30 @@ class Reading:
     @property
     def empty(self) -> list[Line]:
         return [line for line in self.lines if not line.forced.has_text]
+
+    @property
+    def refused(self) -> list[Line]:
+        """Empty because a guard refused what Whisper produced.
+
+        That is the stage working: near-silence gets a fluent invented
+        sentence and the guards throw it away.
+        """
+        return [line for line in self.empty if line.forced.dropped]
+
+    @property
+    def unexplained(self) -> list[Line]:
+        """Empty with nothing to explain it - Whisper simply said nothing."""
+        return [line for line in self.empty if not line.forced.dropped]
+
+    @property
+    def truncated(self) -> list[Line]:
+        """Cut off because the recording ended, not because of the pipeline.
+
+        A file stops mid-sentence; a meeting does not. Whatever Whisper makes
+        of half a sentence says nothing about how the stage behaves.
+        """
+        return [line for line in self.lines
+                if line.utterance.reason is FinalizeReason.END_OF_STREAM]
 
 
 def read_pcm(path: Path) -> bytes:
@@ -191,8 +219,26 @@ def check_reading(reading: Reading, report: Report) -> None:
                f"{len(reading.lines)} sentence(s)")
     if not reading.lines:
         return
-    report.add(f"{name} produced text for every sentence", not reading.empty,
-               f"{len(reading.empty)} came back empty")
+    truncated = {id(line) for line in reading.truncated}
+    unexplained = [line for line in reading.unexplained
+                   if id(line) not in truncated]
+    report.add(
+        f"{name} never loses a sentence without saying why",
+        not unexplained,
+        f"{len(unexplained)} empty with no refused segment to explain it",
+    )
+    judged = [line for line in reading.lines if id(line) not in truncated]
+    refused = [line for line in reading.refused if id(line) not in truncated]
+    share = len(refused) / len(judged) if judged else 0.0
+    report.add(
+        f"{name} guards refuse a minority of sentences",
+        share <= MAX_REFUSED_SHARE,
+        f"{len(refused)}/{len(judged)} refused as invented, "
+        f"limit {MAX_REFUSED_SHARE:.0%}",
+    )
+    if reading.truncated:
+        print(f"    ({len(reading.truncated)} sentence(s) cut off by the end "
+              "of the recording, not judged)")
     report.add(f"{name} decodes far faster than real time",
                reading.final_rtf < MAX_FINAL_RTF,
                f"final RTF {reading.final_rtf:.3f} < {MAX_FINAL_RTF}")
