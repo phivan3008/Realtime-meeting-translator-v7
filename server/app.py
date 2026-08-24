@@ -35,6 +35,7 @@ from common.protocol import (
 )
 from server.net.session import Response, ServerSession
 from server.pipeline.noise import AstClassifier, NoiseFilter, NoiseFilterError
+from server.pipeline.overlap import OverlapError, OverlapResolver
 from server.pipeline.vad import SileroVAD, VADSegmenter
 
 logging.basicConfig(
@@ -51,6 +52,7 @@ class AppState:
         self.vad: Optional[SileroVAD] = None
         self.noise_filter: Optional[NoiseFilter] = None
         self.noise_error: str = ""
+        self.overlap_resolver: Optional[OverlapResolver] = None
         self.active_session_id: Optional[str] = None
 
     def load_models(self) -> None:
@@ -73,6 +75,12 @@ class AppState:
                 # mode this process is in so nobody has to guess.
                 self.noise_error = str(exc)
                 log.error("Deep Noise Filter unavailable: %s", exc)
+        if self.overlap_resolver is None:
+            try:
+                self.overlap_resolver = OverlapResolver()
+                log.info("Overlap resolver ready")
+            except OverlapError as exc:
+                log.error("Overlap resolver unavailable: %s", exc)
 
     def make_segmenter(self) -> VADSegmenter:
         if self.vad is None:                    # pragma: no cover - startup order
@@ -108,6 +116,7 @@ def health() -> dict:
         "chunk_ms": CHUNK_DURATION_MS,
         "vad_loaded": state.vad is not None,
         "noise_filter_loaded": state.noise_filter is not None,
+        "overlap_resolver_loaded": state.overlap_resolver is not None,
         "noise_filter_error": state.noise_error,
         "session_active": state.active_session_id is not None,
     }
@@ -134,7 +143,8 @@ async def stream(socket: WebSocket) -> None:
         return
 
     session = ServerSession(segmenter_factory=state.make_segmenter,
-                            noise_filter=state.noise_filter)
+                            noise_filter=state.noise_filter,
+                            overlap_resolver=state.overlap_resolver)
     claimed = False
     try:
         while True:
@@ -171,7 +181,7 @@ async def stream(socket: WebSocket) -> None:
             state.active_session_id = None
         log.info(
             "Session %s finished: %d chunks, %.1f s audio, %d segments, "
-            "%d utterances (%d dropped as noise), %d partials, "
+            "%d utterances (%d dropped as noise, %d shaped), %d partials, "
             "%d events, %d protocol errors",
             session.session_id or "?",
             session.stats.chunks,
@@ -179,6 +189,7 @@ async def stream(socket: WebSocket) -> None:
             session.stats.speech_segments,
             session.stats.utterances,
             session.stats.utterances_dropped,
+            session.stats.utterances_shaped,
             session.stats.partials,
             session.stats.events_sent,
             session.stats.protocol_errors,

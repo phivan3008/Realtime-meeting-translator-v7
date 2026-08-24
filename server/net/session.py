@@ -32,6 +32,7 @@ from common.protocol import (
 )
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.noise import NoiseFilter
+from server.pipeline.overlap import OverlapResolver
 from server.pipeline.vad import VADSegmenter
 
 log = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class ServerSessionStats:
     events_sent: int = 0
     utterances: int = 0
     utterances_dropped: int = 0
+    utterances_shaped: int = 0
     partials: int = 0
     protocol_errors: int = 0
 
@@ -76,13 +78,15 @@ class ServerSession:
         segmenter_factory: Callable[[], VADSegmenter],
         buffer_factory: Callable[[], BufferManager] = BufferManager,
         noise_filter: Optional[NoiseFilter] = None,
+        overlap_resolver: Optional[OverlapResolver] = None,
         strict_chunk_size: bool = True,
     ) -> None:
         self._segmenter_factory = segmenter_factory
         self._buffer_factory = buffer_factory
-        # Optional: a pod without YAMNet still runs, it just transcribes the
-        # coughs too. /health reports which mode it is in.
+        # Optional: a pod without the classifier still runs, it just
+        # transcribes the coughs too. /health reports which mode it is in.
         self.noise_filter = noise_filter
+        self.overlap_resolver = overlap_resolver
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
@@ -179,6 +183,13 @@ class ServerSession:
                 score = verdict.classification.speech_score
                 if not keep:
                     self.stats.utterances_dropped += 1
+            if keep and self.overlap_resolver is not None:
+                # Only what survives is worth shaping; a dropped sentence goes
+                # nowhere. The shaped audio is what the ASR stage will read.
+                shaped = self.overlap_resolver.resolve(utterance.pcm)
+                if shaped.shaped:
+                    self.stats.utterances_shaped += 1
+
             messages.append(
                 make_utterance(
                     index=utterance.index,

@@ -75,3 +75,37 @@ NOISE_MIN_NOISE_SCORE = 0.3
 # AST reads a fixed 10.24 s window. Longer audio is scored one window at a
 # time and the best score for each label wins.
 NOISE_WINDOW_SECONDS = 10.0
+
+# --- 4. Overlap Resolver (DSP, DESIGN.md section 3.4) -----------------------
+# Thresholds are relative to the utterance's own loudness, never absolute:
+# "quiet" only means quiet compared to whoever is dominating this sentence, and
+# meeting recordings arrive at wildly different levels.
+#
+# That loudness is a high percentile of the short-term envelope, not the global
+# RMS. An utterance deliberately carries the VAD's hangover silence and every
+# pause between words; measured on a real recording the median 20 ms frame sat
+# 28 dB below the speaking level. A gate built on the global RMS therefore
+# lands far too low and never removes what it was meant to.
+#
+# The percentile is taken over the *peak* envelope, because pedalboard's gate
+# compares its threshold against the signal peak. Measured against a second
+# voice 20 dB down: an RMS-based threshold attenuated it by 0.1 dB, a
+# peak-based one by 24 dB, with the dominant voice untouched either way.
+OVERLAP_ENVELOPE_MS = 20
+OVERLAP_LEVEL_PERCENTILE = 90.0
+
+OVERLAP_GATE_BELOW_DB = 12.0        # gate anything this far under the speaker
+OVERLAP_GATE_RATIO = 4.0
+OVERLAP_GATE_ATTACK_MS = 2.0
+OVERLAP_GATE_RELEASE_MS = 120.0     # long enough not to chop word tails
+
+# The compressor only tames peaks above the speaking level; on real speech they
+# sit barely 3 dB up, so a lower threshold would squash the voice itself.
+OVERLAP_COMPRESSOR_ABOVE_DB = 3.0
+OVERLAP_COMPRESSOR_RATIO = 3.0
+OVERLAP_COMPRESSOR_ATTACK_MS = 5.0
+OVERLAP_COMPRESSOR_RELEASE_MS = 120.0
+
+# An utterance quieter than this has nothing to shape: gating it would only eat
+# the little signal there is. Pass it through untouched instead.
+OVERLAP_MIN_LEVEL_DBFS = -55.0

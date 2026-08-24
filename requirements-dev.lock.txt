@@ -40,12 +40,17 @@ numpy==2.3.5
     # via
     #   -c server/requirements.lock.txt
     #   -r requirements-dev.txt
+    #   pedalboard
     #   scipy
     #   soxr
 packaging==26.3
     # via
     #   -c server/requirements.lock.txt
     #   pytest
+pedalboard==0.9.24
+    # via
+    #   -c server/requirements.lock.txt
+    #   -r requirements-dev.txt
 pluggy==1.6.0
     # via pytest
 pydantic==2.13.4

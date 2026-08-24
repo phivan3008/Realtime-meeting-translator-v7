@@ -22,6 +22,10 @@ websockets==17.0.1
 # --- Shared with the server (the FastAPI app is tested here) ---
 fastapi==0.136.3
 
+# Pure CPU DSP with no model and no device behind it, so the Overlap Resolver
+# is one server stage whose real library can be exercised on this machine.
+pedalboard==0.9.24
+
 # --- Test tooling ---
 pytest==9.1.1
 pytest-asyncio==1.4.0
