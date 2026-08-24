@@ -109,3 +109,32 @@ OVERLAP_COMPRESSOR_RELEASE_MS = 120.0
 # An utterance quieter than this has nothing to shape: gating it would only eat
 # the little signal there is. Pass it through untouched instead.
 OVERLAP_MIN_LEVEL_DBFS = -55.0
+
+# --- 5. Speaker Diarization (DESIGN.md section 3.5) -------------------------
+# ECAPA-TDNN voiceprints, matched by cosine similarity. The checkpoint is
+# public, so no HuggingFace token is needed.
+SPEAKER_EMBEDDING_MODEL = os.environ.get(
+    "SPEAKER_EMBEDDING_MODEL", "speechbrain/spkrec-ecapa-voxceleb"
+)
+SPEAKER_DEVICE = os.environ.get("SPEAKER_DEVICE", "")
+
+# Cosine similarity above which two voiceprints are called the same person.
+# A guess until server/tests_real/test_real_diarization.py measures the real
+# same-speaker and different-speaker distributions on your recordings; it
+# prints the separation so this can be set from data rather than from taste.
+SPEAKER_MATCH_THRESHOLD = 0.55
+
+# Shorter than this there is not enough voice for a trustworthy print, and a
+# wrong speaker label is worse than an honest "unknown".
+SPEAKER_MIN_DURATION_MS = 600
+
+# Beyond this many distinct voices, stop inventing new ones: a meeting with
+# 30 "speakers" means the threshold is wrong, not that 30 people are talking.
+SPEAKER_MAX_SPEAKERS = 12
+
+# How much each new utterance moves a speaker's stored voiceprint. Keeping
+# most of the old centroid stops one noisy sentence from redefining someone.
+SPEAKER_CENTROID_MOMENTUM = 0.7
+
+#: Label used when an utterance is too short to identify.
+SPEAKER_UNKNOWN = "Speaker_unknown"

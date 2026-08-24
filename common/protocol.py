@@ -159,7 +159,8 @@ def make_vad(event: str, at_ms: float, **extra: Any) -> str:
 
 def make_utterance(index: int, start_ms: float, end_ms: float, reason: str,
                    continues_previous: bool = False, kept: bool = True,
-                   label: str = "", speech_score: float = 0.0) -> str:
+                   label: str = "", speech_score: float = 0.0,
+                   speaker_id: str = "") -> str:
     """A sentence boundary decided by the Stream Buffer Manager.
 
     Sent before any transcript exists, so the UI can open a row for the
@@ -169,6 +170,9 @@ def make_utterance(index: int, start_ms: float, end_ms: float, reason: str,
     announced, with ``label`` naming what it sounded like: the indexes stay
     consecutive, and a filter that starts eating real speech is visible on
     the client instead of silently losing sentences.
+
+    ``speaker_id`` is the diarization label, empty for a dropped sentence and
+    ``Speaker_unknown`` when the sentence was too short to identify.
     """
     return json.dumps(
         {
@@ -182,6 +186,7 @@ def make_utterance(index: int, start_ms: float, end_ms: float, reason: str,
             "kept": bool(kept),
             "label": label,
             "speech_score": round(float(speech_score), 3),
+            "speaker_id": speaker_id,
         }
     )
 

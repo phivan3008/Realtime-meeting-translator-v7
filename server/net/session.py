@@ -31,6 +31,7 @@ from common.protocol import (
     validate_audio_chunk,
 )
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
+from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
 from server.pipeline.vad import VADSegmenter
@@ -62,6 +63,7 @@ class ServerSessionStats:
     utterances: int = 0
     utterances_dropped: int = 0
     utterances_shaped: int = 0
+    utterances_identified: int = 0
     partials: int = 0
     protocol_errors: int = 0
 
@@ -79,6 +81,7 @@ class ServerSession:
         buffer_factory: Callable[[], BufferManager] = BufferManager,
         noise_filter: Optional[NoiseFilter] = None,
         overlap_resolver: Optional[OverlapResolver] = None,
+        speaker_identifier: Optional[SpeakerIdentifier] = None,
         strict_chunk_size: bool = True,
     ) -> None:
         self._segmenter_factory = segmenter_factory
@@ -87,6 +90,7 @@ class ServerSession:
         # transcribes the coughs too. /health reports which mode it is in.
         self.noise_filter = noise_filter
         self.overlap_resolver = overlap_resolver
+        self.speaker_identifier = speaker_identifier
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
@@ -142,6 +146,9 @@ class ServerSession:
         self.segmenter = self._segmenter_factory()
         self.segmenter.reset()
         self.buffer = self._buffer_factory()
+        if self.speaker_identifier is not None:
+            # A new meeting starts with nobody known.
+            self.speaker_identifier.reset()
         self.state = SessionState.STREAMING
         log.info("Session %s ready (client=%r)", hello.session_id, hello.client)
         return Response(messages=[make_ready(hello.session_id)])
@@ -183,12 +190,23 @@ class ServerSession:
                 score = verdict.classification.speech_score
                 if not keep:
                     self.stats.utterances_dropped += 1
+            audio = utterance.pcm
             if keep and self.overlap_resolver is not None:
                 # Only what survives is worth shaping; a dropped sentence goes
                 # nowhere. The shaped audio is what the ASR stage will read.
-                shaped = self.overlap_resolver.resolve(utterance.pcm)
+                shaped = self.overlap_resolver.resolve(audio)
+                audio = shaped.pcm
                 if shaped.shaped:
                     self.stats.utterances_shaped += 1
+
+            speaker_id = ""
+            if keep and self.speaker_identifier is not None:
+                # Identified from the shaped audio, not the raw utterance: the
+                # bleed the resolver just removed would otherwise be part of
+                # the voiceprint.
+                assignment = self.speaker_identifier.identify(audio)
+                speaker_id = assignment.speaker_id
+                self.stats.utterances_identified += 1
 
             messages.append(
                 make_utterance(
@@ -200,6 +218,7 @@ class ServerSession:
                     kept=keep,
                     label=label,
                     speech_score=score,
+                    speaker_id=speaker_id,
                 )
             )
         self.stats.utterances += len(result.finals)

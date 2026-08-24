@@ -34,6 +34,7 @@ from common.protocol import (
     make_error,
 )
 from server.net.session import Response, ServerSession
+from server.pipeline.diarization import DiarizationError, SpeakerIdentifier
 from server.pipeline.noise import AstClassifier, NoiseFilter, NoiseFilterError
 from server.pipeline.overlap import OverlapError, OverlapResolver
 from server.pipeline.vad import SileroVAD, VADSegmenter
@@ -53,6 +54,8 @@ class AppState:
         self.noise_filter: Optional[NoiseFilter] = None
         self.noise_error: str = ""
         self.overlap_resolver: Optional[OverlapResolver] = None
+        self.speaker_identifier: Optional[SpeakerIdentifier] = None
+        self.speaker_error: str = ""
         self.active_session_id: Optional[str] = None
 
     def load_models(self) -> None:
@@ -81,6 +84,16 @@ class AppState:
                 log.info("Overlap resolver ready")
             except OverlapError as exc:
                 log.error("Overlap resolver unavailable: %s", exc)
+        if self.speaker_identifier is None and not self.speaker_error:
+            try:
+                log.info("Loading the speaker embedding model ...")
+                self.speaker_identifier = SpeakerIdentifier()
+                log.info("Speaker embedding ready")
+            except DiarizationError as exc:
+                # Without it every sentence is unattributed, which is worse
+                # than the alternative but far better than no meeting at all.
+                self.speaker_error = str(exc)
+                log.error("Speaker identification unavailable: %s", exc)
 
     def make_segmenter(self) -> VADSegmenter:
         if self.vad is None:                    # pragma: no cover - startup order
@@ -117,6 +130,8 @@ def health() -> dict:
         "vad_loaded": state.vad is not None,
         "noise_filter_loaded": state.noise_filter is not None,
         "overlap_resolver_loaded": state.overlap_resolver is not None,
+        "speaker_model_loaded": state.speaker_identifier is not None,
+        "speaker_model_error": state.speaker_error,
         "noise_filter_error": state.noise_error,
         "session_active": state.active_session_id is not None,
     }
@@ -144,7 +159,8 @@ async def stream(socket: WebSocket) -> None:
 
     session = ServerSession(segmenter_factory=state.make_segmenter,
                             noise_filter=state.noise_filter,
-                            overlap_resolver=state.overlap_resolver)
+                            overlap_resolver=state.overlap_resolver,
+                            speaker_identifier=state.speaker_identifier)
     claimed = False
     try:
         while True:
@@ -181,7 +197,8 @@ async def stream(socket: WebSocket) -> None:
             state.active_session_id = None
         log.info(
             "Session %s finished: %d chunks, %.1f s audio, %d segments, "
-            "%d utterances (%d dropped as noise, %d shaped), %d partials, "
+            "%d utterances (%d dropped as noise, %d shaped, %d identified), "
+            "%d partials, "
             "%d events, %d protocol errors",
             session.session_id or "?",
             session.stats.chunks,
@@ -190,6 +207,7 @@ async def stream(socket: WebSocket) -> None:
             session.stats.utterances,
             session.stats.utterances_dropped,
             session.stats.utterances_shaped,
+            session.stats.utterances_identified,
             session.stats.partials,
             session.stats.events_sent,
             session.stats.protocol_errors,
