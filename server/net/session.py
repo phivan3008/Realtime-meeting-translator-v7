@@ -36,7 +36,7 @@ from common.protocol import (
     validate_audio_chunk,
 )
 from server.config import PARTIAL_WINDOW_SECONDS, SAMPLE_RATE
-from server.pipeline.asr import Transcriber
+from server.pipeline.asr import Transcriber, Transcript
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.lid import LanguageIdentifier
@@ -102,6 +102,35 @@ class ServerSessionStats:
         return self.bytes_received / 2 / 16_000
 
 
+@dataclass
+class Stages:
+    """The models a session runs audio through.
+
+    Every one is optional: a pod missing the classifier still runs, it just
+    transcribes the coughs too. ``/health`` reports which are loaded.
+    """
+
+    noise_filter: Optional[NoiseFilter] = None
+    overlap_resolver: Optional[OverlapResolver] = None
+    speaker_identifier: Optional[SpeakerIdentifier] = None
+    language_identifier: Optional[LanguageIdentifier] = None
+    transcriber: Optional[Transcriber] = None
+    translator: Optional[Translator] = None
+
+
+@dataclass
+class Analysis:
+    """What the pipeline worked out about one utterance."""
+
+    audio: bytes                    # shaped, for the ASR
+    keep: bool = True
+    label: str = ""                 # what it sounded like, when dropped
+    speech_score: float = 0.0
+    speaker_id: str = ""
+    lang_code: str = ""
+    transcript: Optional[Transcript] = None
+
+
 #: A sentence taking longer than this stalls the whole connection, because
 #: every stage runs on the thread that reads audio. At 200 ms per chunk, one
 #: second is five chunks the socket did not get to.
@@ -115,31 +144,25 @@ class ServerSession:
         self,
         segmenter_factory: Callable[[], VADSegmenter],
         buffer_factory: Callable[[], BufferManager] = BufferManager,
-        noise_filter: Optional[NoiseFilter] = None,
-        overlap_resolver: Optional[OverlapResolver] = None,
-        speaker_identifier: Optional[SpeakerIdentifier] = None,
-        language_identifier: Optional[LanguageIdentifier] = None,
-        transcriber: Optional[Transcriber] = None,
-        translator: Optional[Translator] = None,
+        stages: Optional["Stages"] = None,
         translation_inline: bool = False,
         strict_chunk_size: bool = True,
+        **models,
     ) -> None:
         self._segmenter_factory = segmenter_factory
         self._buffer_factory = buffer_factory
-        # Optional: a pod without the classifier still runs, it just
-        # transcribes the coughs too. /health reports which mode it is in.
-        self.noise_filter = noise_filter
-        self.overlap_resolver = overlap_resolver
-        self.speaker_identifier = speaker_identifier
-        self.language_identifier = language_identifier
-        self.transcriber = transcriber
-        self.translator = translator
-        # Translation runs off the thread that reads audio. `inline` puts it
-        # back on, which is what the unit tests use so nothing here depends on
-        # thread scheduling.
+        self.stages = stages if stages is not None else Stages(**models)
+        self.noise_filter = self.stages.noise_filter
+        self.overlap_resolver = self.stages.overlap_resolver
+        self.speaker_identifier = self.stages.speaker_identifier
+        self.language_identifier = self.stages.language_identifier
+        self.transcriber = self.stages.transcriber
+        self.translator = self.stages.translator
+        # `inline` runs translation on the calling thread instead of its own,
+        # which is what the unit tests use.
         self.worker: Optional[TranslationWorker] = (
-            TranslationWorker(translator, inline=translation_inline)
-            if translator is not None else None
+            TranslationWorker(self.translator, inline=translation_inline)
+            if self.translator is not None else None
         )
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
@@ -311,111 +334,108 @@ class ServerSession:
                 self.stats.stage_seconds.get(stage, 0.0) + spent)
 
     def _announce(self, result: BufferOutput) -> list[str]:
-        """Classify each finished sentence, then put it on the wire."""
+        """Run each finished sentence through the pipeline and send it."""
         messages = []
         for utterance in result.finals:
             spent: dict[str, float] = {}
-            keep, label, score = True, "", 0.0
-            if self.noise_filter is not None:
-                with self._timed("noise", spent):
-                    verdict = self.noise_filter.judge(utterance.pcm)
-                keep = verdict.keep
-                label = verdict.classification.noise_label if not keep else ""
-                score = verdict.classification.speech_score
-                if not keep:
-                    self.stats.utterances_dropped += 1
-            audio = utterance.pcm
-            if keep and self.overlap_resolver is not None:
-                # Only what survives is worth shaping; a dropped sentence goes
-                # nowhere. The shaped audio is what the ASR stage will read.
-                with self._timed("overlap", spent):
-                    shaped = self.overlap_resolver.resolve(audio)
-                audio = shaped.pcm
-                if shaped.shaped:
-                    self.stats.utterances_shaped += 1
-
-            speaker_id = ""
-            if keep and self.speaker_identifier is not None:
-                # Identified from the *raw* utterance, not the shaped one.
-                # Measured on two single-speaker recordings, gating first cost
-                # 0.06 of same-speaker cosine (0.677 raw against 0.616 shaped):
-                # the gate removes quiet syllables inside a sentence, and those
-                # carry voice. The resolver is there to help the ASR, and the
-                # bleed it removes is not worth a known loss of identity.
-                with self._timed("speaker", spent):
-                    assignment = self.speaker_identifier.identify(utterance.pcm)
-                speaker_id = assignment.speaker_id
-                self.stats.utterances_identified += 1
-
-            lang_code = ""
-            if keep and self.language_identifier is not None:
-                # Raw audio again, for the same reason: the gate removes quiet
-                # phonemes, and those carry the cues that tell the two
-                # languages apart.
-                with self._timed("language", spent):
-                    decision = self.language_identifier.identify(utterance.pcm)
-                if decision.known:
-                    self.stats.utterances_with_language += 1
-                    self._last_language = decision.lang_code
-                lang_code = self._language_for(decision)
-
-            transcript = None
-            if keep and self.transcriber is not None:
-                # The shaped audio, not the raw: gating is what the overlap
-                # resolver is for, and this is the stage it was for.
-                with self._timed("asr", spent):
-                    transcript = self.transcriber.transcribe(audio, lang_code,
-                                                             is_final=True)
-                if transcript.has_text:
-                    self.stats.transcripts += 1
-
-            messages.append(
-                make_utterance(
-                    index=utterance.index,
-                    start_ms=utterance.start_ms,
-                    end_ms=utterance.end_ms,
-                    reason=utterance.reason.value,
-                    continues_previous=utterance.continues_previous,
-                    kept=keep,
-                    label=label,
-                    speech_score=score,
-                    speaker_id=speaker_id,
-                    lang_code=lang_code,
-                )
-            )
-            if transcript is not None and transcript.has_text:
-                self._sentences += 1
-                sentence_id = self._sentences
-                # The sentence goes out now. Waiting for a translation before
-                # saying anything is what put every VAD event 12 s late on the
-                # seventh end-to-end run: an LLM call sat on the thread that
-                # reads audio, and everything behind it waited too.
-                messages.append(make_final(
-                    sentence_id=sentence_id,
-                    speaker_id=speaker_id,
-                    lang_code=transcript.lang_code,
-                    transcript=transcript.text,
-                    speech_score=score,
-                ))
-                if self.worker is not None:
-                    # The history is remembered here rather than inside the
-                    # translator, so a sentence whose translation is dropped
-                    # still leaves its source behind for the next one to read.
-                    # HISTORY_STYLE is "sources", so that is all it needs.
-                    self.worker.translator.context.remember(Turn(
-                        speaker_id=speaker_id,
-                        lang_code=transcript.lang_code,
-                        source=transcript.text,
-                        translation="",
-                    ))
-                    self.worker.submit(sentence_id, transcript.text,
-                                       transcript.lang_code, speaker_id)
+            found = self._analyse(utterance, spent)
+            messages.append(self._utterance_message(utterance, found))
+            if found.transcript is not None and found.transcript.has_text:
+                messages += self._commit_sentence(found)
             self._report_if_slow(utterance, spent)
-        self.stats.utterances += len(result.finals)
-        self.stats.events_sent += len(messages)
+
         if result.partial is not None:
             self.stats.partials += 1
             messages += self._transcribe_partial(result.partial)
+
+        self.stats.utterances += len(result.finals)
+        self.stats.events_sent += len(messages)
+        return messages
+
+    def _analyse(self, utterance, spent: dict) -> "Analysis":
+        """Every stage that reads audio, in order, for one utterance."""
+        found = Analysis(audio=utterance.pcm)
+
+        if self.noise_filter is not None:
+            with self._timed("noise", spent):
+                verdict = self.noise_filter.judge(utterance.pcm)
+            found.keep = verdict.keep
+            found.speech_score = verdict.classification.speech_score
+            if not verdict.keep:
+                found.label = verdict.classification.noise_label
+                self.stats.utterances_dropped += 1
+        if not found.keep:
+            return found
+
+        # Shaping helps the ASR and nothing else. Speaker and language read
+        # the raw audio: the gate removes quiet syllables, and those carry
+        # both voice and the cues that tell the two languages apart.
+        if self.overlap_resolver is not None:
+            with self._timed("overlap", spent):
+                shaped = self.overlap_resolver.resolve(found.audio)
+            found.audio = shaped.pcm
+            if shaped.shaped:
+                self.stats.utterances_shaped += 1
+
+        if self.speaker_identifier is not None:
+            with self._timed("speaker", spent):
+                assignment = self.speaker_identifier.identify(utterance.pcm)
+            found.speaker_id = assignment.speaker_id
+            self.stats.utterances_identified += 1
+
+        if self.language_identifier is not None:
+            with self._timed("language", spent):
+                decision = self.language_identifier.identify(utterance.pcm)
+            if decision.known:
+                self.stats.utterances_with_language += 1
+                self._last_language = decision.lang_code
+            found.lang_code = self._language_for(decision)
+
+        if self.transcriber is not None:
+            with self._timed("asr", spent):
+                found.transcript = self.transcriber.transcribe(
+                    found.audio, found.lang_code, is_final=True)
+            if found.transcript.has_text:
+                self.stats.transcripts += 1
+        return found
+
+    def _utterance_message(self, utterance, found: "Analysis") -> str:
+        """The verdict on one utterance, sent whether it was kept or not."""
+        return make_utterance(
+            index=utterance.index,
+            start_ms=utterance.start_ms,
+            end_ms=utterance.end_ms,
+            reason=utterance.reason.value,
+            continues_previous=utterance.continues_previous,
+            kept=found.keep,
+            label=found.label,
+            speech_score=found.speech_score,
+            speaker_id=found.speaker_id,
+            lang_code=found.lang_code,
+        )
+
+    def _commit_sentence(self, found: "Analysis") -> list[str]:
+        """Send the sentence now and queue its translation to follow."""
+        self._sentences += 1
+        transcript = found.transcript
+        messages = [make_final(
+            sentence_id=self._sentences,
+            speaker_id=found.speaker_id,
+            lang_code=transcript.lang_code,
+            transcript=transcript.text,
+            speech_score=found.speech_score,
+        )]
+        if self.worker is not None:
+            # Remembered here rather than inside the translator, so a sentence
+            # whose translation is dropped still leaves its source behind.
+            self.worker.translator.context.remember(Turn(
+                speaker_id=found.speaker_id,
+                lang_code=transcript.lang_code,
+                source=transcript.text,
+                translation="",
+            ))
+            self.worker.submit(self._sentences, transcript.text,
+                               transcript.lang_code, found.speaker_id)
         return messages
 
     def _report_if_slow(self, utterance, spent: dict) -> None:
