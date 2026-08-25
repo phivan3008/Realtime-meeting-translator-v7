@@ -38,6 +38,12 @@ Hẹn gặp lại.
 ご視聴ありがとうございます。
 
 # --- Tiếng Anh ----------------------------------------------------------
+# Câu kết video kinh điển của Whisper. Nó viết câu này với avg_logprob CAO,
+# nên không lớp thống kê nào chặn được — chỉ danh sách này chặn được.
+Thank you for watching!
+Thank you for watching.
+Thanks for watching!
+
 # Câu trả lời của Whisper cho im lặng. Một cuộc họp mà ai đó nói đúng một từ
 # "you" và không gì khác sẽ mất một từ; đánh đổi này đáng.
 you

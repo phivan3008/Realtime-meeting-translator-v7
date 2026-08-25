@@ -163,6 +163,9 @@ vùng đo được rất hẹp.
   Nó đọc lên như một chuỗi ví dụ mẫu.
 - **Đừng bật `condition_on_previous_text`.** Đó là cách một câu bịa thành cả
   đoạn bịa.
+- **`no_speech_prob` một mình không được phép loại đoạn nào.** Whisper đòi
+  kèm điều kiện `avg_logprob`; bỏ vế đó đi là giết tiếng nói thật và giữ câu
+  bịa, vì câu bịa được viết tự tin hơn.
 - **Voiceprint trên cửa sổ 1 giây không phân biệt được giọng.** Cùng một
   đoạn cho 0.12 theo cửa sổ và 0.77 theo cả câu. Đã thử cắt câu theo đó và đã
   tắt lại — xem `docs/TUNING.md` mục 5b.

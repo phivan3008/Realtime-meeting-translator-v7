@@ -315,7 +315,7 @@ chỉ tại thời điểm đổi ngôn ngữ; Whisper đoán thì sai 100 %.
 | `ASR_MODEL` | `large-v3` | Checkpoint faster-whisper |
 | `ASR_BEAM_SIZE_PARTIAL` | `1` | Chữ mờ giải mã tham lam |
 | `ASR_BEAM_SIZE_FINAL` | `5` | Câu chốt được beam search |
-| `ASR_NO_SPEECH_THRESHOLD` | `0.6` | Trên ngưỡng này coi như không có tiếng nói |
+| `ASR_NO_SPEECH_THRESHOLD` | `0.6` | Coi là im lặng — **cần thêm điều kiện logprob** |
 | `ASR_LOG_PROB_THRESHOLD` | `-1.0` | Dưới ngưỡng này là đoán mò |
 | `ASR_MAX_COMPRESSION_RATIO` | `2.4` | Trên ngưỡng này là đang lặp |
 | `ASR_CONDITION_ON_PREVIOUS` | `False` | **Đừng bật** |
@@ -325,6 +325,30 @@ prompt cho câu sau, đúng cơ chế biến **một câu bịa thành cả đo�
 
 **`ASR_MAX_COMPRESSION_RATIO`** — gzip của tiếng nói tự nhiên rơi vào 1.5–2.0.
 Nén tốt hơn hẳn nghĩa là đang lặp một cụm để lấp thời gian.
+
+**`ASR_NO_SPEECH_THRESHOLD` không tự nó loại đoạn nào.** Phải đồng thời
+`avg_logprob <= ASR_LOG_PROB_THRESHOLD`. Đây là đúng luật của chính Whisper,
+chép nguyên bình luận trong mã nguồn nó:
+
+> `# don't skip if the logprob is high enough, despite the no_speech_prob`
+
+> **Đo được (họp thật):** đọc `no_speech_prob` một mình đã loại nguyên một câu
+> `6.8` giây của một người đang nói liền mạch — `'2011 thì mình đang lấy bởi
+> vì là cái cả AMD mà bắt cung cấp'` — và một câu `7.0` giây nữa ngay sau đó.
+> Cả hai đều đúng lời người nói.
+
+Nó sai **hai chiều cùng lúc**, và đó là lý do phải bỏ: Whisper viết câu bịa
+với `avg_logprob` **cao hơn** khi phiên âm thật, nên `no_speech_prob` một mình
+vừa giết tiếng nói thật vừa để lọt câu bịa tự tin. Câu bịa là việc của
+[`server/data/`](../server/data/README.md), không phải của lớp thống kê.
+
+Mỗi đoạn bị loại giờ in kèm cả hai chỉ số, và mỗi đoạn **được giữ** dù
+`no_speech_prob` vượt ngưỡng cũng in ra một dòng — đó là bằng chứng để đặt lại
+ngưỡng này về sau:
+
+```
+ASR kept a segment scored as silence: no_speech 0.86, logprob -0.35, '...'
+```
 
 **Ba ngưỡng trên đều là thống kê, và chúng không bắt được câu bịa tự tin.**
 Xem [`server/data/README.md`](../server/data/README.md).

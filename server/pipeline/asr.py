@@ -175,15 +175,29 @@ class Transcriber:
             # hides what it refused turns one bug into two, and this project
             # has paid for that lesson twice.
             log.info("ASR dropped %d segment(s): %s", len(dropped),
-                     [(reason, piece.text.strip()[:60])
+                     [(reason, round(piece.no_speech_prob, 2),
+                       round(piece.avg_logprob, 2), piece.text.strip()[:60])
                       for piece, reason in dropped])
+        for piece in kept:
+            # The evidence for where the no-speech threshold belongs: these
+            # are the segments the old rule would have thrown away.
+            if piece.no_speech_prob > self.no_speech_threshold:
+                log.info("ASR kept a segment scored as silence: "
+                         "no_speech %.2f, logprob %.2f, %r",
+                         piece.no_speech_prob, piece.avg_logprob,
+                         piece.text.strip()[:60])
         return transcript
 
     def _refuse(self, piece: Piece) -> Optional[str]:
         """Why this segment should not be shown, or None to keep it."""
         if not piece.text.strip():
             return "empty"
-        if piece.no_speech_prob > self.no_speech_threshold:
+        if (piece.no_speech_prob > self.no_speech_threshold
+                and piece.avg_logprob <= self.log_prob_threshold):
+            # Whisper's own rule needs both, and says why in its source:
+            # "don't skip if the logprob is high enough, despite the
+            # no_speech_prob". Reading no_speech_prob alone refused 6.8 s of
+            # one man talking on a real meeting.
             return "no speech"
         if piece.avg_logprob < self.log_prob_threshold:
             return "low confidence"

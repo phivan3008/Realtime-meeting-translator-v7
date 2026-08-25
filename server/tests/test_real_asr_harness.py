@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from server.config import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH  # noqa: E402
-from server.pipeline.asr import Piece, Transcriber  # noqa: E402
+from server.pipeline.asr import Piece, Transcriber
+from server.wordlists import Hallucinations  # noqa: E402
 from server.pipeline.vad import VAD_FRAME_SAMPLES  # noqa: E402
 
 
@@ -270,8 +271,12 @@ def test_agreement_reports_what_whisper_thought_by_itself(capsys):
 def test_invented_text_over_silence_is_caught():
     """The reason the guards exist, with the real symptom."""
     report = harness.Report()
+    # Every guard off: the point is that the harness notices the invention,
+    # not that some layer happens to stop it.
     transcriber = Transcriber(decoder=StubDecoder(),
-                              no_speech_threshold=0.99)
+                              no_speech_threshold=0.99,
+                              hallucinations=Hallucinations(exact=[],
+                                                            patterns=()))
     harness.check_silence(bytes(SAMPLE_RATE * SAMPLE_WIDTH), transcriber, report)
     assert [c.name for c in report.failed] == ["Silence produces no transcript"]
 
