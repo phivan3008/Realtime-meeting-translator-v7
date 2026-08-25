@@ -58,13 +58,18 @@ class MeetingSession(QObject):
                                         daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Ask the session to finish and wait for it, without blocking Qt long.
+    def request_stop(self) -> None:
+        """Ask the session to finish, and return at once.
 
-        The server needs the ``bye`` to close the last sentence and translate
-        it, so this waits rather than killing the thread.
+        Closing takes as long as the goodbye does - the server commits and
+        translates the last sentence after it - so a caller on the Qt thread
+        uses this and waits for :attr:`stopped` instead of blocking.
         """
         self._stopping.set()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Ask the session to finish and wait for it. Blocks the caller."""
+        self.request_stop()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             self._thread = None

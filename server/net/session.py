@@ -382,6 +382,12 @@ class ServerSession:
                 assignment = self.speaker_identifier.identify(utterance.pcm)
             found.speaker_id = assignment.speaker_id
             self.stats.utterances_identified += 1
+            # The score is what decides whether two turns are one person.
+            # Logged so a real meeting can be read back for where the
+            # same-voice and different-voice ranges actually sit.
+            log.info("utterance %d speaker %s similarity %.3f%s",
+                     utterance.index, assignment.speaker_id,
+                     assignment.similarity, " new" if assignment.is_new else "")
 
         if self.language_identifier is not None:
             with self._timed("language", spent):

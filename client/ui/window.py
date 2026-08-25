@@ -8,6 +8,11 @@ The window holds no state of its own - :class:`TranscriptModel` does, and
 this redraws from it. A refusal is shown as such rather than as an empty
 line, because a blank where a translation should be reads as a bug in the
 client.
+
+The two states live in two widgets. Running text arrives every 600 ms, and
+rebuilding a transcript of several hundred sentences that often is what made
+the window slow to answer a click. It now goes to a label below the
+transcript, which costs nothing and stays visible while reading back.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import html
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -79,6 +84,9 @@ class MeetingWindow(QMainWindow):
         self.setWindowTitle("Phiên dịch cuộc họp VI ↔ JA")
         self.resize(900, 640)
 
+        #: Whether to keep the view at the newest sentence. Rebuilding the
+        #: document resets the scrollbar, so the position is put back by hand.
+        self._follow = True
         self.model = TranscriptModel()
         self.session = MeetingSession(url, device_hint, parent=self)
         self.session.message.connect(self.on_message)
@@ -109,9 +117,14 @@ class MeetingWindow(QMainWindow):
         controls.addStretch(1)
         controls.addWidget(self.counts)
 
+        self.running_text = QLabel()
+        self.running_text.setWordWrap(True)
+        self.running_text.setTextFormat(Qt.RichText)
+
         layout = QVBoxLayout()
         layout.addLayout(controls)
         layout.addWidget(self.transcript, 1)
+        layout.addWidget(self.running_text)
 
         central = QWidget()
         central.setLayout(layout)
@@ -121,51 +134,84 @@ class MeetingWindow(QMainWindow):
 
     # -- session ------------------------------------------------------------
     def toggle(self) -> None:
+        """Start or end the meeting. Never waits for either to happen."""
         if self.session.running:
-            self.statusBar().showMessage("Đang kết thúc phiên…")
-            self.session.stop()
+            self._set_busy("Đang kết thúc phiên…")
+            self.session.request_stop()
             return
         self.model.clear()
         self._redraw()
+        self._set_busy("Đang kết nối…")
         self.start_button.setText("Dừng")
         self.session.start()
 
+    def _set_busy(self, message: str) -> None:
+        """Connecting and closing both take seconds; a click in between is
+        either lost or acted on twice."""
+        self.start_button.setEnabled(False)
+        self.statusBar().showMessage(message)
+
     def on_message(self, message: dict) -> None:
-        if self.model.apply(message) is not None or message.get("type") in {
-            "partial", "utterance"
-        }:
+        changed = self.model.apply(message)
+        if message.get("type") == "partial":
+            self._show_running_text()
+            return
+        if changed is not None or message.get("type") == "utterance":
+            self._show_running_text()
             self._redraw()
 
     def on_status(self, text: str) -> None:
+        # The session says nothing until it is connected and listening.
+        self.start_button.setEnabled(True)
         self.statusBar().showMessage(text)
 
     def on_failed(self, text: str) -> None:
+        self.start_button.setEnabled(True)
         self.statusBar().showMessage(text)
 
     def on_stopped(self) -> None:
+        self.start_button.setEnabled(True)
         self.start_button.setText("Bắt đầu")
         self.statusBar().showMessage("Đã dừng")
+        self._show_running_text()
 
     def closeEvent(self, event) -> None:                    # noqa: N802 - Qt
         # The server needs the goodbye to finish the last sentence.
         self.session.stop()
         super().closeEvent(event)
 
+    def resizeEvent(self, event) -> None:                   # noqa: N802 - Qt
+        super().resizeEvent(event)
+        # A resize changes the scroll range but not the position, which would
+        # otherwise read as the reader having scrolled back.
+        if self._follow:
+            self._pin_to_bottom()
+
     # -- drawing ------------------------------------------------------------
+    def _show_running_text(self) -> None:
+        self.running_text.setText(
+            partial_html(self.model.partial, self.model.partial_lang))
+
     def _redraw(self) -> None:
         show = self.show_refusals.isChecked()
         body = "".join(sentence_html(s, show) for s in self.model.sentences)
-        body += partial_html(self.model.partial, self.model.partial_lang)
-        at_bottom = self._scrolled_to_bottom()
+
+        bar = self.transcript.verticalScrollBar()
+        self._follow = bar.value() >= bar.maximum() - 4
+        keep = bar.value()
+
         self.transcript.setHtml(body or self._empty_html())
-        if at_bottom:
-            self.transcript.moveCursor(QTextCursor.End)
+
+        # setHtml builds a new document, so the scrollbar is back at zero.
+        if self._follow:
+            self._pin_to_bottom()
+        else:
+            bar.setValue(min(keep, bar.maximum()))
         self._update_counts()
 
-    def _scrolled_to_bottom(self) -> bool:
-        """Only follow the meeting when the reader has not scrolled back."""
+    def _pin_to_bottom(self) -> None:
         bar = self.transcript.verticalScrollBar()
-        return bar.value() >= bar.maximum() - 4
+        bar.setValue(bar.maximum())
 
     def _update_counts(self) -> None:
         parts = [f"{len(self.model.sentences)} câu",

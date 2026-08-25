@@ -20,12 +20,18 @@ Cảm ơn các bạn đã theo dõi.
 Hẹn gặp lại các bạn trong những video tiếp theo.
 Hãy subscribe cho kênh Ghiền Mì Gõ Để không bỏ lỡ những video hấp dẫn
 Hãy đăng ký kênh để ủng hộ kênh của mình nhé.
+Cảm ơn các bạn đã xem.
 
 # Câu chào bình thường, nhưng đã xác nhận không ai nói ở giây 55 của một lần
 # chạy thật. Đây là đánh đổi khác hẳn các câu trên: một lời chào tạm biệt
 # thật, nói đúng bằng những chữ này và không thêm gì, sẽ bị xoá.
 # "Chào tạm biệt nhé", "Thôi chào tạm biệt mọi người" vẫn được giữ.
 Chào tạm biệt.
+
+# Cùng đánh đổi: xuất hiện hai lần trong một cuộc họp một tiếng, cả hai lần
+# đều không ai nói. Chỉ chặn khi câu chỉ gồm đúng ba chữ này — "Hẹn gặp lại
+# các bạn tuần sau" hay "Thôi hẹn gặp lại nhé" vẫn được giữ.
+Hẹn gặp lại.
 
 # --- Tiếng Nhật ---------------------------------------------------------
 ご視聴ありがとうございました。
