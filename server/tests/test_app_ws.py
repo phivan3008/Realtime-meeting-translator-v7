@@ -209,3 +209,78 @@ def test_a_refused_handshake_does_not_hold_the_slot(client):
     with client.websocket_connect("/ws/stream") as socket:
         socket.send_text(Hello(session_id="good").to_json())
         assert json.loads(socket.receive_text())["type"] == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Loading the stages
+# ---------------------------------------------------------------------------
+def test_disabling_the_noise_filter_still_loads_everything_else(monkeypatch):
+    """The old code returned out of load_models() here, so setting
+    DISABLE_NOISE_FILTER silently left the pod without an ASR either."""
+    from server.app import AppState
+
+    state = AppState()
+    monkeypatch.setenv("DISABLE_NOISE_FILTER", "1")
+    monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
+    for name in ("OverlapResolver", "SpeakerIdentifier", "LanguageIdentifier",
+                 "Transcriber", "Translator"):
+        monkeypatch.setattr(app_module, name, lambda: object())
+
+    state.load_models()
+
+    assert state.noise_filter is None
+    assert state.noise_error == "disabled by DISABLE_NOISE_FILTER"
+    assert state.overlap_resolver is not None
+    assert state.speaker_identifier is not None
+    assert state.language_identifier is not None
+    assert state.transcriber is not None
+    assert state.translator is not None
+
+
+def test_one_stage_failing_does_not_stop_the_others(monkeypatch):
+    from server.app import AppState
+    from server.pipeline.asr import AsrError
+
+    state = AppState()
+    monkeypatch.delenv("DISABLE_NOISE_FILTER", raising=False)
+    monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
+
+    def explode():
+        raise AsrError("no CUDA")
+
+    monkeypatch.setattr(app_module, "Transcriber", explode)
+    for name in ("NoiseFilter", "OverlapResolver", "SpeakerIdentifier",
+                 "LanguageIdentifier", "Translator"):
+        monkeypatch.setattr(app_module, name, lambda *a, **k: object())
+    monkeypatch.setattr(app_module, "AstClassifier", lambda: object())
+
+    state.load_models()
+
+    assert state.transcriber is None
+    assert "no CUDA" in state.asr_error
+    assert state.translator is not None, "a later stage was skipped"
+
+
+def test_a_stage_that_failed_is_not_retried(monkeypatch):
+    """Reconnecting must not spend thirty seconds retrying a missing model."""
+    from server.app import AppState
+    from server.pipeline.asr import AsrError
+
+    state = AppState()
+    monkeypatch.delenv("DISABLE_NOISE_FILTER", raising=False)
+    monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
+    attempts = []
+
+    def explode():
+        attempts.append(1)
+        raise AsrError("no CUDA")
+
+    monkeypatch.setattr(app_module, "Transcriber", explode)
+    for name in ("NoiseFilter", "OverlapResolver", "SpeakerIdentifier",
+                 "LanguageIdentifier", "Translator"):
+        monkeypatch.setattr(app_module, name, lambda *a, **k: object())
+    monkeypatch.setattr(app_module, "AstClassifier", lambda: object())
+
+    state.load_models()
+    state.load_models()
+    assert len(attempts) == 1
