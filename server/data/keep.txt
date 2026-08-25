@@ -1,0 +1,17 @@
+# DANH SÁCH GIỮ — câu không bao giờ bị coi là Whisper bịa
+#
+# Thắng cả hai danh sách chặn. Dùng khi một mẫu chặn nhầm câu thật trong
+# cuộc họp của bạn, và bạn không muốn sửa mẫu vì nó vẫn đang chặn đúng
+# những câu khác.
+#
+# So khớp giống danh sách chặn nguyên câu: bỏ dấu câu, bỏ khoảng trắng,
+# không phân biệt hoa thường, và phải khớp TOÀN BỘ câu.
+#
+# Mặc định trống. Các câu dưới đây chỉ là ví dụ trong ghi chú, không có
+# hiệu lực — bỏ dấu # ở đầu dòng nếu bạn thật sự cần chúng.
+#
+# Ví dụ: một cuộc họp về marketing thật sự bàn đến việc đăng ký kênh.
+#Hãy đăng ký kênh để ủng hộ kênh của mình nhé.
+#
+# Ví dụ: đội của bạn kết thúc mọi cuộc họp bằng đúng câu này.
+#Chào tạm biệt.

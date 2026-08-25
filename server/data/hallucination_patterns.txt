@@ -1,0 +1,37 @@
+# Câu Whisper bịa ra — DANH SÁCH CHẶN THEO MẪU (biểu thức chính quy)
+#
+# Dùng khi cùng một câu bịa xuất hiện với một chỗ thay đổi được — thường là
+# tên kênh. Khớp nguyên câu sau khi bỏ dấu câu và gộp khoảng trắng; chữ hoa
+# chữ thường không phân biệt.
+#
+# VÌ SAO CẦN: danh sách nguyên câu để lọt "Hãy subscribe cho kênh La La School
+# Để không bỏ lỡ những video hấp dẫn" hai lần chạy sau khi bản "Ghiền Mì Gõ"
+# đã được thêm. Tên kênh là một cái khe, và tên kênh thì vô hạn.
+#
+# CÁCH VIẾT AN TOÀN:
+#   - Neo cả câu. Mẫu được khớp bằng fullmatch, đừng thêm .* ở hai đầu.
+#   - Giới hạn độ dài khe: .{1,40} chứ không phải .*  — nếu không mẫu sẽ nuốt
+#     cả những câu dài không liên quan.
+#   - Giữ đủ phần đuôi đặc trưng. "hãy đăng ký kênh .*" một mình sẽ chặn cả
+#     "Hãy đăng ký kênh Teams cho dự án này", là câu họp hợp lệ.
+#   - Viết cả biến thể có dấu và không dấu: [ãa], [ểe], [ủu]... vì Whisper
+#     thường bỏ dấu khi nghe không rõ. Nhớ cả phụ âm: đ -> [đd], vì bỏ
+#     dấu tiếng Việt bỏ luôn gạch ngang của đ.
+#
+# THỬ TRƯỚC KHI THÊM:
+#   python3.11 -c "import sys; sys.path.insert(0,'.'); \
+#     from server.pipeline.asr import Transcriber, Piece; \
+#     t=Transcriber(decoder=object()); \
+#     print(t._refuse(Piece(text='CÂU CẦN THỬ', avg_logprob=-0.15, \
+#       no_speech_prob=0.02, compression_ratio=1.5)))"
+#   In ra 'known hallucination' nghĩa là bị chặn.
+
+# Thấy hai lần, hai tên kênh khác nhau.
+h[ãa]y subscribe cho k[êe]nh .{1,40} [đd][ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[ữu]ng video h[ấa]p d[ẫa]n
+
+# Thấy một lần. Tên kênh là tuỳ chọn — bản gặp phải không có tên nào.
+h[ãa]y [đd][ăa]ng k[ýy] k[êe]nh( .{1,40})? [đd][ểe] [ủu]ng h[ộo] k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?
+
+# Ba biến thể trong cùng một lần chạy mười phút. Khe nằm ở mệnh đề giữa
+# ("like, share và đăng ký kênh" / "like và share video này" / "đăng ký kênh").
+c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,30}

@@ -1,0 +1,37 @@
+# Câu Whisper bịa ra từ gần-im-lặng — DANH SÁCH CHẶN (khớp nguyên câu)
+#
+# Mỗi dòng là một câu. So khớp sau khi bỏ dấu câu, khoảng trắng và phân biệt
+# hoa thường, nên "Chào tạm biệt" và "chào tạm biệt." là một. Phải khớp TOÀN
+# BỘ câu: một câu thật có chứa cụm này vẫn được giữ.
+#
+# Dòng bắt đầu bằng # là ghi chú. Dòng trống bị bỏ qua.
+#
+# CÁCH THÊM: chạy real test, đọc phần "Committed sentences" và "Running text",
+# nghe lại đoạn ghi âm tương ứng. Chỉ thêm câu bạn đã xác nhận là KHÔNG AI NÓI.
+# Đoán ở đây nghĩa là âm thầm xoá tiếng nói thật.
+#
+# CẢNH BÁO: mọi thước đo thống kê của Whisper đều vô dụng với các câu này.
+# Nó viết chúng với no_speech_prob THẤP hơn và avg_logprob CAO hơn khi phiên
+# âm tiếng nói thật, vì chúng kết thúc phần lớn video trong dữ liệu huấn luyện.
+
+# --- Tiếng Việt ---------------------------------------------------------
+Cảm ơn các bạn đã theo dõi và hẹn gặp lại.
+Cảm ơn các bạn đã theo dõi.
+Hẹn gặp lại các bạn trong những video tiếp theo.
+Hãy subscribe cho kênh Ghiền Mì Gõ Để không bỏ lỡ những video hấp dẫn
+Hãy đăng ký kênh để ủng hộ kênh của mình nhé.
+
+# Câu chào bình thường, nhưng đã xác nhận không ai nói ở giây 55 của một lần
+# chạy thật. Đây là đánh đổi khác hẳn các câu trên: một lời chào tạm biệt
+# thật, nói đúng bằng những chữ này và không thêm gì, sẽ bị xoá.
+# "Chào tạm biệt nhé", "Thôi chào tạm biệt mọi người" vẫn được giữ.
+Chào tạm biệt.
+
+# --- Tiếng Nhật ---------------------------------------------------------
+ご視聴ありがとうございました。
+ご視聴ありがとうございます。
+
+# --- Tiếng Anh ----------------------------------------------------------
+# Câu trả lời của Whisper cho im lặng. Một cuộc họp mà ai đó nói đúng một từ
+# "you" và không gì khác sẽ mất một từ; đánh đổi này đáng.
+you

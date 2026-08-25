@@ -25,13 +25,12 @@ from server.config import (
     SAMPLE_RATE,
     SAMPLE_WIDTH,
 )
-from server.pipeline.asr import (
-    Piece,
-    Transcriber,
-    normalise_for_match,
-    pcm_seconds,
+from server.pipeline.asr import Piece, Transcriber, pcm_seconds
+from server.wordlists import (
+    Hallucinations,
+    normalise_exact,
+    normalise_spaced,
 )
-from server.config import ASR_HALLUCINATIONS
 
 
 class StubDecoder:
@@ -261,14 +260,14 @@ def test_the_statistical_guards_would_have_kept_it():
     """The reason a content rule had to exist at all: with the list emptied,
     every other guard waves this line straight through."""
     transcript = make([confident(SIGN_OFF_VI)],
-                      hallucinations=()).transcribe(audio())
+                      hallucinations=Hallucinations(exact=[], patterns=(), keep=[])).transcribe(audio())
     assert transcript.text == SIGN_OFF_VI
     assert transcript.dropped == ()
 
 
 def test_the_list_is_not_empty():
     """An empty list would make every test above pass for the wrong reason."""
-    assert ASR_HALLUCINATIONS
+    assert len(Hallucinations()) > 0
 
 
 def test_the_vietnamese_sign_off_is_refused():
@@ -350,8 +349,8 @@ def test_the_refused_text_reaches_the_log(caplog):
 def test_normalising_keeps_vietnamese_letters_apart():
     """Diacritics are letters here, not punctuation: folding them would run
     different words together."""
-    assert normalise_for_match("t\u1eaft") != normalise_for_match("tab")
-    assert normalise_for_match("\u0111\u00f3") != normalise_for_match("do")
+    assert normalise_exact("t\u1eaft") != normalise_exact("tab")
+    assert normalise_exact("\u0111\u00f3") != normalise_exact("do")
 
 
 def test_the_youtube_subscribe_pitch_is_refused():
@@ -430,8 +429,7 @@ def test_a_pattern_must_match_the_whole_line():
 
 def test_the_patterns_are_not_empty():
     """An empty tuple would make every test above pass for nothing."""
-    from server.config import ASR_HALLUCINATION_PATTERNS
-    assert ASR_HALLUCINATION_PATTERNS
+    assert Hallucinations().patterns
 
 
 def test_the_patterns_can_be_replaced_for_a_test():
@@ -440,15 +438,15 @@ def test_the_patterns_can_be_replaced_for_a_test():
     pitch = ("Hãy subscribe cho kênh La La School "
              "Để không bỏ lỡ những "
              "video hấp dẫn")
-    kept = make([confident(pitch)], hallucination_patterns=())
+    kept = make([confident(pitch)], hallucinations=Hallucinations(patterns=(), keep=[]))
     assert kept.transcribe(audio()).text == pitch
 
 
 def test_pattern_normalising_keeps_words_apart():
     """The exact rules strip spacing; the patterns read as sentences and
     cannot."""
-    from server.pipeline.asr import normalise_for_pattern
-    assert normalise_for_pattern("Hãy  subscribe   cho kênh!") ==         "hãy subscribe cho kênh"
+    assert normalise_spaced("Hãy  subscribe   cho kênh!") == \
+        "hãy subscribe cho kênh"
 
 
 @pytest.mark.parametrize("line", [
@@ -484,5 +482,5 @@ def test_these_were_only_caught_by_luck_before():
     line = ("C\u00e1c b\u1ea1n c\u00f3 th\u1ec3 nh\u1edb \u0111\u0103ng "
             "k\u00fd k\u00eanh \u0111\u1ec3 \u1ee7ng h\u1ed9 k\u00eanh "
             "c\u1ee7a m\u00ecnh nh\u00e9.")
-    kept = make([confident(line)], hallucination_patterns=())
+    kept = make([confident(line)], hallucinations=Hallucinations(patterns=(), keep=[]))
     assert kept.transcribe(audio()).text == line
