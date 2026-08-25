@@ -678,10 +678,20 @@ def check_transcripts(collected: Collected, report: Report) -> None:
                all(t.get("reason") for _f, t in refused),
                f"{sum(1 for _f, t in refused if not t.get('reason'))} "
                f"silent of {len(refused)}")
-    # A refusal for saying nothing has nothing to show; any other refusal is
-    # a judgement about text, and the text has to be readable to judge it.
-    should_show = [t for _f, t in refused
-                   if t.get("reason") != "the model returned nothing"]
+    # Only a refusal that judged some text owes us the text. A model that
+    # said nothing, and a sentence the model never saw, have nothing to show -
+    # demanding it there is a check that cannot pass, which is what the queue
+    # giving up on the last sentence turned this into.
+    NEVER_ANSWERED = ("the model returned nothing",
+                      "the meeting ended before this was translated",
+                      "not translated in time",
+                      "the translation queue was full",
+                      "the translator raised")
+    should_show = [
+        t for _f, t in refused
+        if not any(t.get("reason", "").startswith(prefix)
+                   for prefix in NEVER_ANSWERED)
+    ]
     report.add("Every untranslated sentence shows what the model said",
                all(t.get("raw") for t in should_show),
                f"{sum(1 for t in should_show if not t.get('raw'))} "

@@ -12,6 +12,7 @@ Run with::
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -340,3 +341,61 @@ def test_the_ceiling_is_well_past_anything_measured():
     seconds of solid backlog at that rate, which the budget empties first."""
     busiest_per_second = 1.35
     assert TRANSLATION_QUEUE_DEPTH / busiest_per_second > TRANSLATION_MAX_LAG_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# Stopping must not race the sentence it was given
+#
+# The last sentence of a meeting is committed and queued by the same call that
+# stops the worker. Setting the stop flag first raced the thread to it: the
+# thread woke, saw the flag and left the sentence to be drained, so a run
+# reported "the meeting ended before this was translated" for a sentence whose
+# translation was 0.2 s away.
+# ---------------------------------------------------------------------------
+def test_stopping_finishes_what_was_just_queued():
+    w = TranslationWorker(StubTranslator("こんにちは"), queue_=make(),
+                          inline=False)
+    w.start()
+    try:
+        w.submit(1, "xin chào", "vi")
+        done = w.stop(timeout=2.0)
+    finally:
+        w.stop(timeout=0.1)
+    assert [d.sentence_id for d in done] == [1]
+    assert done[0].translation == "こんにちは", done[0].reason
+
+
+def test_stopping_finishes_a_short_backlog():
+    w = TranslationWorker(StubTranslator("こんにちは"), queue_=make(),
+                          inline=False)
+    w.start()
+    try:
+        for index in range(1, 6):
+            w.submit(index, f"line {index}", "vi")
+        done = w.stop(timeout=2.0)
+    finally:
+        w.stop(timeout=0.1)
+    assert sorted(d.sentence_id for d in done) == [1, 2, 3, 4, 5]
+    assert all(d.translation for d in done), [d.reason for d in done]
+
+
+def test_stopping_does_not_wait_forever_on_a_stuck_translator():
+    """A backlog that cannot drain must not hold the connection open; it is
+    reported as abandoned instead."""
+    class Hangs:
+        def translate(self, text, lang_code, speaker_id=""):
+            time.sleep(5.0)
+            raise AssertionError("should not get here")
+
+    w = TranslationWorker(Hangs(), queue_=make(), inline=False)
+    w.start()
+    try:
+        for index in range(1, 4):
+            w.submit(index, f"line {index}", "vi")
+        started = time.monotonic()
+        done = w.stop(timeout=0.3)
+        assert time.monotonic() - started < 2.0
+    finally:
+        w._stopping.set()
+    assert done, "the abandoned sentences said nothing at all"
+    assert any("meeting ended" in d.reason for d in done)

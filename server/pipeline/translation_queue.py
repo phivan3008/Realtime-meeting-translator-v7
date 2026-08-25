@@ -271,10 +271,32 @@ class TranslationWorker:
                 return results
 
     def stop(self, timeout: float = 2.0) -> list[Done]:
-        """Stop the worker and account for whatever never got translated."""
+        """Finish what is queued, then stop and account for the rest.
+
+        The waiting comes first, and it has to. The last sentence of a meeting
+        is committed and queued by the same call that stops the worker, so
+        setting the stop flag straight away raced the thread to it: the thread
+        woke, saw the flag, and left the sentence to be drained. On a
+        ten-minute run that read as
+
+            NOT translated: the meeting ended before this was translated
+
+        for a sentence whose translation was 0.2 s away. Every sentence still
+        gets an answer either way, which is why the "never answered" check
+        passed and only a person reading the output caught it.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not len(self.queue):
+                    break
+            self._wake.set()
+            time.sleep(0.01)
+
         self._stopping.set()
         self._wake.set()
         if self._thread is not None:
+            # Whatever is mid-flight finishes here; the loop exits after it.
             self._thread.join(timeout=timeout)
             self._thread = None
         with self._lock:

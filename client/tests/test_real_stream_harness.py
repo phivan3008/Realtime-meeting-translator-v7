@@ -1325,3 +1325,39 @@ def test_a_stall_cannot_excuse_a_genuinely_slow_server():
     assert "Events come back fast enough to be useful" in [
         c.name for c in report.failed
     ]
+
+
+# ---------------------------------------------------------------------------
+# A refusal only owes us the text when there was text to judge
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("reason", [
+    "the model returned nothing",
+    "the meeting ended before this was translated",
+    "not translated in time (12.0 s, budget 10 s)",
+    "the translation queue was full (16 waiting)",
+    "the translator raised",
+])
+def test_a_sentence_the_model_never_saw_owes_no_text(reason):
+    """Every one of these is the queue answering, not the model. Demanding
+    the model's words there makes a check that cannot pass - which is what a
+    ten-minute run turned it into on its very last sentence."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()), *sentence(text="", reason=reason)),
+        report)
+    assert "Every untranslated sentence shows what the model said" not in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_model_that_answered_badly_still_owes_us_its_answer():
+    """The distinction that matters: this one judged text, so the text is
+    what says whether judging it was right."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     *sentence(text="", reason="the answer is not written in ja")),
+        report)
+    assert "Every untranslated sentence shows what the model said" in [
+        c.name for c in report.failed
+    ]
