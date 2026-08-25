@@ -1148,3 +1148,44 @@ def test_a_sentence_without_a_score_does_not_crash_the_report(capsys):
                      (2.3, translation(sentence_id=1))),
         harness.Report())
     assert "[speech 0.00]" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The same invention with the channel name swapped
+# ---------------------------------------------------------------------------
+LA_LA = ("H\u00e3y subscribe cho k\u00eanh La La School "
+         "\u0110\u1ec3 kh\u00f4ng b\u1ecf l\u1ee1 nh\u1eefng video "
+         "h\u1ea5p d\u1eabn")
+
+
+def test_the_reworded_pitch_is_recognised():
+    """It reached the screen and was translated into Japanese, two runs after
+    the same sentence with a different channel name was listed."""
+    assert harness.is_invented(LA_LA)
+
+
+def test_any_channel_name_fits_the_hole():
+    for channel in ("Ghi\u1ec1n M\u00ec G\u00f5", "La La School", "X"):
+        line = (f"H\u00e3y subscribe cho k\u00eanh {channel} "
+                "\u0110\u1ec3 kh\u00f4ng b\u1ecf l\u1ee1 nh\u1eefng video "
+                "h\u1ea5p d\u1eabn")
+        assert harness.is_invented(line), channel
+
+
+@pytest.mark.parametrize("said", [
+    "H\u00e3y \u0111\u0103ng k\u00fd k\u00eanh Teams cho d\u1ef1 \u00e1n n\u00e0y",
+    "H\u00e3y subscribe cho k\u00eanh n\u1ed9i b\u1ed9 c\u1ee7a team m\u00ecnh",
+])
+def test_a_meeting_talking_about_channels_is_not_caught(said):
+    assert not harness.is_invented(said)
+
+
+def test_a_pitch_reaching_a_sentence_is_caught_by_the_client_too():
+    """Checked here as well as on the server: a test that trusts the thing it
+    is testing proves nothing, and this one was let through by both."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()), *sentence(transcript=LA_LA)), report)
+    assert "No committed sentence is a Whisper sign-off" in [
+        c.name for c in report.failed
+    ]

@@ -385,10 +385,67 @@ def test_a_meeting_asking_people_to_subscribe_to_something_else_survives():
     assert make([confident(real)]).transcribe(audio()).text == real
 
 
-def test_the_list_does_not_catch_a_reworded_pitch():
-    """Not a bug, a limit, and one worth stating: whole-segment matching means
-    the same invention with one word changed walks straight through. Two new
-    YouTube lines in two runs is what that costs."""
-    reworded = ("H\u00e3y \u0111\u0103ng k\u00fd k\u00eanh \u0111\u1ec3 "
-                "\u1ee7ng h\u1ed9 k\u00eanh c\u1ee7a m\u00ecnh")   # no "nhé."
-    assert make([confident(reworded)]).transcribe(audio()).text == reworded
+def test_the_same_pitch_with_a_different_channel_is_caught():
+    """This is what the whole-line list could not do, and the reason the
+    pattern rules exist. Two runs after the Ghiền Mì Gõ line was listed, the
+    identical sentence arrived naming La La School and was translated into
+    Japanese and shown."""
+    for channel in ("Ghiền Mì Gõ", "La La School",
+                    "anything at all"):
+        pitch = (f"Hãy subscribe cho kênh {channel} "
+                 "Để không bỏ lỡ những "
+                 "video hấp dẫn")
+        assert make([confident(pitch)]).transcribe(audio()).text == "", channel
+
+
+def test_the_subscribe_pitch_is_caught_with_or_without_a_channel():
+    for line in ("Hãy đăng ký kênh để "
+                 "ủng hộ kênh của mình nhé.",
+                 "Hãy đăng ký kênh ABC XYZ "
+                 "để ủng hộ kênh của "
+                 "mình"):
+        assert make([confident(line)]).transcribe(audio()).text == "", line
+
+
+@pytest.mark.parametrize("said", [
+    # A meeting may well talk about channels. The pattern needs the rest of
+    # the pitch behind it, not just the opening.
+    "Hãy đăng ký kênh Teams cho dự án này",
+    "Hãy subscribe cho kênh nội bộ của team mình",
+    "Chúng ta hãy đăng ký kênh Slack trước",
+])
+def test_a_meeting_talking_about_channels_survives(said):
+    assert make([confident(said)]).transcribe(audio()).text == said
+
+
+def test_a_pattern_must_match_the_whole_line():
+    """Anchored, so a real sentence that happens to contain the pitch is not
+    deleted along with it."""
+    longer = ("Khách hàng bảo hãy subscribe cho "
+              "kênh La La School Để không bỏ "
+              "lỡ những video hấp dẫn, nhưng "
+              "mình không đồng ý.")
+    assert make([confident(longer)]).transcribe(audio()).text == longer
+
+
+def test_the_patterns_are_not_empty():
+    """An empty tuple would make every test above pass for nothing."""
+    from server.config import ASR_HALLUCINATION_PATTERNS
+    assert ASR_HALLUCINATION_PATTERNS
+
+
+def test_the_patterns_can_be_replaced_for_a_test():
+    """With them emptied, the reworded pitch sails through - which is what
+    the whole-line list did on its own."""
+    pitch = ("Hãy subscribe cho kênh La La School "
+             "Để không bỏ lỡ những "
+             "video hấp dẫn")
+    kept = make([confident(pitch)], hallucination_patterns=())
+    assert kept.transcribe(audio()).text == pitch
+
+
+def test_pattern_normalising_keeps_words_apart():
+    """The exact rules strip spacing; the patterns read as sentences and
+    cannot."""
+    from server.pipeline.asr import normalise_for_pattern
+    assert normalise_for_pattern("Hãy  subscribe   cho kênh!") ==         "hãy subscribe cho kênh"

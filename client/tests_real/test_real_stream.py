@@ -478,8 +478,27 @@ _INVENTED = frozenset(
 )
 
 
+#: The templated ones, where a channel name is a hole in the sentence. The
+#: whole-line list let "La La School" through two runs after "Ghiền Mì Gõ"
+#: was added; there is no end of channel names.
+INVENTED_PATTERNS = (
+    r"h[ãa]y subscribe cho k[êe]nh .{1,40} "
+    r"đ[ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[ữu]ng video h[ấa]p d[ẫa]n",
+    r"h[ãa]y đ[ăa]ng k[ýy] k[êe]nh( .{1,40})? đ[ểe] [ủu]ng h[ộo] "
+    r"k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?",
+)
+_PUNCTUATION = re.compile(
+    r"[.,!?;:\-‐-―、。・！？，．"
+    r"\"'‘’“”()\[\]]+"
+)
+_SHAPES = tuple(re.compile(p, re.IGNORECASE) for p in INVENTED_PATTERNS)
+
+
 def is_invented(text: str) -> bool:
-    return _UNSPOKEN.sub("", text).casefold() in _INVENTED
+    if _UNSPOKEN.sub("", text).casefold() in _INVENTED:
+        return True
+    spaced = " ".join(_PUNCTUATION.sub(" ", text).casefold().split())
+    return any(shape.fullmatch(spaced) for shape in _SHAPES)
 
 
 #: A translation arriving further behind its sentence than this has stopped

@@ -265,11 +265,45 @@ ASR_HALLUCINATIONS = (
     "k\u00eanh c\u1ee7a m\u00ecnh nh\u00e9.",
 )
 
-# What this list cannot do: it only knows what has already been seen. Every
-# entry above was found by a person listening to a recording and reporting
-# that nobody said it. A confident invention this project has not met yet
-# will still reach the screen, because nothing in Whisper's own numbers
-# separates one from real speech.
+# What the list above cannot do: it matches whole sentences, so the same
+# invention with one word changed walks through it. That is not a worry, it is
+# a measurement. Two runs after "Hãy subscribe cho kênh Ghiền Mì Gõ ..." was
+# added, this arrived and was translated into Japanese and shown:
+#
+#     Hãy subscribe cho kênh La La School Để không bỏ lỡ những video hấp dẫn
+#
+# Same sentence, different channel name. The name is a hole, and there are
+# unlimited channel names to put in it.
+#
+# So the shapes with holes in them are matched as patterns instead. Each is
+# anchored to the whole segment, and each is written narrowly enough that a
+# meeting saying something similar survives: "Hãy đăng ký kênh Teams cho dự án
+# này" has no "để không bỏ lỡ những video hấp dẫn" after it, and is kept.
+#
+# Only shapes seen twice, or seen once and obviously templated, are here.
+ASR_HALLUCINATION_PATTERNS = (
+    # Seen twice, with two different channel names.
+    r"h[ãa]y subscribe cho k[êe]nh .{1,40} "
+    r"đ[ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[ữu]ng video h[ấa]p d[ẫa]n",
+    # Seen once. The channel name is optional in this one - the run that
+    # produced it had none - which is why it is a pattern rather than the
+    # exact line it also appears as above.
+    r"h[ãa]y đ[ăa]ng k[ýy] k[êe]nh( .{1,40})? đ[ểe] [ủu]ng h[ộo] "
+    r"k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?",
+)
+
+# What none of this can do: it only knows what has already been seen, whether
+# as a line or as a shape. Every entry was found by a person reading the
+# output and reporting that nobody said it.
+#
+# The obvious alternative was tested and does not work. The noise filter
+# scores every utterance for speech before Whisper sees it, and the invention
+# that reached the screen on the ninth run came from audio scored 0.03 while
+# real sentences scored 0.66 and up - which looked like a rule needing no
+# list at all. The next run settled it: "これ" and "おいっ" are real speech
+# scoring 0.01 and 0.04, and the La La School line above scored 0.77, in the
+# middle of the real ones. There is no threshold there. The scores are still
+# reported, because they are worth reading, but nothing is decided by them.
 
 # Whisper carries the previous sentence into the next by default, which is
 # where streaming hallucination loops come from: one invented sentence becomes

@@ -59,6 +59,7 @@ from server.config import (
     ASR_MAX_COMPRESSION_RATIO,
     ASR_MODEL,
     ASR_HALLUCINATIONS,
+    ASR_HALLUCINATION_PATTERNS,
     ASR_NO_SPEECH_THRESHOLD,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
@@ -136,6 +137,19 @@ _UNSPOKEN = re.compile(
 )
 
 
+#: Punctuation only, spacing kept. The pattern rules read as sentences, so
+#: they need the word boundaries the exact rules throw away.
+_PUNCTUATION = re.compile(
+    r"[.,!?;:\-\u2010-\u2015\u3001\u3002\u30fb\uff01\uff1f\uff0c\uff0e"
+    r"\"'\u2018\u2019\u201c\u201d()\[\]]+"
+)
+
+
+def normalise_for_pattern(text: str) -> str:
+    """Strip punctuation and collapse spacing, for the pattern rules."""
+    return " ".join(_PUNCTUATION.sub(" ", text).casefold().split())
+
+
 def normalise_for_match(text: str) -> str:
     """Reduce a segment to what was said, for comparing against a known line.
 
@@ -167,6 +181,7 @@ class Transcriber:
         log_prob_threshold: float = ASR_LOG_PROB_THRESHOLD,
         max_compression_ratio: float = ASR_MAX_COMPRESSION_RATIO,
         hallucinations: Iterable[str] = ASR_HALLUCINATIONS,
+        hallucination_patterns: Iterable[str] = ASR_HALLUCINATION_PATTERNS,
     ) -> None:
         self.decoder = decoder if decoder is not None else WhisperDecoder()
         self.no_speech_threshold = no_speech_threshold
@@ -174,6 +189,11 @@ class Transcriber:
         self.max_compression_ratio = max_compression_ratio
         self.hallucinations = frozenset(
             normalise_for_match(phrase) for phrase in hallucinations
+        )
+        # Anchored: a pattern describes a whole invented line, not a phrase
+        # that might appear inside a real sentence.
+        self.hallucination_patterns = tuple(
+            re.compile(pattern, re.IGNORECASE) for pattern in hallucination_patterns
         )
         self.stats = AsrStats()
 
@@ -229,6 +249,13 @@ class Transcriber:
             # them: Whisper writes its sign-offs with more confidence than it
             # writes real speech.
             return "known hallucination"
+        spaced = normalise_for_pattern(piece.text)
+        for pattern in self.hallucination_patterns:
+            if pattern.fullmatch(spaced):
+                # The same invention with the channel name swapped. Matching
+                # whole lines let one through two runs after the other was
+                # listed; the name is a hole and there is no end of names.
+                return "known hallucination"
         return None
 
     def reset(self) -> None:
