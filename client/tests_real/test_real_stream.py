@@ -117,6 +117,30 @@ class Collected:
     def finals(self) -> list[tuple[float, dict]]:
         return [(t, m) for t, m in self.messages if m.get("type") == "final"]
 
+    @property
+    def translations(self) -> list[tuple[float, dict]]:
+        return [(t, m) for t, m in self.messages
+                if m.get("type") == "translation"]
+
+    def translation_for(self, sentence_id) -> Optional[dict]:
+        """The translation that belongs to a sentence, if it arrived.
+
+        Sentences and translations are separate messages now: a sentence goes
+        out as soon as it is transcribed and its translation catches up, so
+        that an LLM call cannot sit on the thread reading audio.
+        """
+        for _t, message in self.translations:
+            if message.get("sentence_id") == sentence_id:
+                return message
+        return None
+
+    def translation_lags(self) -> list[tuple[int, float]]:
+        """How long after its sentence each translation arrived."""
+        sent_at = {m.get("sentence_id"): t for t, m in self.finals}
+        return [(m.get("sentence_id"), t - sent_at[m["sentence_id"]])
+                for t, m in self.translations
+                if m.get("sentence_id") in sent_at]
+
     def lags_ms(self) -> list[float]:
         """How late each event arrived, relative to the audio it describes.
 
@@ -380,6 +404,14 @@ def is_invented(text: str) -> bool:
     return _UNSPOKEN.sub("", text).casefold() in _INVENTED
 
 
+#: A translation arriving further behind its sentence than this has stopped
+#: belonging to it: the measured median gap between sentences is 3.58 s, so
+#: five seconds is already a sentence and a half ago. The server gives up at
+#: TRANSLATION_MAX_LAG_SECONDS = 10; this is the tighter number the test
+#: holds it to, so drift shows up here before the server starts dropping.
+MAX_TRANSLATION_LAG_S = 5.0
+
+
 def japanese_ratio(text: str) -> Optional[float]:
     """Fraction of the letters that are kana or kanji, or None if no letters.
 
@@ -424,22 +456,33 @@ def check_transcripts(collected: Collected, report: Report) -> None:
     print()
     print("  Committed sentences (final):")
     for arrived, payload in finals:
+        sentence_id = payload.get("sentence_id")
         print(f"    +{arrived - collected.stream_start:5.1f}s "
+              f"#{sentence_id} "
               f"{payload.get('speaker_id') or '?':<16} "
               f"[{payload.get('lang_code') or '?'}]")
         print(f"        said      : {payload.get('transcript', '')}")
-        if payload.get("translation", "").strip():
-            print(f"        translated: {payload['translation']}")
+        translation = collected.translation_for(sentence_id)
+        if translation is None:
+            # Not "refused" - never answered at all. A different failure, and
+            # one that only exists now that the two are separate messages.
+            print("        NO TRANSLATION MESSAGE EVER ARRIVED")
+            continue
+        lag = next((seconds for sid, seconds in collected.translation_lags()
+                    if sid == sentence_id), None)
+        if translation.get("translation", "").strip():
+            print(f"        translated: {translation['translation']}"
+                  + (f"   (+{lag:.1f}s)" if lag is not None else ""))
         else:
             # A blank translation with no reason beside it is a silent
             # failure, and reading one cost this project a round trip.
             print(f"        NOT translated: "
-                  f"{payload.get('translation_reason') or '(no reason given)'}")
+                  f"{translation.get('reason') or '(no reason given)'}")
             # And the reason alone does not say whether refusing was right.
             # "far longer than the sentence" reads the same whether the model
             # rambled or the limit was too tight for a good translation.
-            if payload.get("translation_raw"):
-                print(f"        the model said: {payload['translation_raw']}")
+            if translation.get("raw"):
+                print(f"        the model said: {translation['raw']}")
     if not finals:
         print("    (none)")
 
@@ -457,27 +500,43 @@ def check_transcripts(collected: Collected, report: Report) -> None:
                all(m.get("speaker_id") for _t, m in finals),
                f"{sorted({m.get('speaker_id') for _t, m in finals})}")
 
-    translated = [m for _t, m in finals if m.get("translation", "").strip()]
-    refused = [m for _t, m in finals if not m.get("translation", "").strip()]
+    # Sentence and translation are separate messages now, so there are three
+    # outcomes rather than two: translated, refused with a reason, and no
+    # answer at all. The third is new and is the one worth catching - a
+    # translation that never arrives is exactly what an unbounded queue
+    # falling behind would look like.
+    pairs = [(m, collected.translation_for(m.get("sentence_id")))
+             for _t, m in finals]
+    unanswered = [final for final, translation in pairs if translation is None]
+    report.add("Every sentence got an answer about its translation",
+               not unanswered,
+               f"{len(unanswered)} of {len(finals)} never answered: "
+               f"{[m.get('transcript', '')[:24] for m in unanswered][:2]}")
+
+    answered = [(final, translation) for final, translation in pairs
+                if translation is not None]
+    translated = [(f, t) for f, t in answered if t.get("translation", "").strip()]
+    refused = [(f, t) for f, t in answered
+               if not t.get("translation", "").strip()]
     report.add("Committed sentences come back translated",
-               len(translated) == len(finals),
-               f"{len(translated)}/{len(finals)} translated"
-               + (f"; refused: {[m.get('translation_reason') for m in refused]}"
+               len(translated) == len(answered),
+               f"{len(translated)}/{len(answered)} translated"
+               + (f"; refused: {[t.get('reason') for _f, t in refused]}"
                   if refused else ""))
     report.add("Every untranslated sentence says why",
-               all(m.get("translation_reason") for m in refused),
-               f"{sum(1 for m in refused if not m.get('translation_reason'))} "
+               all(t.get("reason") for _f, t in refused),
+               f"{sum(1 for _f, t in refused if not t.get('reason'))} "
                f"silent of {len(refused)}")
     # A refusal for saying nothing has nothing to show; any other refusal is
     # a judgement about text, and the text has to be readable to judge it.
-    should_show = [m for m in refused
-                   if m.get("translation_reason") != "the model returned nothing"]
+    should_show = [t for _f, t in refused
+                   if t.get("reason") != "the model returned nothing"]
     report.add("Every untranslated sentence shows what the model said",
-               all(m.get("translation_raw") for m in should_show),
-               f"{sum(1 for m in should_show if not m.get('translation_raw'))} "
+               all(t.get("raw") for t in should_show),
+               f"{sum(1 for t in should_show if not t.get('raw'))} "
                f"silent of {len(should_show)}")
-    same = [m for m in translated
-            if m["translation"].strip() == m["transcript"].strip()]
+    same = [t for f, t in translated
+            if t["translation"].strip() == f.get("transcript", "").strip()]
     report.add("A translation is not just the sentence again", not same,
                f"{len(same)} identical")
 
@@ -486,11 +545,22 @@ def check_transcripts(collected: Collected, report: Report) -> None:
     # はい、今の画面の as
     # はい、現在の画面の - Japanese
     # in, Japanese out - and every check above passed it.
-    wrong = [m for m in translated
-             if in_wrong_script(m["translation"], m.get("lang_code", ""))]
+    wrong = [t for f, t in translated
+             if in_wrong_script(t["translation"], f.get("lang_code", ""))]
     report.add("No translation came back in the language it started in",
                not wrong,
-               f"{[m['translation'][:30] for m in wrong][:2]}")
+               f"{[t['translation'][:30] for t in wrong][:2]}")
+
+    # How far the translations drift behind their sentences. This is the
+    # number the split exists to keep small, and the one that would grow if
+    # the queue ever started falling behind.
+    lags = [seconds for _sid, seconds in collected.translation_lags()]
+    if lags:
+        print(f"\n  Translation lag behind its sentence: "
+              f"mean {statistics.fmean(lags):.2f}s, worst {max(lags):.2f}s")
+        report.add("Translations keep up with their sentences",
+                   max(lags) < MAX_TRANSLATION_LAG_S,
+                   f"worst {max(lags):.2f}s < {MAX_TRANSLATION_LAG_S}s")
 
     # Checked on both, because a sign-off in the running text still reaches
     # the reader even though it never becomes a sentence.

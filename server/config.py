@@ -334,6 +334,32 @@ HISTORY_STYLE = "sources"
 # so it is single words the model treats as nothing to do.
 SHORT_LINE_HINT_ENABLED = True
 
+# Translation runs off the audio path, so a sentence appears as soon as it is
+# transcribed and its translation follows. That needs a queue, and a queue
+# needs limits - not because it cannot cope today, but because "it copes" is
+# a fact about vLLM's current speed rather than a property of the design.
+#
+# Measured over three real runs, 66 gaps between committed sentences:
+#
+#     median gap        3.58 s
+#     busiest 8 gaps    0.74 s mean, so 1.35 sentences/s
+#     one translation   0.15 s mean, 0.17 s worst
+#
+# That is 3.7% utilisation: a ten second stall leaves 13.5 sentences behind
+# and clears them in two, and delays do not accumulate across stalls because
+# the queue empties in between.
+#
+# The budget is therefore set by when an answer stops being useful, not by
+# when the queue stops coping. At a 3.58 s median gap, ten seconds is three
+# sentences ago - a translation appearing under a sentence the reader has
+# scrolled past reads as a translation of something else.
+TRANSLATION_MAX_LAG_SECONDS = 10.0
+
+# A ceiling so a pathological stall cannot grow the queue without bound. At
+# the busiest rate observed this is twelve seconds of solid backlog, which
+# the budget above should have emptied long before.
+TRANSLATION_QUEUE_DEPTH = 16
+
 # A translation runs a little longer than its source, never many times longer.
 # Far past this and the model has started explaining itself or looping.
 #

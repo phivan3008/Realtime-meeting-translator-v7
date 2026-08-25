@@ -250,7 +250,8 @@ async def stream(socket: WebSocket) -> None:
             "%d with a language), %d transcripts, %d translations, "
             "%d partials, "
             "%d events, %d protocol errors, %d pipeline errors; "
-            "slowest sentence %.1f s, stages %s",
+            "slowest sentence %.1f s, stages %s; "
+            "%d translations dropped, worst translation lag %.1f s",
             session.session_id or "?",
             session.stats.chunks,
             session.stats.audio_seconds,
@@ -270,4 +271,6 @@ async def stream(socket: WebSocket) -> None:
             {stage: round(value, 1)
              for stage, value in sorted(session.stats.stage_seconds.items(),
                                         key=lambda kv: -kv[1])},
+            session.stats.translations_dropped,
+            session.stats.worst_translation_lag,
         )

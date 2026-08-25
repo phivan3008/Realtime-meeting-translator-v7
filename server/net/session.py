@@ -27,6 +27,7 @@ from common.protocol import (
     ProtocolError,
     make_error,
     make_final,
+    make_translation,
     make_partial,
     make_ready,
     make_utterance,
@@ -40,7 +41,8 @@ from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
-from server.pipeline.translate import Translator
+from server.pipeline.translate import Translator, Turn
+from server.pipeline.translation_queue import TranslationWorker
 from server.pipeline.vad import VADSegmenter
 
 log = logging.getLogger(__name__)
@@ -74,6 +76,11 @@ class ServerSessionStats:
     utterances_with_language: int = 0
     transcripts: int = 0
     translations: int = 0
+    #: Sentences that went out without a translation: refused by the model,
+    #: or given up on because the answer would have arrived too late to read.
+    translations_dropped: int = 0
+    #: Longest a translation took from sentence to wire.
+    worst_translation_lag: float = 0.0
     partials: int = 0
     protocol_errors: int = 0
     #: Sentences lost because a pipeline stage raised. Not protocol errors:
@@ -109,6 +116,7 @@ class ServerSession:
         language_identifier: Optional[LanguageIdentifier] = None,
         transcriber: Optional[Transcriber] = None,
         translator: Optional[Translator] = None,
+        translation_inline: bool = False,
         strict_chunk_size: bool = True,
     ) -> None:
         self._segmenter_factory = segmenter_factory
@@ -121,6 +129,13 @@ class ServerSession:
         self.language_identifier = language_identifier
         self.transcriber = transcriber
         self.translator = translator
+        # Translation runs off the thread that reads audio. `inline` puts it
+        # back on, which is what the unit tests use so nothing here depends on
+        # thread scheduling.
+        self.worker: Optional[TranslationWorker] = (
+            TranslationWorker(translator, inline=translation_inline)
+            if translator is not None else None
+        )
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
@@ -130,6 +145,10 @@ class ServerSession:
         #: The last language this meeting was confidently in, used when the
         #: LID cannot decide. See :meth:`_language_for`.
         self._last_language = ""
+        #: Counts sentences within this session so a translation can be
+        #: matched to its sentence. Utterance indexes restart with each speech
+        #: segment, so they cannot be used for it.
+        self._sentences = 0
 
     @property
     def session_id(self) -> str:
@@ -189,6 +208,8 @@ class ServerSession:
         if self.translator is not None:
             # A new meeting carries none of the last one's context.
             self.translator.reset()
+        if self.worker is not None:
+            self.worker.start()
         self.state = SessionState.STREAMING
         log.info("Session %s ready (client=%r)", hello.session_id, hello.client)
         return Response(messages=[make_ready(hello.session_id)])
@@ -216,6 +237,10 @@ class ServerSession:
         self.stats.events_sent += len(messages)
         self.stats.speech_segments = self.segmenter.stats.segments
         messages += self._safely_announce(self.buffer.push(out))
+        # Translations finished since the last chunk. Audio arrives every
+        # 200 ms, so this is a cheap and regular heartbeat to hand them back
+        # on - no extra timer, and at most 200 ms of extra delay.
+        messages += self._collect_translations()
         return Response(messages=messages)
 
     def _language_for(self, decision) -> str:
@@ -353,37 +378,31 @@ class ServerSession:
                 )
             )
             if transcript is not None and transcript.has_text:
-                translation = ""
-                translation_reason = ""
-                translation_raw = ""
-                if self.translator is not None:
-                    # Runs inline, which puts an LLM call on the path that also
-                    # reads audio. server/tests_real/test_real_translate.py
-                    # measures what that costs; if it turns out to matter, the
-                    # fix is to send the sentence now and the translation as a
-                    # follow-up, not to translate less carefully.
-                    # Not named `result`: that shadowed this method's own
-                    # `result` argument, and the line after the loop then read
-                    # `.finals` off a Translation. It crashed the session on the
-                    # first sentence that reached the translator, which is every
-                    # sentence that would have produced a final.
-                    with self._timed("translate", spent):
-                        translated = self.translator.translate(
-                            transcript.text, transcript.lang_code, speaker_id)
-                    translation = translated.text
-                    translation_reason = translated.reason
-                    if not translated.ok:
-                        translation_raw = translated.raw
-                    if translated.ok:
-                        self.stats.translations += 1
+                self._sentences += 1
+                sentence_id = self._sentences
+                # The sentence goes out now. Waiting for a translation before
+                # saying anything is what put every VAD event 12 s late on the
+                # seventh end-to-end run: an LLM call sat on the thread that
+                # reads audio, and everything behind it waited too.
                 messages.append(make_final(
+                    sentence_id=sentence_id,
                     speaker_id=speaker_id,
                     lang_code=transcript.lang_code,
                     transcript=transcript.text,
-                    translation=translation,
-                    translation_reason=translation_reason,
-                    translation_raw=translation_raw,
                 ))
+                if self.worker is not None:
+                    # The history is remembered here rather than inside the
+                    # translator, so a sentence whose translation is dropped
+                    # still leaves its source behind for the next one to read.
+                    # HISTORY_STYLE is "sources", so that is all it needs.
+                    self.worker.translator.context.remember(Turn(
+                        speaker_id=speaker_id,
+                        lang_code=transcript.lang_code,
+                        source=transcript.text,
+                        translation="",
+                    ))
+                    self.worker.submit(sentence_id, transcript.text,
+                                       transcript.lang_code, speaker_id)
             self._report_if_slow(utterance, spent)
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
@@ -445,8 +464,33 @@ class ServerSession:
         reports no events the second time, so no duplicate end is emitted.
         """
         messages = self._close_segment()
+        if self.worker is not None:
+            # Whatever is still queued has no later chance. Each one says so
+            # rather than simply never arriving.
+            messages += [self._as_message(done)
+                         for done in self.worker.stop()]
         self.state = SessionState.CLOSED
         return Response(messages=messages)
+
+    def _collect_translations(self) -> list[str]:
+        """Whatever the worker has finished, in the order it finished it."""
+        if self.worker is None:
+            return []
+        return [self._as_message(done) for done in self.worker.collect()]
+
+    def _as_message(self, done) -> str:
+        if done.translation:
+            self.stats.translations += 1
+        else:
+            self.stats.translations_dropped += 1
+        self.stats.worst_translation_lag = max(
+            self.stats.worst_translation_lag, done.lag_seconds)
+        return make_translation(
+            sentence_id=done.sentence_id,
+            translation=done.translation,
+            reason=done.reason,
+            raw=done.raw,
+        )
 
     def _close_segment(self) -> list[str]:
         """End an in-progress speech segment and commit what it held."""

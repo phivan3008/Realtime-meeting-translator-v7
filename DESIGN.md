@@ -57,7 +57,7 @@ Một kết nối WebSocket cho mỗi phiên họp. Endpoint: `ws://<host>:<port
 1. Client gửi `hello` (JSON) trước mọi audio.
 2. Server kiểm tra định dạng audio, trả `ready`, hoặc trả `error` rồi đóng kết nối.
 3. Client stream binary chunk cho đến khi gửi `bye` hoặc rớt mạng.
-4. Server đẩy `vad` / `partial` / `final` bất kỳ lúc nào sau `ready`.
+4. Server đẩy `vad` / `partial` / `final` / `translation` bất kỳ lúc nào sau `ready`.
 
 Server chỉ phục vụ **một phiên tại một thời điểm**: Silero là mô hình hồi quy,
 trạng thái ẩn thuộc về đúng một luồng audio. Kết nối thứ hai bị từ chối (code 1013)
@@ -116,12 +116,35 @@ Ranh giới câu do Stream Buffer Manager chốt, gửi **trước khi** có tra
   "lang_code": "vi",
   "transcript": "hôm nay chúng ta họp về"
 }
-**Partial Message (Client <- Server):**
+**Final Message (Client <- Server):**
+
+Câu đã chốt, gửi ngay khi Whisper chốt xong. Không kèm bản dịch: dịch chạy
+ngoài luồng đọc audio, vì một lần vLLM trả lời chậm đã làm mọi sự kiện VAD
+tới trễ 12 giây.
+
 ```json
 {
   "type": "final",
+  "sentence_id": 12,
   "speaker_id": "Speaker_01",
   "lang_code": "vi",
-  "transcript": "Hôm nay chúng ta họp về tiến độ dự án.",
-  "translation": "今日、私たちはプロジェクトの進捗について会議をします。"
+  "transcript": "Hôm nay chúng ta họp về tiến độ dự án."
+}
+```
+
+**Translation Message (Client <- Server):**
+
+Bản dịch của một câu đã gửi trước đó, ghép theo `sentence_id`. Luôn tới, kể
+cả khi không dịch được — lúc đó `translation` rỗng và `reason` nói vì sao,
+`raw` giữ nguyên văn model đã trả lời. `sentence_id` đếm trong một phiên và
+không lặp; chỉ số utterance thì đếm lại từ đầu mỗi đoạn nói nên không dùng để
+ghép được.
+
+```json
+{
+  "type": "translation",
+  "sentence_id": 12,
+  "translation": "今日、私たちはプロジェクトの進捗について会議をします。",
+  "reason": "",
+  "raw": ""
 }

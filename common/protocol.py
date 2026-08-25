@@ -69,6 +69,11 @@ class ServerMessage(str, Enum):
     UTTERANCE = "utterance"
     PARTIAL = "partial"
     FINAL = "final"
+    #: The translation of a sentence already sent as FINAL, matched by
+    #: ``sentence_id``. Separate because it arrives later: a sentence is worth
+    #: showing the moment it is transcribed, and waiting for an LLM to answer
+    #: before saying anything holds up the whole connection.
+    TRANSLATION = "translation"
     ERROR = "error"
 
 
@@ -209,31 +214,53 @@ def make_partial(speaker_id: str, lang_code: str, transcript: str) -> str:
     )
 
 
-def make_final(speaker_id: str, lang_code: str, transcript: str,
-               translation: str, translation_reason: str = "",
-               translation_raw: str = "") -> str:
-    """DESIGN.md section 4: the committed sentence plus its translation.
+def make_final(sentence_id: int, speaker_id: str, lang_code: str,
+               transcript: str) -> str:
+    """DESIGN.md section 4: a committed sentence, as soon as it exists.
 
-    ``translation_reason`` carries why there is no translation when there is
-    none, and ``translation_raw`` carries what the model actually said. A
-    reason alone answers "was it refused" but not "should it have been": the
-    refusal "the answer is far longer than the sentence" reads identically
-    whether the model rambled or produced a good translation that the limit
-    was too tight for. Only the text tells them apart, and reaching for it in
-    the server log has now cost this project two round trips.
+    No translation here. The sentence is worth showing the moment Whisper
+    commits it, and an LLM call takes long enough that waiting for one before
+    saying anything holds up the connection - on one run a slow answer put
+    every VAD event 12 s late. The translation follows as its own message,
+    matched by ``sentence_id``.
 
-    Both are empty on a successful translation, and a UI has no reason to
-    show either.
+    ``sentence_id`` counts sentences within a session and never repeats.
+    Utterance indexes restart with each speech segment, so they cannot be
+    used to match anything up.
     """
     return json.dumps(
         {
             "type": ServerMessage.FINAL.value,
+            "sentence_id": sentence_id,
             "speaker_id": speaker_id,
             "lang_code": lang_code,
             "transcript": transcript,
+        },
+        ensure_ascii=False,
+    )
+
+
+def make_translation(sentence_id: int, translation: str, reason: str = "",
+                     raw: str = "") -> str:
+    """The translation of a sentence sent earlier as ``final``.
+
+    ``reason`` carries why there is no translation when there is none, and
+    ``raw`` carries what the model actually said. A reason alone answers "was
+    it refused" but not "should it have been": "the answer is far longer than
+    the sentence" reads identically whether the model rambled or produced a
+    good translation the limit was too tight for. Only the text tells them
+    apart, and reaching for it in the server log cost this project two round
+    trips.
+
+    Both are empty on success, and a UI has no reason to show either.
+    """
+    return json.dumps(
+        {
+            "type": ServerMessage.TRANSLATION.value,
+            "sentence_id": sentence_id,
             "translation": translation,
-            "translation_reason": translation_reason,
-            "translation_raw": translation_raw,
+            "reason": reason,
+            "raw": raw,
         },
         ensure_ascii=False,
     )

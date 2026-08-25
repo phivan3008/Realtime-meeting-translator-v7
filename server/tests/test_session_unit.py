@@ -519,6 +519,9 @@ def full_session(probabilities=(0.9,), decoder=None, backend=None):
         segmenter_factory=lambda: VADSegmenter(vad=vad),
         transcriber=Transcriber(decoder=decoder),
         translator=Translator(backend=backend),
+        # Inline: a worker thread would make these tests depend on
+        # scheduling, and the queue's own tests cover the threaded path.
+        translation_inline=True,
     )
     session.handle_text(Hello(session_id="abc").to_json())
     return session, decoder, backend
@@ -544,7 +547,53 @@ def test_a_committed_sentence_survives_the_translator():
     finals = [p for r in responses for p in of_type(r, "final")]
     assert finals, "the sentence never reached the wire"
     assert finals[0]["transcript"] == "xin chào mọi người"
-    assert finals[0]["translation"] == "こんにちは"
+
+
+def test_the_translation_follows_the_sentence_it_belongs_to():
+    """Two messages now: the sentence goes out at once and the translation
+    catches up, matched by sentence_id."""
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    responses = speak_then_pause(session)
+    finals = [p for r in responses for p in of_type(r, "final")]
+    translations = [p for r in responses for p in of_type(r, "translation")]
+    assert translations, "the translation never arrived"
+    assert translations[0]["sentence_id"] == finals[0]["sentence_id"]
+    assert translations[0]["translation"] == "こんにちは"
+
+
+def test_the_sentence_does_not_wait_for_the_translation():
+    """The whole point: an LLM call must not sit on the audio path."""
+    class Slow:
+        def complete(self, system: str, user: str) -> str:
+            raise AssertionError("the translator was called on the audio path")
+
+    from server.pipeline.asr import Transcriber
+    from server.pipeline.translate import Translator
+
+    vad = ScriptedVAD([0.9] * 14 + [0.02])
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        transcriber=Transcriber(decoder=StubDecoder()),
+        translator=Translator(backend=Slow()),
+        translation_inline=False,      # queued, never run: no thread started
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    responses = speak_then_pause(session)
+    finals = [p for r in responses for p in of_type(r, "final")]
+    assert finals, "the sentence waited for a translation that never came"
+    assert finals[0]["transcript"] == "xin chào mọi người"
+
+
+def test_sentence_ids_do_not_repeat_across_segments():
+    """Utterance indexes restart with each speech segment, so they cannot be
+    used to match a translation to its sentence."""
+    session, _decoder, _backend = full_session()
+    responses = speak_then_pause(session)
+    for _ in range(3):
+        responses += speak_then_pause(session)
+    ids = [p["sentence_id"] for r in responses for p in of_type(r, "final")]
+    assert len(ids) == len(set(ids)), ids
+    assert ids == sorted(ids)
 
 
 def test_the_utterance_count_survives_the_translator():
@@ -573,10 +622,14 @@ def test_a_refused_translation_still_sends_the_sentence():
                                                backend=StubBackend(answer=""))
     responses = speak_then_pause(session)
     finals = [p for r in responses for p in of_type(r, "final")]
+    translations = [p for r in responses for p in of_type(r, "translation")]
     assert finals
     assert finals[0]["transcript"] == "xin chào mọi người"
-    assert finals[0]["translation"] == ""
+    assert translations, "a refusal has to say so, not simply never arrive"
+    assert translations[0]["translation"] == ""
+    assert translations[0]["reason"]
     assert session.stats.translations == 0
+    assert session.stats.translations_dropped == 1
 
 
 def test_the_translator_reads_the_language_the_pipeline_decided():
@@ -590,17 +643,40 @@ def test_the_translator_reads_the_language_the_pipeline_decided():
 def test_a_stage_that_raises_does_not_end_the_meeting():
     """One broken sentence costs one sentence, not the connection."""
     class Exploding:
-        def complete(self, system: str, user: str) -> str:
-            raise RuntimeError("the translator fell over")
+        def judge(self, pcm: bytes):
+            raise RuntimeError("the noise filter fell over")
 
-    session, _decoder, _backend = full_session([0.9] * 14 + [0.02],
-                                               backend=Exploding())
+    vad = ScriptedVAD([0.9] * 14 + [0.02])
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        noise_filter=Exploding(),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
     responses = speak_then_pause(session)
     assert session.state is SessionState.STREAMING
     assert all(r.close is False for r in responses)
     assert session.stats.pipeline_errors == 1
     # And the next chunk is still accepted.
     assert session.handle_binary(chunk()).close is False
+
+
+def test_a_translator_that_raises_costs_one_translation(caplog):
+    """It runs off the audio path now, so it cannot reach the pipeline error
+    handler at all - and must not take the worker down with it either."""
+    class Exploding:
+        def complete(self, system: str, user: str) -> str:
+            raise RuntimeError("the translator fell over")
+
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02],
+                                               backend=Exploding())
+    with caplog.at_level(logging.ERROR):
+        responses = speak_then_pause(session)
+    assert session.state is SessionState.STREAMING
+    assert session.stats.pipeline_errors == 0
+    finals = [p for r in responses for p in of_type(r, "final")]
+    translations = [p for r in responses for p in of_type(r, "translation")]
+    assert finals, "the sentence should still have gone out"
+    assert translations[0]["reason"] == "the translator raised"
 
 
 def test_a_healthy_run_reports_no_pipeline_errors():
@@ -716,7 +792,9 @@ class SlowDecoder(StubDecoder):
 def test_each_stage_is_charged_for_its_own_time():
     session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
     speak_then_pause(session)
-    assert set(session.stats.stage_seconds) >= {"asr", "translate"}
+    # No "translate": it runs off this thread now, which is the point.
+    assert set(session.stats.stage_seconds) >= {"asr"}
+    assert "translate" not in session.stats.stage_seconds
     assert all(value >= 0 for value in session.stats.stage_seconds.values())
 
 

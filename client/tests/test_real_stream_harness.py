@@ -441,12 +441,33 @@ def test_each_missing_stage_is_named(flag, name):
 # ---------------------------------------------------------------------------
 # Transcripts and translations
 # ---------------------------------------------------------------------------
-def final(transcript: str = "xin chào", translation: str = "こんにちは",
-          speaker: str = "Speaker_01", lang: str = "vi",
-          reason: str = "", raw: str = "") -> dict:
-    return {"type": "final", "speaker_id": speaker, "lang_code": lang,
-            "transcript": transcript, "translation": translation,
-            "translation_reason": reason, "translation_raw": raw}
+def final(transcript: str = "xin chào", speaker: str = "Speaker_01",
+          lang: str = "vi", sentence_id: int = 1) -> dict:
+    """A committed sentence. No translation - that is its own message now."""
+    return {"type": "final", "sentence_id": sentence_id,
+            "speaker_id": speaker, "lang_code": lang,
+            "transcript": transcript}
+
+
+def translation(text: str = "こんにちは", sentence_id: int = 1,
+                reason: str = "", raw: str = "") -> dict:
+    return {"type": "translation", "sentence_id": sentence_id,
+            "translation": text, "reason": reason, "raw": raw}
+
+
+def sentence(transcript: str = "xin chào", text: str = "こんにちは",
+             speaker: str = "Speaker_01", lang: str = "vi",
+             sentence_id: int = 1, reason: str = "", raw: str = "",
+             at: float = 2.0, answered: bool = True) -> list:
+    """A sentence and its answer, as the pair of messages they now are.
+
+    ``answered=False`` models the failure that only exists now they are
+    separate: a translation that never arrives at all.
+    """
+    pair = [(at, final(transcript, speaker, lang, sentence_id))]
+    if answered:
+        pair.append((at + 0.3, translation(text, sentence_id, reason, raw)))
+    return pair
 
 
 def partial(transcript: str = "xin", lang: str = "vi") -> dict:
@@ -463,7 +484,7 @@ def collected_of(*stamped) -> "harness.Collected":
 def test_a_healthy_run_of_transcripts_passes():
     report = harness.Report()
     harness.check_transcripts(
-        collected_of((1.0, partial()), (2.0, final())), report)
+        collected_of((1.0, partial()), *sentence()), report)
     assert report.failed == []
 
 
@@ -479,8 +500,8 @@ def test_an_untranslated_sentence_is_caught():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(translation="", reason="no translation server",
-                                 raw="boom"))),
+                     *sentence(text="", reason="no translation server",
+                               raw="boom")),
         report)
     assert "Committed sentences come back translated" in [
         c.name for c in report.failed
@@ -491,7 +512,7 @@ def test_an_untranslated_sentence_with_no_reason_is_caught_twice():
     """Blank plus silent is worse than blank: it hides why."""
     report = harness.Report()
     harness.check_transcripts(
-        collected_of((1.0, partial()), (2.0, final(translation=""))), report)
+        collected_of((1.0, partial()), *sentence(text="")), report)
     failed = [c.name for c in report.failed]
     assert "Committed sentences come back translated" in failed
     assert "Every untranslated sentence says why" in failed
@@ -500,8 +521,8 @@ def test_an_untranslated_sentence_with_no_reason_is_caught_twice():
 def test_the_refusal_reason_reaches_the_screen(capsys):
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(translation="",
-                                 reason="the answer is not written in ja"))),
+                     *sentence(text="",
+                               reason="the answer is not written in ja")),
         harness.Report())
     out = capsys.readouterr().out
     assert "NOT translated: the answer is not written in ja" in out
@@ -516,8 +537,8 @@ def test_a_japanese_sentence_answered_in_japanese_is_caught():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(lang="ja", transcript="はい、今の画面の",
-                                 translation="はい、現在の画面の"))),
+                     *sentence(lang="ja", transcript="はい、今の画面の",
+                               text="はい、現在の画面の")),
         report)
     assert "No translation came back in the language it started in" in [
         c.name for c in report.failed
@@ -528,8 +549,8 @@ def test_a_vietnamese_sentence_answered_in_vietnamese_is_caught():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(lang="vi", transcript="Cái đó thì mình chưa xem.",
-                                 translation="Cái đó mình chưa xem."))),
+                     *sentence(lang="vi", transcript="Cái đó thì mình chưa xem.",
+                               text="Cái đó mình chưa xem.")),
         report)
     assert "No translation came back in the language it started in" in [
         c.name for c in report.failed
@@ -541,9 +562,9 @@ def test_a_japanese_answer_keeping_a_latin_initialism_is_accepted():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(lang="vi",
-                                 transcript="các FCG có tặng một cái thêm",
-                                 translation="FCG が贈呈する追加分が完了したら"))),
+                     *sentence(lang="vi",
+                               transcript="các FCG có tặng một cái thêm",
+                               text="FCG が贈呈する追加分が完了したら")),
         report)
     assert report.failed == []
 
@@ -552,8 +573,8 @@ def test_a_vietnamese_answer_keeping_a_latin_word_is_accepted():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(lang="ja", transcript="あのタスクの",
-                                 translation="Task đó"))),
+                     *sentence(lang="ja", transcript="あのタスクの",
+                               text="Task đó")),
         report)
     assert report.failed == []
 
@@ -562,7 +583,7 @@ def test_a_numeric_answer_is_not_judged_on_script():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(lang="ja", transcript="15", translation="15"))),
+                     *sentence(lang="ja", transcript="15", text="15")),
         report)
     assert "No translation came back in the language it started in" not in [
         c.name for c in report.failed
@@ -573,7 +594,7 @@ def test_a_translation_identical_to_the_sentence_is_caught():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(transcript="xin chào", translation="xin chào"))),
+                     *sentence(transcript="xin chào", text="xin chào")),
         report)
     assert "A translation is not just the sentence again" in [
         c.name for c in report.failed
@@ -583,7 +604,7 @@ def test_a_translation_identical_to_the_sentence_is_caught():
 def test_a_sentence_with_no_speaker_is_caught():
     report = harness.Report()
     harness.check_transcripts(
-        collected_of((1.0, partial()), (2.0, final(speaker=""))), report)
+        collected_of((1.0, partial()), *sentence(speaker="")), report)
     assert "Every committed sentence names a speaker" in [
         c.name for c in report.failed
     ]
@@ -591,7 +612,7 @@ def test_a_sentence_with_no_speaker_is_caught():
 
 def test_running_text_that_never_appeared_is_caught():
     report = harness.Report()
-    harness.check_transcripts(collected_of((2.0, final())), report)
+    harness.check_transcripts(collected_of(*sentence()), report)
     assert "Running text appeared before the sentences were committed" in [
         c.name for c in report.failed
     ]
@@ -600,7 +621,7 @@ def test_running_text_that_never_appeared_is_caught():
 def test_a_final_arriving_before_any_partial_is_caught():
     report = harness.Report()
     harness.check_transcripts(
-        collected_of((1.0, final()), (2.0, partial())), report)
+        collected_of(*sentence(at=1.0), (2.0, partial())), report)
     assert "The first partial beat the first final" in [
         c.name for c in report.failed
     ]
@@ -622,7 +643,7 @@ def test_a_sign_off_reaching_the_running_text_is_caught():
     """It never became a sentence on the real run, and still got read."""
     report = harness.Report()
     harness.check_transcripts(
-        collected_of((1.0, partial(transcript=SIGN_OFF_VI)), (2.0, final())),
+        collected_of((1.0, partial(transcript=SIGN_OFF_VI)), *sentence()),
         report)
     assert "No running text is a Whisper sign-off" in [
         c.name for c in report.failed
@@ -633,7 +654,7 @@ def test_a_sign_off_reaching_a_committed_sentence_is_caught():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(transcript=SIGN_OFF_VI, translation="\u3055\u3088\u3046\u306a\u3089"))),
+                     *sentence(transcript=SIGN_OFF_VI, text="\u3055\u3088\u3046\u306a\u3089")),
         report)
     assert "No committed sentence is a Whisper sign-off" in [
         c.name for c in report.failed
@@ -665,8 +686,8 @@ def test_a_refusal_that_hides_the_answer_is_caught():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(translation="",
-                                 reason="the answer is far longer than the sentence"))),
+                     *sentence(text="",
+                               reason="the answer is far longer than the sentence")),
         report)
     assert "Every untranslated sentence shows what the model said" in [
         c.name for c in report.failed
@@ -677,9 +698,9 @@ def test_a_refusal_that_shows_the_answer_passes():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(translation="",
-                                 reason="the answer is far longer than the sentence",
-                                 raw="a long rambling answer"))),
+                     *sentence(text="",
+                               reason="the answer is far longer than the sentence",
+                               raw="a long rambling answer")),
         report)
     assert "Every untranslated sentence shows what the model said" not in [
         c.name for c in report.failed
@@ -692,8 +713,8 @@ def test_a_model_that_said_nothing_has_nothing_to_show():
     report = harness.Report()
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(translation="",
-                                 reason="the model returned nothing"))),
+                     *sentence(text="",
+                               reason="the model returned nothing")),
         report)
     assert "Every untranslated sentence shows what the model said" not in [
         c.name for c in report.failed
@@ -703,8 +724,8 @@ def test_a_model_that_said_nothing_has_nothing_to_show():
 def test_the_raw_answer_reaches_the_screen(capsys):
     harness.check_transcripts(
         collected_of((1.0, partial()),
-                     (2.0, final(translation="", reason="too long",
-                                 raw="Sure! Here is the translation: ..."))),
+                     *sentence(text="", reason="too long",
+                               raw="Sure! Here is the translation: ...")),
         harness.Report())
     assert "the model said: Sure! Here is the translation" in capsys.readouterr().out
 
@@ -717,5 +738,79 @@ def test_a_successful_translation_shows_no_raw(capsys):
     own report.
     """
     harness.check_transcripts(
-        collected_of((1.0, partial()), (2.0, final())), harness.Report())
+        collected_of((1.0, partial()), *sentence()), harness.Report())
     assert "the model said:" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The sentence and its translation are two messages
+# ---------------------------------------------------------------------------
+def test_a_translation_that_never_arrives_is_caught():
+    """The failure that only exists now they are separate. An unbounded queue
+    falling behind would look exactly like this."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()), *sentence(answered=False)), report)
+    assert "Every sentence got an answer about its translation" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_missing_translation_is_named_on_screen(capsys):
+    harness.check_transcripts(
+        collected_of((1.0, partial()), *sentence(answered=False)),
+        harness.Report())
+    assert "NO TRANSLATION MESSAGE EVER ARRIVED" in capsys.readouterr().out
+
+
+def test_translations_are_matched_by_sentence_id_not_by_order():
+    """They arrive when the model finishes, which need not be in order."""
+    messages = [(1.0, partial())]
+    messages += [(2.0, final("first", sentence_id=1)),
+                 (2.1, final("second", sentence_id=2)),
+                 (2.5, translation("二番目", sentence_id=2)),
+                 (3.0, translation("一番目", sentence_id=1))]
+    collected = collected_of(*messages)
+    assert collected.translation_for(1)["translation"] == "一番目"
+    assert collected.translation_for(2)["translation"] == "二番目"
+
+
+def test_a_translation_for_an_unknown_sentence_is_not_matched():
+    collected = collected_of((2.0, final(sentence_id=1)),
+                             (2.5, translation(sentence_id=99)))
+    assert collected.translation_for(1) is None
+
+
+def test_the_lag_is_measured_from_the_sentence_to_its_translation():
+    collected = collected_of((2.0, final(sentence_id=1)),
+                             (3.5, translation(sentence_id=1)))
+    assert collected.translation_lags() == [(1, pytest.approx(1.5))]
+
+
+def test_a_translation_drifting_far_behind_its_sentence_is_caught():
+    """The number the split exists to keep small."""
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()),
+                     (2.0, final(sentence_id=1)),
+                     (2.0 + harness.MAX_TRANSLATION_LAG_S + 1,
+                      translation(sentence_id=1))),
+        report)
+    assert "Translations keep up with their sentences" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_a_prompt_translation_passes_the_lag_check():
+    report = harness.Report()
+    harness.check_transcripts(
+        collected_of((1.0, partial()), *sentence()), report)
+    assert "Translations keep up with their sentences" not in [
+        c.name for c in report.failed
+    ]
+
+
+def test_the_client_lag_budget_is_tighter_than_the_servers():
+    """So drift shows up in the test before the server starts dropping."""
+    from server.config import TRANSLATION_MAX_LAG_SECONDS
+    assert harness.MAX_TRANSLATION_LAG_S < TRANSLATION_MAX_LAG_SECONDS

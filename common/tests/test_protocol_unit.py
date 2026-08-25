@@ -32,6 +32,7 @@ from common.protocol import (
     make_final,
     make_partial,
     make_ready,
+    make_translation,
     make_vad,
     parse_message,
     validate_audio_chunk,
@@ -149,18 +150,46 @@ def test_partial_matches_the_design_md_shape():
 
 
 def test_final_matches_the_design_md_shape():
+    payload = json.loads(make_final(7, "Speaker_01", "vi", "Xin chào."))
+    assert payload == {
+        "type": "final",
+        "sentence_id": 7,
+        "speaker_id": "Speaker_01",
+        "lang_code": "vi",
+        "transcript": "Xin chào.",
+    }
+
+
+def test_a_final_carries_no_translation():
+    """It goes out as soon as the sentence exists. Waiting for an LLM before
+    saying anything put every VAD event 12 s late on one run."""
+    assert "translation" not in json.loads(
+        make_final(1, "Speaker_01", "vi", "Xin chào."))
+
+
+def test_a_translation_names_the_sentence_it_belongs_to():
+    payload = json.loads(make_translation(7, "こんにちは。"))
+    assert payload == {
+        "type": "translation",
+        "sentence_id": 7,
+        "translation": "こんにちは。",
+        "reason": "",
+        "raw": "",
+    }
+
+
+def test_a_refused_translation_carries_the_reason_and_the_answer():
     payload = json.loads(
-        make_final("Speaker_01", "vi", "Xin chào.", "こんにちは。")
-    )
-    assert payload["type"] == "final"
-    assert payload["translation"] == "こんにちは。"
+        make_translation(7, "", reason="too long", raw="a rambling answer"))
+    assert payload["translation"] == ""
+    assert payload["reason"] == "too long"
+    assert payload["raw"] == "a rambling answer"
 
 
 def test_transcripts_keep_their_original_characters_on_the_wire():
     """ensure_ascii would turn Vietnamese and Japanese into \\uXXXX noise."""
-    raw = make_final("Speaker_01", "ja", "会議", "cuộc họp")
-    assert "会議" in raw
-    assert "cuộc họp" in raw
+    assert "会議" in make_final(1, "Speaker_01", "ja", "会議")
+    assert "cuộc họp" in make_translation(1, "cuộc họp")
 
 
 def test_error_defaults_to_fatal():
