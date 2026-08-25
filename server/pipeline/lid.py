@@ -1,42 +1,26 @@
 """Language ID - step 6 of the server pipeline.
 
-``DESIGN.md`` section 3.6: decide whether a sentence is Vietnamese or
-Japanese, so the ASR can be told which language to transcribe instead of
-guessing per sentence.
+``DESIGN.md`` 3.6: SpeechBrain VoxLingua107. Returns ``'vi'``, ``'ja'`` or
+empty.
 
-A two-way decision, not a 107-way one
--------------------------------------
-VoxLingua107 knows 107 languages and will happily return any of them.  That
-freedom is worth nothing here and costs something: Japanese comes back as
-Korean or Chinese often enough, which is a reasonable confusion for the model
-and a useless answer for us, because the only thing downstream does with this
-is set Whisper's ``language``.  So the model's opinion is read only for the
-two languages this meeting can contain, and the winner is whichever of those
-two scores higher.
+The model knows 107 languages but only the two the meeting can contain are
+read, then renormalised between them. Left free it answers Korean or Chinese
+for Japanese - reasonable for the model, useless here, since the only thing
+downstream does with the answer is force Whisper's ``language``.
 
-That forcing earns its keep.  Measured on a real recording, a Japanese
-sentence in which the speaker dropped an English phrase mid-way was detected
-by Whisper on its own as *Indonesian*, and transcribed as Indonesian nonsense.
-Forced to Japanese by this stage, the same audio came back as Japanese.  Code
-switching is exactly where a per-sentence guess goes wrong, and exactly what a
-VI-JA meeting is full of.
+**Forcing the wrong language does not raise.** Whisper returns fluent,
+confident, wrong text and the translator faithfully translates the nonsense.
+So when the two scores are too close the answer is empty, and the session
+falls back to the meeting's last known language rather than letting Whisper
+choose from 99.
 
-Saying "I don't know" is a real answer
---------------------------------------
-Forcing the wrong language does not fail loudly.  Whisper told to transcribe
-Vietnamese audio as Japanese returns fluent, confident, wrong text, and the
-translation stage will faithfully translate the nonsense.  So when the two
-scores are close the answer is *unknown*, and Whisper detects the language
-itself for that sentence - slower, but honest.
+Layering:
 
-Layering
---------
 ``LanguageIdentifier``
-    The two-way policy and the margin rule.  Pure Python, tested without a
-    model.
+    The policy. Pure Python, tested with a stub scorer.
 
 ``VoxLinguaClassifier``
-    The model.  Needs torch and the checkpoint.
+    The model.
 """
 
 from __future__ import annotations

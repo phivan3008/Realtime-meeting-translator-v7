@@ -1,58 +1,28 @@
 """Overlap Resolver - step 4 of the server pipeline.
 
-``DESIGN.md`` section 3.4: when two people talk over each other, favour the
-louder voice and squash the quieter one, so the ASR has one voice to work
-with instead of two.
+``DESIGN.md`` 3.4: when two people talk over each other, favour the louder
+voice so the ASR has one voice to work with instead of two.
 
-What this stage is, and is not
-------------------------------
-A noise gate and a compressor cannot separate two overlapping speakers.
-Nothing in this file is source separation, and pretending otherwise would
-set up the ASR stage to be blamed for a problem that was never solved here.
+**This is not source separation.** A gate and a compressor cannot separate
+two speakers. What they can do is attenuate whatever sits well below the
+dominant voice - the far end bleeding through a speaker, someone murmuring
+underneath, room noise between words - and Whisper transcribes a clean
+dominant voice far better than a muddy mix of two.
 
-What they *can* do is decide, moment by moment, that anything well below the
-dominant voice is not worth passing on: the far-end participant bleeding
-through someone's speaker, a second person murmuring under the main speaker,
-room noise between words.  Whisper transcribes a clean dominant voice far
-better than a muddy mix of two, so attenuating the quieter layer is worth
-doing even though the quieter layer is not removed.
+Thresholds are relative to the utterance's own loudness, measured as a high
+percentile of the *peak* envelope. Both parts matter: an utterance carries
+the VAD hangover and every pause between words, so a global RMS lands far too
+low, and pedalboard's detectors compare against peak rather than RMS. See
+docs/TUNING.md for the measurements.
 
-Everything is measured relative to the utterance's own loudness
----------------------------------------------------------------
-An absolute threshold is useless here.  Meeting audio arrives at whatever
-level the client's mixer happened to produce, and the same -30 dBFS is a
-shouting match in one recording and a whisper in another.  So the gate opens
-at a fixed distance *below this utterance's own speaking level*: "quiet" is
-defined by whoever is dominating this sentence, not by a number chosen in
-advance.
+Layering:
 
-Two things had to be right for that to work, and the first version of this
-file got both wrong.
-
-*The level must ignore the pauses.*  An utterance carries the VAD's hangover
-silence and every pause between words on purpose; on a real recording the
-median 20 ms frame sat 28 dB below the voice.  A global RMS measures those
-pauses as much as the speaker, so a threshold derived from it lands far too
-low.
-
-*The level must be measured in the same currency the gate uses.*  Pedalboard's
-noise gate compares its threshold against the signal *peak*, not its RMS.  A
-threshold set from an RMS-based level is a threshold in the wrong units: with
-a second voice 20 dB down, the RMS-based gate attenuated it by 0.1 dB, while
-the peak-based one attenuated it by 24 dB and left the dominant voice at
-0.0 dB.  So the gate threshold comes from a high percentile of the *peak*
-envelope, and the RMS-based level is kept only for reporting and for deciding
-that an utterance is too quiet to bother with.
-
-Layering
---------
 ``OverlapResolver``
-    The measurement and the policy - what to gate, at what level, and when to
-    leave the audio alone.  Pure Python, testable with a stub processor.
+    Measurement and policy. Pure Python, testable with a stub processor.
 
 ``PedalboardProcessor``
-    The DSP itself.  Unlike the other model stages this one needs no GPU and
-    no downloaded weights, so it is exercised for real in the unit tests.
+    The DSP. Needs no GPU and no weights, so the unit tests exercise it for
+    real.
 """
 
 from __future__ import annotations

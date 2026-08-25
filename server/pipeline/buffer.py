@@ -1,34 +1,18 @@
 """Stream Buffer Manager - step 2 of the server pipeline.
 
-``DESIGN.md`` section 3.2: gather the speech coming out of the VAD into a
-sliding window, and fire a Finalize Event when the sentence is over.  Three
-things end a sentence:
+``DESIGN.md`` 3.2: gather the speech coming out of the VAD into sentences and
+fire a Finalize Event when one is over. Three things end a sentence: a pause
+(the VAD closed the segment), a max-duration cut (somebody has talked past
+the limit without stopping), or a speaker change - a hook that exists but
+nothing calls yet.
 
-``pause``
-    The VAD closed the segment, which it only does after a silence longer
-    than the finalize threshold.  This is the normal case.
+A max-duration cut lands on the quietest 32 ms frame within
+``SPLIT_SEARCH_MS`` rather than exactly on the limit, because Whisper turns
+half a word into a different word. Audio is never duplicated across the two
+halves; the second is marked ``continues_previous``.
 
-``max_duration``
-    Somebody has been talking for more than seven seconds without a real
-    pause.  Waiting longer would leave the viewer staring at grey partial
-    text, so the utterance is cut even though the sentence is not over.
-
-``speaker_change``
-    Reserved for the diarization stage.  The hook exists
-    (:meth:`BufferManager.notify_speaker_change`) but nothing calls it yet.
-
-While an utterance is open it is also handed out periodically as a *partial*
-window, which is what feeds the greyed-out running transcript.
-
-Where the max-duration cut lands
---------------------------------
-Cutting at exactly 7000 ms would usually land in the middle of a word, and
-Whisper turns a half word into a different word.  So the cut looks back over
-the last ``split_search_ms`` and lands on the quietest 32 ms frame it finds
-there - the gap between words, if there is one.  The audio is never
-duplicated across the two halves: whatever follows the cut opens the next
-utterance, which is marked ``continues_previous`` so the translation stage
-knows it is reading the middle of a sentence.
+While an utterance is open it is also handed out periodically as a partial
+window, which feeds the greyed-out running transcript.
 """
 
 from __future__ import annotations

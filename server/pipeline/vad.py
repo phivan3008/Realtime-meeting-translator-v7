@@ -1,38 +1,31 @@
-"""Silero VAD - step 0 of the server pipeline.
+"""Voice Activity Detection - step 1 of the server pipeline.
 
-The client streams the raw 16 kHz mono capture without any filtering, so this
-is the first thing the audio meets on the server.  It has two jobs:
+``DESIGN.md`` 3.1: Silero VAD cuts the stream into speech segments with
+timestamps, so the heavy stages never see silence.
 
-1. **Segment.**  Report where speech starts and stops, with stream
-   timestamps.  The Stream Buffer Manager (``DESIGN.md`` section 3.1) needs
-   exactly this to fire its Finalize Event on a pause longer than 400 ms.
-2. **Drop.**  Keep the silence out of the expensive stages downstream
-   (YAMNet, PyAnnote, Whisper, vLLM).  Running Whisper over an empty meeting
-   room is pure GPU waste.
+Silero only accepts 512-sample frames at 16 kHz - 32 ms per decision - and a
+client chunk is 200 ms, so frames are split out and the remainder carried
+over. A raw probability is not enough on its own: Silero fires briefly on
+keyboard clicks, so a segment opens only after ``VAD_MIN_SPEECH_MS`` of
+speech-like frames and closes only after ``VAD_MIN_SILENCE_MS`` of quiet,
+which leaves the pauses inside a sentence intact.
 
-VAD used to live on the client, but Silero drags ``torch`` and ``torchaudio``
-onto a Windows machine we do not control, and it broke there.  Moving it next
-to the buffer manager also removed a protocol: the client no longer has to
-announce the pauses it deleted, because it no longer deletes any.
+Each segment carries ``VAD_SPEECH_PAD_MS`` of pre-roll, because by the time
+the model is sure, the word onset has already gone past.
 
-Layering
---------
+Layering:
+
 ``FrameSplitter``
-    Cuts the 200 ms client chunks into the exactly 512 sample frames that
-    Silero v5 requires at 16 kHz.  Pure Python.
+    Bytes to frames, keeping the original PCM so nothing is rebuilt lossily.
 
 ``SpeechStateMachine``
-    Turns a stream of per-frame speech probabilities into speech segments,
-    with hysteresis, a minimum speech duration and a silence hangover.  Pure
-    Python, so it is unit tested without loading any model.
-
-``SileroVAD``
-    Thin wrapper around the Silero torch/ONNX model.  The only part that
-    needs the real model file.
+    Hysteresis and duration rules over raw probabilities. Pure Python.
 
 ``VADSegmenter``
-    Wires the three together, produces the audio the rest of the pipeline
-    should see, and timestamps every boundary.
+    Ties them together and emits spans plus start/end events.
+
+``SileroVAD``
+    The model.
 """
 
 from __future__ import annotations

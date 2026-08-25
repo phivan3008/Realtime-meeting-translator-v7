@@ -1,43 +1,29 @@
 """Speaker Diarization - step 5 of the server pipeline.
 
-``DESIGN.md`` section 3.5: take a voiceprint of each sentence, match it
-against the voices heard so far by cosine similarity, and label it
-``Speaker_01``, ``Speaker_02`` and so on.
+``DESIGN.md`` 3.5: give each committed sentence a speaker label, so the
+reader can tell who said what.
 
-Online identification, not offline diarization
-----------------------------------------------
-The usual pyannote pipeline reads a whole recording and clusters it once,
-which is the right tool for a file and the wrong one for a meeting that is
-still happening.  Here every sentence has to be labelled the moment the
-buffer manager commits it, before the next one arrives, and the set of
-speakers is discovered as the meeting goes.
+This is **online identification, not offline diarization**. Every sentence
+must be labelled the moment the buffer commits it, so the algorithm is greedy
+and order-dependent: a voice that arrives later cannot correct a mistake made
+earlier.
 
-So this keeps a running centroid per speaker and compares each new
-voiceprint to them.  Above the threshold it is that person and their
-centroid moves a little towards the new sample; below it, a new speaker is
-born.  That is a greedy, order-dependent algorithm - a late-arriving voice
-cannot retroactively split an earlier mistake - and it is the price of
-labelling in real time.
+Voiceprints are ECAPA-TDNN, called through SpeechBrain directly rather than
+through pyannote.audio - pyannote's wrapper passes SpeechBrain three keyword
+arguments it does not accept and declares no version bound, so it fails
+before loading anything and no resolver can see why.
 
-An honest unknown beats a confident guess
------------------------------------------
-A sentence too short to embed reliably is labelled ``Speaker_unknown``
-rather than assigned to whoever spoke last.  Continuity sounds like a
-sensible heuristic until you notice that short interjections - "ah, I see",
-"right" - usually come from whoever is *listening*, so guessing the previous
-speaker would be wrong precisely where it is most tempting.
+Layering:
 
-Layering
---------
 ``SpeakerRegistry``
-    The centroids and the matching rule.  Pure numpy, unit tested without a
-    model.
-
-``EcapaEmbedder``
-    The voiceprint model.  Needs torch and the checkpoint.
+    Who has been heard, and how to match a new voiceprint. Pure Python.
 
 ``SpeakerIdentifier``
-    Wires them together and owns the too-short policy.
+    The policy, including the minimum duration below which it says unknown
+    rather than guessing.
+
+``EcapaEmbedder``
+    The model.
 """
 
 from __future__ import annotations

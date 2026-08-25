@@ -1,51 +1,25 @@
 """Deep Noise Filter - step 3 of the server pipeline.
 
-``DESIGN.md`` section 3.3: classify the audio and drop what is not speech -
-keyboard clatter, a cough, a chair scraping - before it reaches the stages
-that cost real GPU time.
+``DESIGN.md`` 3.3: classify each committed utterance and drop the ones that
+are keyboard clatter or coughing rather than speech.
 
-Silero already removes silence, but it is a *voice activity* detector, not a
-sound classifier: it fires happily on a cough, a laugh, a door slam.  An
-AudioSet classifier knows the difference, so it gets the last word on whether
-an utterance is worth transcribing.
+AST rather than YAMNet, which DESIGN.md also allows: YAMNet means TensorFlow,
+and TF pins numpy < 2.1 while vllm and the rest need numpy >= 2. AST runs on
+the torch already here, over the same AudioSet labels.
 
-Why AST and not YAMNet
-----------------------
-``DESIGN.md`` allows either.  YAMNet means TensorFlow, and TF pins
-``numpy < 2.1`` and ``protobuf 4.x``.  Inside our own venv that happens to be
-satisfiable, but it makes the noise filter the one stage that dictates the
-numpy version for everything downstream - and the pod's system interpreter,
-which carries a newer torch and vllm, cannot host TF at all.  AST needs only
-the torch already in use and reads the same AudioSet labels, so it works in
-either interpreter and constrains nothing.  The policy below is unchanged
-either way; only the backend differs.
+The policy is deliberately timid. An utterance is dropped only when there is
+little speech *and* the model confidently heard something else; two
+near-zero scores are not evidence, they are the model having no idea. Losing
+a real sentence loses it for good, while letting a cough through costs one
+wasted Whisper call.
 
-The filter is deliberately timid
---------------------------------
-The two mistakes are not symmetric.  Letting a cough through costs one wasted
-Whisper call.  Dropping real speech loses a sentence from the meeting
-permanently, and the participant never learns why.  So an utterance survives
-unless *both* halves of the case are made: the speech score is low **and** the
-classifier is confident about what it heard instead.  Two near-zero scores are
-not a case - they are the model saying it has no idea, and no idea means keep.
+Layering:
 
-This is not hypothetical caution.  On a real recording, a 1.2 second Japanese
-interjection - the conversational beat that means roughly "ah, I see" - scored
-**0.00** for speech, with its highest label of any kind at 0.13.  A rule that
-merely compared the two scores deleted it from the meeting.  Short expressive
-interjections are a blind spot of this classifier, and they are exactly the
-utterances a VI-JA translator must not lose, so any future tightening of these
-thresholds has to be checked against a recording containing them.
-
-Layering
---------
 ``NoiseFilter``
-    The policy: given scores, decide keep or drop.  Pure Python, unit tested
-    without torch.
+    The keep/drop policy. Pure Python, tested with a stub classifier.
 
 ``AstClassifier``
-    The model wrapper.  The only part that needs transformers, and the only
-    part that cannot run on the Dev PC.
+    The model. Needs the checkpoint and a GPU.
 """
 
 from __future__ import annotations

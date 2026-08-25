@@ -1,42 +1,27 @@
 """ASR - step 7 of the server pipeline.
 
-``DESIGN.md`` section 3.7: Whisper large-v3 through faster-whisper, in two
-modes.  A *partial* runs while somebody is still talking and is thrown away
-as soon as the next one arrives, so it is decoded greedily.  A *final* runs
-once the buffer manager has committed the sentence and is worth a beam
-search, because it is what the viewer keeps and what gets translated.
+``DESIGN.md`` 3.7: faster-whisper large-v3. Partial passes decode greedily
+because they are replaced within a second; the committed sentence gets a beam
+search.
 
-Whisper invents text, and it does so confidently
-------------------------------------------------
-Given near-silence or noise it does not return nothing; it returns a fluent
-sentence that was never said - "Thank you for watching", subtitle credits,
-whatever its training data had in the quiet parts.  Worse, it sometimes locks
-into a loop and repeats one phrase to fill the time.
+**Whisper invents text, and invents it confidently.** Given near-silence it
+returns a fluent sentence nobody said, sometimes looping a phrase to fill the
+time. Three statistical guards catch the unconfident kind - ``no_speech_prob``,
+``avg_logprob`` and ``compression_ratio``, gzip on natural speech landing near
+1.5-2.0. The confident kind needs the word lists in ``server/data/``; every
+refusal is counted and logged with its text.
 
-Three guards, and all three matter:
+Two faster-whisper defaults are off: ``vad_filter``, because Silero already
+ran and a second pass eats the pre-roll holding word onsets, and
+``condition_on_previous_text``, which feeds one invention into the next.
 
-``no_speech_prob``
-    Whisper's own estimate that a segment holds no speech.
+Layering:
 
-``avg_logprob``
-    How confident the decoder was. Invented text scores badly.
+``Transcriber``
+    The policy. Pure Python, tested against a stubbed decoder.
 
-``compression_ratio``
-    A repetition detector. Natural speech gzips to around 1.5-2.0; a segment
-    that compresses far better than that is a loop.
-
-Segments failing a guard are dropped and counted rather than quietly deleted,
-so a run where the guards start eating real speech is visible in the stats.
-
-Two settings deliberately differ from faster-whisper's defaults
----------------------------------------------------------------
-``vad_filter`` is off. Silero already ran, at the front of this pipeline, and
-running a second VAD over audio the first one already trimmed removes the
-leading consonants that the pre-roll exists to preserve.
-
-``condition_on_previous_text`` is off. It feeds the previous sentence in as
-the next one's prompt, which is exactly how a single invented sentence turns
-into a paragraph of them. Every utterance here is already a complete thought.
+``WhisperDecoder``
+    The model.
 """
 
 from __future__ import annotations

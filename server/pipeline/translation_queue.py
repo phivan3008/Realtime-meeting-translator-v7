@@ -1,55 +1,27 @@
 """Translation off the audio path.
 
-Why this exists
----------------
-Every stage of the pipeline used to run on the thread that reads the socket,
-translation included. On the seventh end-to-end run one slow vLLM answer put
-the whole connection twelve seconds behind: VAD events that cost a
-millisecond to produce arrived 12.6 s late, and two sentences shared a
-timestamp after twenty-one seconds of silence. Nothing was lost, but a
-meeting cannot be read at that latency.
+A sentence goes out the moment Whisper commits it; its translation follows as
+a separate message. Before the split, one slow vLLM answer put every VAD
+event twelve seconds late, because every stage ran on the thread reading the
+socket.
 
-So a sentence now goes out the moment Whisper commits it, and its translation
-follows as a separate message. The socket is never waiting on an LLM.
+The queue is bounded in two ways, and both are about the answer's usefulness
+rather than the queue's capacity: a sentence waiting past
+``TRANSLATION_MAX_LAG_SECONDS`` is dropped, because a translation appearing
+under a sentence the reader has scrolled past reads as a translation of
+something else; and the queue has a ceiling so a pathological stall cannot
+grow it without bound. Both drops are announced with a reason - a translation
+that never arrives and never says why is a silent failure.
 
-Why a queue needs limits
-------------------------
-Measured over three real runs, 66 gaps between committed sentences:
+Layering:
 
-    median gap        3.58 s
-    busiest 8 gaps    0.74 s mean, so 1.35 sentences/s
-    one translation   0.15 s
-
-At 3.7% utilisation the queue drains almost instantly - a ten second stall
-leaves 13.5 sentences behind and clears them in two. Delays do not accumulate
-across stalls, because the queue empties between them.
-
-That is a fact about vLLM's speed today, not a property of the design. A
-slower model, a busier GPU or a second session and the arithmetic changes,
-and an unbounded queue would then fall further behind with no floor. So the
-limits are here from the start:
-
-* a sentence that has waited too long is dropped rather than translated. Not
-  because the queue cannot cope, but because the answer has stopped being
-  useful: at a 3.58 s median gap, ten seconds is three sentences ago, and a
-  translation appearing under a sentence the reader has scrolled past reads
-  as a translation of something else.
-* the queue has a ceiling, so a pathological stall cannot grow it without
-  bound.
-
-Both drops are announced, with a reason. A translation that never arrives and
-never says why is the silent failure this project has already paid for twice.
-
-Layering
---------
 ``TranslationQueue``
-    The policy: what to accept, what to drop, what to say about it. Pure
-    Python, no threads, no clock of its own - the time source is injected, so
-    a test can make a sentence three minutes old without waiting.
+    The policy. Pure Python, no threads, and its clock is injected so a test
+    can age a sentence without waiting.
 
 ``TranslationWorker``
-    Runs the queue against a translator. ``inline`` runs it on the calling
-    thread, which is what the unit tests use; otherwise it owns a thread.
+    Runs the queue against a translator. ``inline`` keeps it on the calling
+    thread, which is what the unit tests use.
 """
 
 from __future__ import annotations

@@ -1,42 +1,26 @@
-"""Translation - step 8 of the server pipeline, and the last one.
+"""Translation - step 8 of the server pipeline.
 
-``DESIGN.md`` section 3.8: Qwen behind vLLM, text to text, given the previous
-two or three sentences of the meeting plus the language the LID decided and
-the sentence Whisper committed.
+``DESIGN.md`` 3.8: Qwen behind vLLM, given the sentence Whisper committed,
+the language the LID decided, and the previous few turns of the meeting.
 
-What the history is for, and what it is not for
------------------------------------------------
-Meetings are full of sentences that mean nothing alone.  "That one." "Về
-việc đó thì chưa." Pronouns, dropped subjects, agreement with something said
-ten seconds ago - Japanese in particular drops subjects freely, and a
-sentence-at-a-time translator has to guess at every one of them.
+The history is there to resolve pronouns and dropped subjects, which both
+languages leave out freely. Three turns, not thirty: enough for "that one",
+short enough that the model cannot start summarising instead of translating.
 
-So the previous few turns go into the prompt.  Three, not thirty: enough to
-resolve a pronoun, short enough that the model cannot start summarising the
-meeting instead of translating the sentence in front of it.
+Instruction-tuned models answer requests, so an answer arrives wrapped in
+"Sure! Here is the translation:" or in quotes, and all of it would be shown
+as if somebody had said it. The answer is cleaned, then checked.
 
-The model will try to talk to you
----------------------------------
-Instruction-tuned models answer requests.  Asked to translate, they will
-happily return "Sure! Here is the translation:" followed by the translation,
-or add a note about an ambiguity, or wrap the answer in quotes.  All of that
-would be shown to a meeting participant as if somebody had said it.
+Layering:
 
-So the prompt asks for the translation and nothing else, and the answer is
-cleaned and then checked: an answer several times longer than its source is
-not a translation, it is the model explaining itself, and it is refused.
-
-Layering
---------
 ``TranslationContext``
     The rolling history. Pure Python.
 
 ``Translator``
-    The prompt, the cleaning and the guards. Pure Python, tested against a
-    stub that answers like a chatty model.
+    Prompt, cleaning and guards. Pure Python, tested against a stub.
 
 ``VllmClient``
-    The HTTP call. The only part that needs a server running.
+    The HTTP call - the only part needing a server.
 """
 
 from __future__ import annotations
@@ -157,15 +141,11 @@ def looks_like_echo(source: str, text: str) -> bool:
 
 
 def japanese_ratio(text: str) -> Optional[float]:
-    """Fraction of the letters that are kana or kanji.
+    """Fraction of the letters that are kana or kanji, or None if no letters.
 
-    ``None`` when there are no letters to judge - a bare number translates to
-    itself, and refusing that would be refusing a correct answer.
-
-    Vietnamese and Japanese do not share a script, which makes this a cheap and
-    near-certain test of whether a translation came out in the language it was
-    asked for. It is not a language detector: it cannot tell Vietnamese from
-    English, so ``プレー`` coming back as ``Play`` still passes.
+    Vietnamese and Japanese share no script, so this tells cheaply whether a
+    translation came out in the language it was asked for. It cannot tell
+    Vietnamese from English: ``プレー`` answered as ``Play`` still passes.
     """
     letters = [c for c in text if c.isalpha()]
     if not letters:
@@ -181,10 +161,8 @@ def wrong_script(text: str, target: str,
                  limit: float = TRANSLATE_MAX_WRONG_SCRIPT) -> bool:
     """Is this answer written in the wrong language's script?
 
-    The end-to-end run produced ``はい、今の画面の`` -> ``はい、現在の画面の``:
-    a Japanese sentence answered in Japanese. It passed every guard, because
-    the two strings differ and neither is longer than the other, and the check
-    that should have caught it did not exist.
+    Catches a sentence handed back in its own language when the wording
+    changed enough that ``looks_like_echo`` cannot see it.
     """
     ratio = japanese_ratio(text)
     if ratio is None:
@@ -238,29 +216,15 @@ class TranslationContext:
     def as_prompt(self, style: str = HISTORY_STYLE) -> str:
         """The history, laid out for the model to read but not to translate.
 
-        The history sits between the system prompt and the sentence to
-        translate, which makes it the last thing the model reads before
-        answering - and written with its translations it reads as worked
-        examples. When several turns in a row go the same way, every example
-        ends in the same language and the model follows the examples over the
-        instruction. Measured against the live model, same history, same
-        moment, on ここに作っているの? going into Vietnamese::
+        ``style`` decides how much of it the model sees:
 
-            plain     ->  ここで作っているの？
-            labelled  ->  Đang tạo ở đây à?
+        ``plain``     source and translation, translation unmarked
+        ``labelled``  the same, with each translation's language named
+        ``sources``   source lines only, so there are no worked examples
 
-        Note what the plain answer is. Not the sentence handed back: に became
-        で and ? became ？. The model translated it - into Japanese, because
-        two Vietnamese turns of history had put two Japanese translations in
-        front of it. That is also why ``looks_like_echo`` is blind here and
-        only ``wrong_script`` caught it.
-
-        Labelling was not enough on its own: it took the fourth end-to-end run
-        from 6 of 10 sentences translated to 14 of 17, and the two that still
-        came back in Japanese had three such turns behind them rather than
-        two. ``sources`` removes the examples instead of annotating them. The
-        history is there to say what "that one" refers to, and the source
-        lines carry that on their own.
+        With its translations in it the history reads as examples, and when
+        several turns run the same way the model copies their language
+        instead of following the instruction. See docs/TUNING.md.
         """
         if style not in self.STYLES:
             raise ValueError(f"unknown history style {style!r}, "
@@ -336,11 +300,8 @@ SYSTEM_PROMPT = (
     "terms exactly as they are. Never repeat the line back in {source_name}."
 )
 
-#: Appended to the system prompt. A meeting is mostly short lines, and the
-#: model handed はい straight back - it is a whole turn of a Japanese meeting
-#: and one of the commonest lines there is. Other short lines translated fine
-#: on the same run (えっ -> Eh?, いや違います -> Không, tôi nhầm rồi), so this
-#: is about single words rather than length as such.
+#: Appended to the system prompt. A meeting is mostly short lines, and a
+#: single word is what the model treats as nothing to do.
 SHORT_LINE_HINT = (
     " A line of one word, an interjection or a filler is still a line: write "
     "it in {target_name} too, never leave it as it was."
@@ -379,11 +340,9 @@ class Translator:
                      short_line_hint: Optional[bool] = None) -> tuple[str, str]:
         """The system and user messages, so a test can read them.
 
-        ``history_style`` overrides this translator's own, so
-        ``server/tests_real/test_real_translate.py`` can put every version to
-        a real model on the same history and read the answers side by side.
-        ``"plain"`` rebuilds the prompt exactly as it was before any of this,
-        which is how the diagnosis was confirmed rather than assumed.
+        ``history_style`` overrides this translator's own, which is how
+        server/tests_real/test_real_translate.py puts every version to a live
+        model on the same history.
         """
         style = history_style or self.history_style
         hint = self.short_line_hint if short_line_hint is None else short_line_hint
@@ -468,11 +427,9 @@ class Translator:
     def length_limit(self, source: str, target: str) -> float:
         """How long an answer may run before it stops being a translation.
 
-        Per direction, because Japanese carries the same meaning in far fewer
-        characters than Vietnamese: measured over real pairs, ja -> vi ran up
-        to 4.44x while vi -> ja never passed 0.70x. The slack keeps short
-        sources out of it - at nine characters a ratio is mostly noise, and a
-        shared limit refused a correct translation of あれこれ今下の方に.
+        Per direction: Japanese carries the same meaning in far fewer
+        characters. The slack keeps short sources out of it, where a ratio is
+        mostly noise. See docs/TUNING.md.
         """
         ratio = self.max_expansion.get(target)
         if ratio is None:

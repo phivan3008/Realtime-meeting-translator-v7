@@ -1,30 +1,23 @@
 """The wire contract between the Windows client and the GPU server.
 
-This module is the single source of truth for both sides.  It lives outside
-``client/`` and ``server/`` on purpose: the audio format is the one thing that
-must never drift between them.  If the client sends 48 kHz stereo while the
-server assumes 16 kHz mono, nothing crashes - Whisper simply transcribes
-garbage at a third of the speed, and that is a bug nobody finds by reading
-logs.  So the format is defined once and checked during the handshake.
+The single source of truth for both sides, kept outside ``client/`` and
+``server/`` because the audio format is the one thing that must never drift.
+A client sending 48 kHz stereo to a server assuming 16 kHz mono does not
+crash: Whisper transcribes garbage at a third of the speed, and no log shows
+why. So the format is defined once and checked during the handshake.
 
-Transport
----------
-One WebSocket connection per meeting session.
+Transport: one WebSocket per meeting. Text frames carry JSON both ways;
+binary frames carry raw PCM client-to-server only - no header, no framing,
+exactly ``CHUNK_BYTES`` of little-endian 16-bit mono, each chunk continuing
+where the last stopped.
 
-* **Text frames** carry JSON control messages in both directions.
-* **Binary frames** carry raw PCM, client to server only.  No header, no
-  framing: every binary frame is exactly ``CHUNK_BYTES`` of little endian
-  16-bit mono samples.  Chunk N+1 continues exactly where chunk N stopped.
+Handshake:
 
-Handshake
----------
-1. Client connects and sends ``hello`` (JSON) first, before any audio.
-2. Server validates the audio format and replies ``ready`` (JSON), or
-   ``error`` (JSON) and closes.
-3. Client streams binary chunks until it sends ``bye`` or drops the
-   connection.
-4. Server pushes ``vad`` / ``partial`` / ``final`` messages at any time after
-   ``ready``.
+1. Client sends ``hello`` before any audio.
+2. Server validates the format and replies ``ready``, or ``error`` and closes.
+3. Client streams binary chunks until it sends ``bye`` or drops.
+4. Server pushes ``vad`` / ``partial`` / ``final`` / ``translation`` at any
+   time after ``ready``.
 """
 
 from __future__ import annotations
