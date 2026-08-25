@@ -240,6 +240,17 @@ ASR_HALLUCINATIONS = (
     # that narrow: "Chào tạm biệt nhé", "Thôi chào tạm biệt mọi người" and
     # anything else with a word attached all survive.
     "Ch\u00e0o t\u1ea1m bi\u1ec7t.",
+    # Running text at 107.3 s of the eighth end-to-end run, over a meeting
+    # about task tables. A Vietnamese YouTube channel's subscribe pitch,
+    # named channel and all - not something a meeting says, and the surest
+    # entry on this list.
+    #
+    # It also shows what the list cannot do. It never became a sentence, so
+    # nothing failed; the check "No running text is a Whisper sign-off"
+    # passed, because the line was not on the list to be caught by. Only a
+    # person reading the output found it.
+    "H\u00e3y subscribe cho k\u00eanh Ghi\u1ec1n M\u00ec G\u00f5 "
+    "\u0110\u1ec3 kh\u00f4ng b\u1ecf l\u1ee1 nh\u1eefng video h\u1ea5p d\u1eabn",
 )
 
 # What this list cannot do: it only knows what has already been seen. Every

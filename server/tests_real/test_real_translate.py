@@ -210,12 +210,27 @@ CUT_SENTENCES = [
 # translated on the same run, which is what says this is about single words
 # rather than short lines in general.
 SHORT_LINES = [
-    ("ja", "はい", "handed back untranslated"),
+    # The hint was added for this one, and on the next run it translated:
+    # はい -> vâng. Kept as the regression test for that.
+    ("ja", "はい", "failed, then translated once the hint was added: vâng"),
     ("ja", "えっ", "translated: Eh?"),
     ("ja", "いや違います", "translated: Không, tôi nhầm rồi"),
     ("ja", "それじゃないの", "translated: Không phải vậy đâu"),
     ("vi", "Cảm ơn.", "translated: ありがとうございます。"),
     ("vi", "review kết quả hôm nay", "translated: 今日の結果をレビューする"),
+    # Still failing, both from the eighth run, and both a single word.
+    #
+    # バトンタッチ is a katakana loanword - "baton touch", meaning a handover.
+    # The model answered "Batonタッチ": half romanised, half left alone, and
+    # not Vietnamese either way. The prompt tells it to keep technical terms
+    # as they are, and it appears to read a katakana word as one. The same
+    # shape as プレー -> "Play" from an earlier run.
+    ("ja", "バトンタッチ", "refused: the answer is not written in vi "
+                          "(raw: 'Batonタッチ')"),
+    # A Vietnamese filler. The hint says a filler is still a line; the model
+    # answered "ờ", which differs from the input only in case.
+    ("vi", "Ờ", "refused: the model returned the sentence untranslated "
+                "(raw: 'ờ')"),
 ]
 
 

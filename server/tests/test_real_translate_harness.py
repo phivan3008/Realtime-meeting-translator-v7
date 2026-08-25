@@ -512,3 +512,18 @@ def test_both_prompts_are_tried(capsys):
     out = capsys.readouterr().out
     assert "plain    :" in out
     assert "with hint:" in out
+
+
+def test_the_short_lines_include_the_ones_still_failing():
+    """A prompt change that fixes one must face the ones it has not."""
+    sources = [source for _lang, source, _note in harness.SHORT_LINES]
+    assert "\u30d0\u30c8\u30f3\u30bf\u30c3\u30c1" in sources
+    assert "\u1edc" in sources        # U+1EDC is \u1edc; U+1EDE is \u1ede
+
+
+def test_the_short_line_notes_say_what_happened_to_each():
+    """The fixture is evidence, not a wish list: each line carries the
+    outcome it actually had."""
+    for _lang, source, note in harness.SHORT_LINES:
+        assert note, source
+        assert note.startswith(("translated", "refused", "failed")), note

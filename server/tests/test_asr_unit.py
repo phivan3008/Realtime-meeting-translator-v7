@@ -352,3 +352,20 @@ def test_normalising_keeps_vietnamese_letters_apart():
     different words together."""
     assert normalise_for_match("t\u1eaft") != normalise_for_match("tab")
     assert normalise_for_match("\u0111\u00f3") != normalise_for_match("do")
+
+
+def test_the_youtube_subscribe_pitch_is_refused():
+    """Running text at 107.3 s of the eighth run, over a meeting about task
+    tables. A named channel's subscribe pitch is not something a meeting
+    says."""
+    pitch = ("H\u00e3y subscribe cho k\u00eanh Ghi\u1ec1n M\u00ec G\u00f5 "
+             "\u0110\u1ec3 kh\u00f4ng b\u1ecf l\u1ee1 nh\u1eefng video "
+             "h\u1ea5p d\u1eabn")
+    assert make([confident(pitch)]).transcribe(audio()).text == ""
+
+
+def test_a_meeting_asking_people_to_subscribe_survives():
+    """Whole-segment matching again: only that exact pitch is blocked."""
+    real = ("H\u00e3y subscribe cho k\u00eanh c\u1ee7a b\u00ean m\u00ecnh "
+            "nh\u00e9")
+    assert make([confident(real)]).transcribe(audio()).text == real
