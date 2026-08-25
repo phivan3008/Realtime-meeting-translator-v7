@@ -84,9 +84,12 @@ class MeetingWindow(QMainWindow):
         self.setWindowTitle("Phiên dịch cuộc họp VI ↔ JA")
         self.resize(900, 640)
 
-        #: Whether to keep the view at the newest sentence. Rebuilding the
-        #: document resets the scrollbar, so the position is put back by hand.
+        #: Whether to keep the view at the newest sentence. Only the reader
+        #: changes this, in :meth:`_on_scrolled`.
         self._follow = True
+        #: Set while this class moves the scrollbar, so its own writes are not
+        #: mistaken for the reader scrolling.
+        self._moving = False
         self.model = TranscriptModel()
         self.session = MeetingSession(url, device_hint, parent=self)
         self.session.message.connect(self.on_message)
@@ -102,6 +105,8 @@ class MeetingWindow(QMainWindow):
         self.transcript = QTextBrowser()
         self.transcript.setOpenExternalLinks(False)
         self.transcript.setFont(QFont("Segoe UI", 11))
+        self.transcript.verticalScrollBar().valueChanged.connect(
+            self._on_scrolled)
 
         self.start_button = QPushButton("Bắt đầu")
         self.start_button.clicked.connect(self.toggle)
@@ -187,6 +192,21 @@ class MeetingWindow(QMainWindow):
         if self._follow:
             self._pin_to_bottom()
 
+    # -- following the meeting ----------------------------------------------
+    def _on_scrolled(self, value: int) -> None:
+        """The reader moved the view. Follow the meeting only from the end.
+
+        The test is half a viewport rather than a few pixels: on a document
+        tens of thousands of pixels tall, an exact-bottom test is a target no
+        hand can hit, and missing it leaves the reader pinned to one sentence
+        with no way back.
+        """
+        if self._moving:
+            return
+        bar = self.transcript.verticalScrollBar()
+        near = max(bar.pageStep() // 2, 40)
+        self._follow = value >= bar.maximum() - near
+
     # -- drawing ------------------------------------------------------------
     def _show_running_text(self) -> None:
         self.running_text.setText(
@@ -197,21 +217,25 @@ class MeetingWindow(QMainWindow):
         body = "".join(sentence_html(s, show) for s in self.model.sentences)
 
         bar = self.transcript.verticalScrollBar()
-        self._follow = bar.value() >= bar.maximum() - 4
         keep = bar.value()
-
-        self.transcript.setHtml(body or self._empty_html())
-
-        # setHtml builds a new document, so the scrollbar is back at zero.
-        if self._follow:
-            self._pin_to_bottom()
-        else:
-            bar.setValue(min(keep, bar.maximum()))
+        self._moving = True
+        try:
+            # setHtml builds a new document, so the scrollbar goes to zero on
+            # the way past and the position has to be put back by hand.
+            self.transcript.setHtml(body or self._empty_html())
+            bar.setValue(bar.maximum() if self._follow
+                         else min(keep, bar.maximum()))
+        finally:
+            self._moving = False
         self._update_counts()
 
     def _pin_to_bottom(self) -> None:
         bar = self.transcript.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self._moving = True
+        try:
+            bar.setValue(bar.maximum())
+        finally:
+            self._moving = False
 
     def _update_counts(self) -> None:
         parts = [f"{len(self.model.sentences)} câu",

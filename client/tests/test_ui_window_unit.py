@@ -252,3 +252,40 @@ def test_stopping_never_joins_the_worker_on_the_qt_thread(window, monkeypatch):
     monkeypatch.setattr(type(window.session), "running", property(lambda _: True))
     window.toggle()
     assert asked and not joined
+
+
+def test_scrolling_back_near_the_bottom_resumes_the_follow(window):
+    """Reported after four minutes: stuck on one sentence, and dragging the
+    bar did not free it. A four-pixel target on a document tens of thousands
+    of pixels tall cannot be hit by hand, and every new sentence pinned the
+    reader back to the offset they were at."""
+    fill(window, 60)
+    bar = bar_of(window)
+    bar.setValue(bar.maximum() // 3)
+    window.on_message(final(sentence_id=98, text="Câu mới"))
+    assert not at_bottom(window), "scrolling back was ignored"
+
+    bar.setValue(bar.maximum() - 20)          # near the bottom, not exactly
+    window.on_message(final(sentence_id=99, text="Câu mới nữa"))
+    assert at_bottom(window), "the reader could not get back to the meeting"
+
+
+def test_a_redraw_does_not_count_as_the_reader_scrolling(window):
+    """Hiding refusals shrinks the document under a reader who is scrolled
+    back. The shorter document can leave them at its new bottom, and that is
+    the widget moving, not the reader - it must not restart the follow."""
+    fill(window, 60)
+    for index in range(61, 90):
+        window.on_message(final(sentence_id=index, text=f"Câu {index}"))
+        window.on_message(translation(sentence_id=index, text="",
+                                      reason="quá dài", raw="x" * 200))
+    bar = bar_of(window)
+    bar.setValue(int(bar.maximum() * 0.55))
+    window.on_message(final(sentence_id=95, text="Câu mới"))
+    assert window._follow is False
+
+    window.show_refusals.setChecked(False)
+    window.on_message(final(sentence_id=96, text="Câu mới nữa"))
+    # The position may land at the bottom - a shorter document has nowhere
+    # else to put it - but that is the widget moving, not a decision.
+    assert window._follow is False, "the follow restarted on its own"
