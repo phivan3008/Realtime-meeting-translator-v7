@@ -57,9 +57,28 @@ SPLIT_SEARCH_MS = 500
 # text that is replaced 600 ms later, on the same thread that reads audio. The
 # worst single pass took 4.7 s while the slowest committed sentence took 0.4 s.
 #
-# Four seconds bounds the worst pass and cuts the total by about a third. The
-# cost is the start of a long sentence: the grey text shows what is being said
-# now rather than the whole sentence so far. The committed sentence is
+# Four seconds. Measured over the same ten minutes before and after:
+#
+#     worst event lag        8448 ms  ->  1398 ms
+#     slowest partial pass    4.7 s   ->   3.9 s
+#     partial_asr total      97.8 s   ->  88.7 s
+#
+# The stall is gone - the 8.4 s spike sat at the same point in the audio on
+# two consecutive runs and is now 0.6 s - which is what the cap was for.
+#
+# The total barely moved, and the first version of this comment claimed a
+# third off. That was arithmetic done on a seven-second sentence and never
+# checked against the distribution: most utterances in a real meeting are
+# one to three seconds and never reach the cap at all. The cap bounds the
+# worst case; it does not reduce the common one.
+#
+# Which leaves partial decoding at 88.7 s of 600, still the largest single
+# cost on the audio thread. Nothing is failing for it now - worst lag sits
+# inside the 1500 ms budget - so it stays as it is until something needs the
+# headroom.
+#
+# The cost paid: on a long sentence the grey text shows what is being said
+# now rather than the sentence from its beginning. The committed sentence is
 # decoded once, in full, and is unaffected.
 PARTIAL_WINDOW_SECONDS = 4.0
 
