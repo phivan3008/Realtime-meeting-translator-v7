@@ -12,10 +12,12 @@ Run with::
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -881,3 +883,230 @@ def test_without_a_wall_clock_nothing_is_assumed_missing():
     assert "Events come back fast enough to be useful" in [
         c.name for c in report.checks
     ]
+
+
+# ---------------------------------------------------------------------------
+# The audio pump
+#
+# This loop is the one piece of the file that needs a sound card, so no test
+# had ever run it - and a NameError in it reached the Windows machine and cost
+# a whole 120 s run. It is split out now precisely so these can exist.
+# ---------------------------------------------------------------------------
+class StubCaptureStats:
+    callbacks = 0
+    chunks_emitted = 0
+    chunks_dropped = 0
+    input_overflows = 0
+
+
+class StubCapture:
+    """Hands back a scripted sequence of chunks, or stalls instead.
+
+    A ``None`` in the script is a read that timed out: no audio, and time
+    passing while none of it was recorded.
+    """
+
+    def __init__(self, script, stall_seconds: float = 0.6):
+        self.script = list(script)
+        self.stall_seconds = stall_seconds
+        self.calls = 0
+        self.stats = StubCaptureStats()
+
+    def read(self, timeout=None):
+        chunk = self.script[self.calls] if self.calls < len(self.script) else b""
+        self.calls += 1
+        if chunk is None:
+            time.sleep(self.stall_seconds)
+            return None
+        return chunk
+
+    def stop(self):
+        pass
+
+
+class StubStreamClient:
+    """Records what the pump sent it. Not FakeClient, which models the stats
+    of a finished run rather than a live one."""
+
+    def __init__(self):
+        self.sent: list[bytes] = []
+        self.queued_chunks = 0
+        self.stats = type("S", (), {"chunks_sent": 0, "chunks_dropped": 0})()
+
+    def send(self, chunk: bytes) -> None:
+        self.sent.append(chunk)
+        self.stats.chunks_sent += 1
+
+
+def run_pump(capture, seconds: float):
+    collected = harness.Collected(stream_start=time.perf_counter())
+    client = StubStreamClient()
+    gaps = asyncio.run(harness.pump_audio(capture, client, collected, seconds))
+    return client, gaps
+
+
+def test_the_pump_sends_every_chunk_it_reads():
+    client, gaps = run_pump(StubCapture([b"a" * 6400] * 3), seconds=0.25)
+    assert client.sent
+    assert gaps == []
+
+
+def test_a_stalled_read_is_recorded_as_a_gap():
+    """Audio that would have filled it was never recorded. That is not a slow
+    server, however similar the lag figures look."""
+    capture = StubCapture([None, b"a" * 6400], stall_seconds=0.5)
+    _client, gaps = run_pump(capture, seconds=0.9)
+    assert gaps, "the stall left no trace"
+    at, waited = gaps[0]
+    assert waited >= 0.5
+    assert at >= 0
+
+
+def test_a_prompt_read_is_not_recorded_as_a_gap():
+    """One chunk is 200 ms; a read finishing inside that is the normal case."""
+    _client, gaps = run_pump(StubCapture([b"a" * 6400] * 20), seconds=0.3)
+    assert gaps == []
+
+
+def test_a_timed_out_read_sends_nothing():
+    client, _gaps = run_pump(StubCapture([None], stall_seconds=0.5), seconds=0.4)
+    assert client.sent == []
+
+
+def test_the_pump_stops_at_the_deadline():
+    started = time.perf_counter()
+    run_pump(StubCapture([b"a" * 6400] * 10_000), seconds=0.3)
+    assert time.perf_counter() - started < 3.0
+
+
+def test_capture_gaps_are_reported_with_their_timing(capsys):
+    harness.report_capture_gaps(StubCapture([]), [(8.2, 10.4), (1.0, 0.5)])
+    out = capsys.readouterr().out
+    assert "stalled 2 time(s), 10.9 s in total" in out
+    assert "t=   8.2s  waited 10.40s" in out
+
+
+def test_a_clean_capture_reports_only_its_counters(capsys):
+    harness.report_capture_gaps(StubCapture([]), [])
+    out = capsys.readouterr().out
+    assert "Capture:" in out
+    assert "stalled" not in out
+
+
+# ---------------------------------------------------------------------------
+# stream_for, end to end, with no sound card
+#
+# The NameError that cost a run lived on the line joining the capture loop to
+# the report. Neither piece was at fault; the join was, and nothing executed
+# the join. These do.
+# ---------------------------------------------------------------------------
+class StubDevice:
+    name = "Stub Loopback"
+
+
+class StubLoopbackCapture:
+    """Stands in for the WASAPI capture. Records that it was stopped."""
+
+    last: "StubLoopbackCapture | None" = None
+
+    def __init__(self, device_name_hint=None):
+        self.script = [b"a" * 6400] * 4
+        self.calls = 0
+        self.stopped = False
+        self.stats = StubCaptureStats()
+        StubLoopbackCapture.last = self
+
+    def start(self):
+        return StubDevice()
+
+    def read(self, timeout=None):
+        # A real device paces the loop; without that the pump spins as fast
+        # as the CPU allows and buries the test output in progress lines.
+        time.sleep(0.02)
+        chunk = self.script[self.calls] if self.calls < len(self.script) else b""
+        self.calls += 1
+        return chunk
+
+    def stop(self):
+        self.stopped = True
+
+
+class StubSocketClient:
+    """Stands in for StreamClient: connects, accepts chunks, stops."""
+
+    def __init__(self, url, on_message=None, connects: bool = True):
+        self.url = url
+        self.on_message = on_message
+        self._connects = connects
+        self.session_id = "stub-session"
+        self.sent: list[bytes] = []
+        self.queued_chunks = 0
+        self.stopped = False
+        self.stats = type("S", (), {
+            "chunks_sent": 0, "chunks_dropped": 0, "errors": [],
+            "connects": 1, "disconnects": 0, "messages_received": 0,
+            "audio_seconds_sent": 0.0,
+        })()
+
+    async def run(self):
+        return None
+
+    async def wait_connected(self, timeout=10.0):
+        return self._connects
+
+    def send(self, chunk):
+        self.sent.append(chunk)
+        self.stats.chunks_sent += 1
+
+    async def stop(self, drain_timeout=0.0):
+        self.stopped = True
+
+
+def patch_stream(monkeypatch, connects: bool = True):
+    monkeypatch.setattr(harness, "LoopbackCapture", StubLoopbackCapture)
+    monkeypatch.setattr(
+        harness, "StreamClient",
+        lambda url, on_message=None: StubSocketClient(url, on_message, connects))
+
+
+def test_stream_for_runs_end_to_end_without_a_sound_card(monkeypatch, capsys):
+    patch_stream(monkeypatch)
+    report = harness.Report()
+    client, collected = asyncio.run(
+        harness.stream_for("ws://stub", None, 0.3, report))
+    assert client.sent, "no audio reached the client"
+    assert collected.stream_start > 0
+    assert report.failed == []
+    out = capsys.readouterr().out
+    assert "Loopback device opened" in out
+    assert "Capture:" in out          # the join that used to raise
+
+
+def test_stream_for_stops_the_capture_and_the_client(monkeypatch):
+    patch_stream(monkeypatch)
+    client, _collected = asyncio.run(
+        harness.stream_for("ws://stub", None, 0.3, harness.Report()))
+    assert StubLoopbackCapture.last.stopped
+    assert client.stopped
+
+
+def test_stream_for_stops_the_capture_even_when_the_loop_raises(monkeypatch):
+    """A device left running holds the endpoint open for the next run."""
+    patch_stream(monkeypatch)
+
+    async def explode(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(harness, "pump_audio", explode)
+    with pytest.raises(RuntimeError):
+        asyncio.run(harness.stream_for("ws://stub", None, 0.3, harness.Report()))
+    assert StubLoopbackCapture.last.stopped
+
+
+def test_a_handshake_that_never_completes_opens_no_device(monkeypatch):
+    patch_stream(monkeypatch, connects=False)
+    StubLoopbackCapture.last = None
+    report = harness.Report()
+    asyncio.run(harness.stream_for("ws://stub", None, 0.3, report))
+    assert [c.name for c in report.failed] == ["Handshake accepted"]
+    assert StubLoopbackCapture.last is None, "the device was opened anyway"

@@ -231,18 +231,8 @@ async def stream_for(url: str, device_hint: str | None, seconds: float,
 
     print(f"\n  Streaming {seconds:.0f} s - PLAY SPEECH NOW ...")
     collected.stream_start = time.perf_counter()
-    deadline = collected.stream_start + seconds
     try:
-        while time.perf_counter() < deadline:
-            chunk = await asyncio.to_thread(capture.read, 0.5)
-            if chunk is None:
-                continue
-            client.send(chunk)
-            elapsed = time.perf_counter() - collected.stream_start
-            print(f"\r  t={elapsed:5.1f}s  sent={client.stats.chunks_sent:<5d} "
-                  f"queue={client.queued_chunks:<3d} "
-                  f"dropped={client.stats.chunks_dropped}  "
-                  f"events={len(collected.vad_events)}", end="", flush=True)
+        gaps = await pump_audio(capture, client, collected, seconds)
     finally:
         capture.stop()
         await client.stop(drain_timeout=2.0)
@@ -250,6 +240,40 @@ async def stream_for(url: str, device_hint: str | None, seconds: float,
     print()
     report_capture_gaps(capture, gaps)
     return client, collected
+
+
+async def pump_audio(capture, client, collected: Collected,
+                     seconds: float) -> list[tuple[float, float]]:
+    """Read audio and send it, recording every stall in the reading.
+
+    Split out from :func:`stream_for` so it can be tested. Everything around
+    it needs a sound card and cannot run on the Dev PC, which is how a
+    NameError on this very loop reached the Windows machine and cost a whole
+    run: it is the one piece of this file no test had ever executed.
+
+    A returned gap is ``(seconds into the run, seconds waited)``. Audio that
+    would have filled a gap was never recorded at all, and that is not the
+    same thing as a slow server even though the two look identical in the lag
+    figures.
+    """
+    gaps: list[tuple[float, float]] = []
+    stall = CHUNK_DURATION_MS / 1000.0 * 2
+    deadline = collected.stream_start + seconds
+    while time.perf_counter() < deadline:
+        before = time.perf_counter()
+        chunk = await asyncio.to_thread(capture.read, 0.5)
+        waited = time.perf_counter() - before
+        if waited > stall:
+            gaps.append((before - collected.stream_start, waited))
+        if chunk is None:
+            continue
+        client.send(chunk)
+        elapsed = time.perf_counter() - collected.stream_start
+        print(f"\r  t={elapsed:5.1f}s  sent={client.stats.chunks_sent:<5d} "
+              f"queue={client.queued_chunks:<3d} "
+              f"dropped={client.stats.chunks_dropped}  "
+              f"events={len(collected.vad_events)}", end="", flush=True)
+    return gaps
 
 
 def report_capture_gaps(capture: LoopbackCapture,
