@@ -890,3 +890,74 @@ def test_a_dropped_connection_still_answers_its_last_sentence():
     assert finals
     assert [t["sentence_id"] for t in translations] == \
         [f["sentence_id"] for f in finals]
+
+
+# ---------------------------------------------------------------------------
+# The running text is where the time actually goes
+#
+# It runs every 600 ms on the whole open utterance, so a seven-second sentence
+# is decoded eleven times at growing lengths. Measuring only the finals, a
+# ten-minute run reported "slowest sentence 0.4 s" while the connection was
+# stalled for eleven seconds inside the partial path.
+# ---------------------------------------------------------------------------
+def test_the_running_text_is_timed_too():
+    session, _decoder, _backend = full_session([0.9] * 30)
+    for _ in range(6):
+        session.handle_binary(chunk())
+    assert "partial_asr" in session.stats.stage_seconds
+    assert session.stats.slowest_partial_seconds > 0
+
+
+def test_the_running_text_is_counted_apart_from_the_sentences():
+    """Folded together, a slow partial would read as a slow sentence and the
+    fix would be aimed at the wrong path."""
+    session, _decoder, _backend = full_session([0.9] * 14 + [0.02])
+    speak_then_pause(session)
+    assert "asr" in session.stats.stage_seconds
+    assert "partial_asr" in session.stats.stage_seconds
+    assert session.stats.stage_seconds["asr"] != \
+        session.stats.stage_seconds["partial_asr"]
+
+
+def test_slow_running_text_names_itself(caplog):
+    from server.pipeline.asr import Transcriber
+    from server.pipeline.translate import Translator
+
+    vad = ScriptedVAD([0.9] * 30)
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        transcriber=Transcriber(decoder=SlowDecoder(1.1)),
+        translator=Translator(backend=StubBackend()),
+        translation_inline=True,
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    with caplog.at_level(logging.WARNING, logger="server.net.session"):
+        for _ in range(6):
+            session.handle_binary(chunk())
+    assert "running text" in caplog.text
+    assert "held the socket for" in caplog.text
+    assert "partial_asr took" in caplog.text
+
+
+def test_fast_running_text_says_nothing(caplog):
+    session, _decoder, _backend = full_session([0.9] * 30)
+    with caplog.at_level(logging.WARNING, logger="server.net.session"):
+        for _ in range(6):
+            session.handle_binary(chunk())
+    assert "running text" not in caplog.text
+
+
+def test_the_partial_language_lookup_is_timed_as_well():
+    """It runs as often as the partial decode does."""
+    from server.pipeline.asr import Transcriber
+
+    vad = ScriptedVAD([0.9] * 30)
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        language_identifier=SwitchableLID("vi"),
+        transcriber=Transcriber(decoder=StubDecoder()),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    for _ in range(6):
+        session.handle_binary(chunk())
+    assert "partial_language" in session.stats.stage_seconds

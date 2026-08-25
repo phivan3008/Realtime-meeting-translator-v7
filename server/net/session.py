@@ -35,6 +35,7 @@ from common.protocol import (
     parse_message,
     validate_audio_chunk,
 )
+from server.config import SAMPLE_RATE
 from server.pipeline.asr import Transcriber
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
@@ -91,6 +92,10 @@ class ServerSessionStats:
     #: this is exactly the time the socket was not being read.
     stage_seconds: dict = field(default_factory=dict)
     slowest_utterance_seconds: float = 0.0
+    #: The same for the running text, counted apart. It runs every 600 ms on
+    #: the whole open utterance, so it does far more decoding than the finals
+    #: do, and folding the two together hides which one is slow.
+    slowest_partial_seconds: float = 0.0
 
     @property
     def audio_seconds(self) -> float:
@@ -441,22 +446,49 @@ class ServerSession:
         No speaker label goes out with it. Identity can wait for the final:
         showing a name and then correcting it reads worse than showing none.
         The language cannot wait, because it changes the text itself.
+
+        Timed separately from the committed sentences, and it has to be. This
+        runs every 600 ms on the *whole* open utterance, so a seven-second
+        sentence is decoded eleven times at growing lengths - far more work
+        than the one final decode. Measured only on finals, a ten-minute run
+        reported "slowest sentence 0.4 s" while the connection stalled for
+        eleven seconds inside this function.
         """
         if self.transcriber is None:
             return []
+        spent: dict[str, float] = {}
         lang_code = ""
         if self.language_identifier is not None:
             # A partial is a fragment of a sentence and shorter still than the
             # utterances the LID already struggles with, so the fallback below
             # matters more here, not less.
-            lang_code = self._language_for(
-                self.language_identifier.identify(partial.pcm))
-        transcript = self.transcriber.transcribe(partial.pcm, lang_code,
-                                                 is_final=False)
+            with self._timed("partial_language", spent):
+                decision = self.language_identifier.identify(partial.pcm)
+            lang_code = self._language_for(decision)
+        with self._timed("partial_asr", spent):
+            transcript = self.transcriber.transcribe(partial.pcm, lang_code,
+                                                     is_final=False)
+        self._report_if_partial_slow(partial, spent)
         if not transcript.has_text:
             return []
         self.stats.transcripts += 1
         return [make_partial("", transcript.lang_code, transcript.text)]
+
+    def _report_if_partial_slow(self, partial, spent: dict) -> None:
+        """Say so when the running text is what held up the connection."""
+        total = sum(spent.values())
+        self.stats.slowest_partial_seconds = max(
+            self.stats.slowest_partial_seconds, total)
+        if total < SLOW_UTTERANCE_SECONDS:
+            return
+        worst = max(spent, key=spent.get)
+        log.warning(
+            "Session %s: running text for %.1f s of audio held the socket "
+            "for %.1f s - %s took %.1f s of it. Breakdown: %s",
+            self.session_id or "?", len(partial.pcm) / 2 / SAMPLE_RATE,
+            total, worst, spent[worst],
+            {stage: round(value, 2) for stage, value in spent.items()},
+        )
 
     # -- teardown -----------------------------------------------------------
     def finish(self) -> Response:

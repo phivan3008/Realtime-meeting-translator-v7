@@ -296,6 +296,17 @@ ASR_HALLUCINATION_PATTERNS = (
     # exact line it also appears as above.
     r"h[ãa]y đ[ăa]ng k[ýy] k[êe]nh( .{1,40})? đ[ểe] [ủu]ng h[ộo] "
     r"k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?",
+    # Three variants of one shape in a single ten-minute run, all caught by
+    # no_speech_prob rather than by policy:
+    #
+    #     Các bạn có thể nhớ like, share và đăng ký kênh để ủng hộ kênh...
+    #     Các bạn có thể nhớ like và share video này để ủng hộ kênh của...
+    #     Các bạn có thể nhớ đăng ký kênh để ủng hộ kênh của mình nhé.
+    #
+    # The middle clause is the hole this time, not a channel name. Being
+    # caught by a statistical guard is luck; the same lines have arrived
+    # confident before.
+    r"c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,30}",
 )
 
 # What none of this can do: it only knows what has already been seen, whether

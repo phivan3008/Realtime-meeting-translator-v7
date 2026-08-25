@@ -449,3 +449,40 @@ def test_pattern_normalising_keeps_words_apart():
     cannot."""
     from server.pipeline.asr import normalise_for_pattern
     assert normalise_for_pattern("Hãy  subscribe   cho kênh!") ==         "hãy subscribe cho kênh"
+
+
+@pytest.mark.parametrize("line", [
+    "C\u00e1c b\u1ea1n c\u00f3 th\u1ec3 nh\u1edb like, share v\u00e0 "
+    "\u0111\u0103ng k\u00fd k\u00eanh \u0111\u1ec3 \u1ee7ng h\u1ed9 "
+    "k\u00eanh c\u1ee7a m\u00ecnh nh\u00e9.",
+    "C\u00e1c b\u1ea1n c\u00f3 th\u1ec3 nh\u1edb like v\u00e0 share video "
+    "n\u00e0y \u0111\u1ec3 \u1ee7ng h\u1ed9 k\u00eanh c\u1ee7a m\u00ecnh",
+    "C\u00e1c b\u1ea1n c\u00f3 th\u1ec3 nh\u1edb \u0111\u0103ng k\u00fd "
+    "k\u00eanh \u0111\u1ec3 \u1ee7ng h\u1ed9 k\u00eanh c\u1ee7a m\u00ecnh "
+    "nh\u00e9.",
+])
+def test_the_like_and_share_pitch_is_caught_in_all_its_variants(line):
+    """Three variants of one shape in a single ten-minute run. The middle
+    clause is the hole this time, not a channel name."""
+    assert make([confident(line)]).transcribe(audio()).text == ""
+
+
+@pytest.mark.parametrize("said", [
+    "C\u00e1c b\u1ea1n c\u00f3 th\u1ec3 nh\u1edb g\u1eedi t\u00e0i li\u1ec7u "
+    "cho t\u00f4i",
+    "C\u00e1c b\u1ea1n c\u00f3 th\u1ec3 nh\u1edb m\u1edf k\u00eanh Teams "
+    "l\u00ean kh\u00f4ng",
+])
+def test_a_meeting_reminding_people_of_something_survives(said):
+    assert make([confident(said)]).transcribe(audio()).text == said
+
+
+def test_these_were_only_caught_by_luck_before():
+    """Every one of them was refused by no_speech_prob on that run. The same
+    lines have arrived confident on other runs, and a statistical guard that
+    happens to fire is not a policy."""
+    line = ("C\u00e1c b\u1ea1n c\u00f3 th\u1ec3 nh\u1edb \u0111\u0103ng "
+            "k\u00fd k\u00eanh \u0111\u1ec3 \u1ee7ng h\u1ed9 k\u00eanh "
+            "c\u1ee7a m\u00ecnh nh\u00e9.")
+    kept = make([confident(line)], hallucination_patterns=())
+    assert kept.transcribe(audio()).text == line

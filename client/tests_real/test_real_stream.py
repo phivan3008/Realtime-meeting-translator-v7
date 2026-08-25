@@ -533,6 +533,8 @@ INVENTED_PATTERNS = (
     r"đ[ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[ữu]ng video h[ấa]p d[ẫa]n",
     r"h[ãa]y đ[ăa]ng k[ýy] k[êe]nh( .{1,40})? đ[ểe] [ủu]ng h[ộo] "
     r"k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?",
+    # Three variants of one shape in a single ten-minute run.
+    r"c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,30}",
 )
 _PUNCTUATION = re.compile(
     r"[.,!?;:\-‐-―、。・！？，．"
