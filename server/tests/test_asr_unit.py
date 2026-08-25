@@ -369,3 +369,26 @@ def test_a_meeting_asking_people_to_subscribe_survives():
     real = ("H\u00e3y subscribe cho k\u00eanh c\u1ee7a b\u00ean m\u00ecnh "
             "nh\u00e9")
     assert make([confident(real)]).transcribe(audio()).text == real
+
+
+def test_the_second_youtube_pitch_is_refused():
+    """Committed as a sentence at 7.6 s of the ninth run and translated into
+    Japanese before anybody noticed."""
+    pitch = ("H\u00e3y \u0111\u0103ng k\u00fd k\u00eanh \u0111\u1ec3 "
+             "\u1ee7ng h\u1ed9 k\u00eanh c\u1ee7a m\u00ecnh nh\u00e9.")
+    assert make([confident(pitch)]).transcribe(audio()).text == ""
+
+
+def test_a_meeting_asking_people_to_subscribe_to_something_else_survives():
+    real = ("H\u00e3y \u0111\u0103ng k\u00fd k\u00eanh Teams cho d\u1ef1 "
+            "\u00e1n n\u00e0y")
+    assert make([confident(real)]).transcribe(audio()).text == real
+
+
+def test_the_list_does_not_catch_a_reworded_pitch():
+    """Not a bug, a limit, and one worth stating: whole-segment matching means
+    the same invention with one word changed walks straight through. Two new
+    YouTube lines in two runs is what that costs."""
+    reworded = ("H\u00e3y \u0111\u0103ng k\u00fd k\u00eanh \u0111\u1ec3 "
+                "\u1ee7ng h\u1ed9 k\u00eanh c\u1ee7a m\u00ecnh")   # no "nhé."
+    assert make([confident(reworded)]).transcribe(audio()).text == reworded

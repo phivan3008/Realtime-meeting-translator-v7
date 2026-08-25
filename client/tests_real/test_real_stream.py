@@ -539,7 +539,12 @@ def check_transcripts(collected: Collected, report: Report) -> None:
               f"#{sentence_id} "
               f"{payload.get('speaker_id') or '?':<16} "
               f"[{payload.get('lang_code') or '?'}]")
-        print(f"        said      : {payload.get('transcript', '')}")
+        # The noise filter's verdict on the audio, printed next to what
+        # Whisper made of it. Sign-offs have come from utterances scored 0.03
+        # while real sentences scored 0.66 and up; a few more runs decides
+        # whether that separation holds.
+        print(f"        said      : {payload.get('transcript', '')}"
+              f"   [speech {payload.get('speech_score', 0.0):.2f}]")
         translation = collected.translation_for(sentence_id)
         if translation is None:
             # Not "refused" - never answered at all. A different failure, and
@@ -632,6 +637,16 @@ def check_transcripts(collected: Collected, report: Report) -> None:
     # How far the translations drift behind their sentences. This is the
     # number the split exists to keep small, and the one that would grow if
     # the queue ever started falling behind.
+    # Every sentence's speech score, sorted, so the gap between what the
+    # classifier heard in real speech and in an invention is visible at a
+    # glance and can be argued with.
+    scores = sorted(m.get("speech_score", 0.0) for _t, m in finals)
+    if scores:
+        print(f"\n  Speech score of each committed sentence, lowest first: "
+              f"{[round(value, 2) for value in scores]}")
+        print("    Whisper's inventions have come from the low end. Read the "
+              "lowest few above and see whether anybody said them.")
+
     lags = [seconds for _sid, seconds in collected.translation_lags()]
     if lags:
         print(f"\n  Translation lag behind its sentence: "

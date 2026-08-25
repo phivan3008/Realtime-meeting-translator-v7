@@ -150,14 +150,23 @@ def test_partial_matches_the_design_md_shape():
 
 
 def test_final_matches_the_design_md_shape():
-    payload = json.loads(make_final(7, "Speaker_01", "vi", "Xin chào."))
+    payload = json.loads(make_final(7, "Speaker_01", "vi", "Xin chào.", 0.86))
     assert payload == {
         "type": "final",
         "sentence_id": 7,
         "speaker_id": "Speaker_01",
         "lang_code": "vi",
         "transcript": "Xin chào.",
+        "speech_score": 0.86,
     }
+
+
+def test_a_sentence_carries_what_the_noise_filter_thought_of_it():
+    """A Whisper sign-off reached the screen from audio the classifier scored
+    0.03, while every real sentence in the same run scored 0.66 or better.
+    Nothing can use that pairing until it travels with the sentence."""
+    assert json.loads(
+        make_final(1, "Speaker_01", "vi", "x", 0.03))["speech_score"] == 0.03
 
 
 def test_a_final_carries_no_translation():

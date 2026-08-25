@@ -251,6 +251,18 @@ ASR_HALLUCINATIONS = (
     # person reading the output found it.
     "H\u00e3y subscribe cho k\u00eanh Ghi\u1ec1n M\u00ec G\u00f5 "
     "\u0110\u1ec3 kh\u00f4ng b\u1ecf l\u1ee1 nh\u1eefng video h\u1ea5p d\u1eabn",
+    # A committed sentence at 7.6 s of the ninth end-to-end run, translated
+    # into Japanese and shown to the reader. The utterance it came from scored
+    # 0.03 for speech, while every real sentence in that run scored 0.66 or
+    # better.
+    #
+    # Second new YouTube line in two runs. This list is not keeping up and
+    # cannot: it only ever knows what has already been seen. That score is a
+    # signal that needs no list, which is why `speech_score` now travels with
+    # every sentence - so the separation can be measured over real runs
+    # instead of assumed from one.
+    "H\u00e3y \u0111\u0103ng k\u00fd k\u00eanh \u0111\u1ec3 \u1ee7ng h\u1ed9 "
+    "k\u00eanh c\u1ee7a m\u00ecnh nh\u00e9.",
 )
 
 # What this list cannot do: it only knows what has already been seen. Every

@@ -389,6 +389,7 @@ class ServerSession:
                     speaker_id=speaker_id,
                     lang_code=transcript.lang_code,
                     transcript=transcript.text,
+                    speech_score=score,
                 ))
                 if self.worker is not None:
                     # The history is remembered here rather than inside the

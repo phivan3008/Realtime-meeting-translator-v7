@@ -215,7 +215,7 @@ def make_partial(speaker_id: str, lang_code: str, transcript: str) -> str:
 
 
 def make_final(sentence_id: int, speaker_id: str, lang_code: str,
-               transcript: str) -> str:
+               transcript: str, speech_score: float = 0.0) -> str:
     """DESIGN.md section 4: a committed sentence, as soon as it exists.
 
     No translation here. The sentence is worth showing the moment Whisper
@@ -235,6 +235,15 @@ def make_final(sentence_id: int, speaker_id: str, lang_code: str,
             "speaker_id": speaker_id,
             "lang_code": lang_code,
             "transcript": transcript,
+            # What the noise filter thought of the audio this came from.
+            # Whisper invents sentences out of near-silence and does it
+            # confidently, so nothing in its own numbers separates one from
+            # real speech - but the classifier scored the audio before Whisper
+            # ever saw it. A sign-off that reached the screen came from an
+            # utterance scored 0.03 while every real sentence in the same run
+            # scored 0.66 or better. Carried here so that pairing can be
+            # measured over real runs rather than guessed at.
+            "speech_score": speech_score,
         },
         ensure_ascii=False,
     )

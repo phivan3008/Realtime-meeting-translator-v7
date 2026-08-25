@@ -444,11 +444,12 @@ def test_each_missing_stage_is_named(flag, name):
 # Transcripts and translations
 # ---------------------------------------------------------------------------
 def final(transcript: str = "xin chào", speaker: str = "Speaker_01",
-          lang: str = "vi", sentence_id: int = 1) -> dict:
+          lang: str = "vi", sentence_id: int = 1,
+          speech_score: float = 0.85) -> dict:
     """A committed sentence. No translation - that is its own message now."""
     return {"type": "final", "sentence_id": sentence_id,
             "speaker_id": speaker, "lang_code": lang,
-            "transcript": transcript}
+            "transcript": transcript, "speech_score": speech_score}
 
 
 def translation(text: str = "こんにちは", sentence_id: int = 1,
@@ -1110,3 +1111,40 @@ def test_a_handshake_that_never_completes_opens_no_device(monkeypatch):
     asyncio.run(harness.stream_for("ws://stub", None, 0.3, report))
     assert [c.name for c in report.failed] == ["Handshake accepted"]
     assert StubLoopbackCapture.last is None, "the device was opened anyway"
+
+
+# ---------------------------------------------------------------------------
+# What the noise filter thought of each sentence
+#
+# Two new YouTube sign-offs in two runs says the blocklist cannot keep up, and
+# it cannot: it only knows what has been seen. The classifier scored the audio
+# before Whisper saw it, and the one that reached the screen came from an
+# utterance scored 0.03 against 0.66 and up for real speech. Collecting that
+# pairing is the point of these.
+# ---------------------------------------------------------------------------
+def test_the_speech_score_is_printed_beside_the_sentence(capsys):
+    harness.check_transcripts(
+        collected_of((1.0, partial()), *sentence()), harness.Report())
+    assert "[speech 0.85]" in capsys.readouterr().out
+
+
+def test_the_scores_are_listed_lowest_first(capsys):
+    messages = [(1.0, partial())]
+    for index, score in enumerate([0.88, 0.03, 0.66], start=1):
+        messages += sentence(sentence_id=index, at=2.0 + index,
+                             transcript=f"line {index}")
+        messages[-2] = (messages[-2][0],
+                        {**messages[-2][1], "speech_score": score})
+    harness.check_transcripts(collected_of(*messages), harness.Report())
+    assert "lowest first: [0.03, 0.66, 0.88]" in capsys.readouterr().out
+
+
+def test_a_sentence_without_a_score_does_not_crash_the_report(capsys):
+    """An older server, or a message from before the field existed."""
+    bare = {"type": "final", "sentence_id": 1, "speaker_id": "Speaker_01",
+            "lang_code": "vi", "transcript": "xin chào"}
+    harness.check_transcripts(
+        collected_of((1.0, partial()), (2.0, bare),
+                     (2.3, translation(sentence_id=1))),
+        harness.Report())
+    assert "[speech 0.00]" in capsys.readouterr().out
