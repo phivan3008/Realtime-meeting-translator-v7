@@ -174,6 +174,12 @@ class LanguageIdentifier:
                 f"the model reported nothing for {missing}",
             ))
 
+        if len(wanted) < 2:
+            return self._record(LanguageDecision(
+                LID_UNKNOWN, 0.0, 0.0,
+                f"only one language configured: {sorted(wanted)}",
+            ))
+
         probabilities = two_way_probabilities(wanted)
         ranked = sorted(probabilities.items(), key=lambda item: item[1],
                         reverse=True)

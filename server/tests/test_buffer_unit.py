@@ -411,3 +411,27 @@ def test_the_cap_is_below_the_max_utterance():
     """Above it the cap would never fire and nothing would change."""
     from server.config import FINALIZE_MAX_DURATION_MS, PARTIAL_WINDOW_SECONDS
     assert PARTIAL_WINDOW_SECONDS * 1000 < FINALIZE_MAX_DURATION_MS
+
+
+def test_flushing_an_empty_open_utterance_keeps_the_numbering():
+    """A flush must not renumber the meeting from zero: sentence ids are
+    handed to the client and a translation is matched by them."""
+    manager = BufferManager()
+    manager.push(SegmenterOutput(spans=[
+        AudioSpan(pcm=bytes(FRAME_BYTES * 30), start_ms=0.0,
+                  opens_segment=True, closes_segment=True),
+    ]))
+    assert manager.open_index == 1
+    manager.flush()
+    assert manager.open_index == 1
+
+
+def test_flushing_leaves_no_half_open_state():
+    manager = BufferManager()
+    manager.push(SegmenterOutput(spans=[
+        AudioSpan(pcm=bytes(FRAME_BYTES * 30), start_ms=0.0,
+                  opens_segment=True),
+    ]))
+    manager.flush()
+    assert not manager.is_open
+    assert manager.flush().finals == []

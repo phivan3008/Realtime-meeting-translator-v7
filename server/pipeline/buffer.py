@@ -180,6 +180,12 @@ class BufferManager:
         self.stats = BufferStats()
         self._reset_state()
 
+    def _discard_open(self) -> None:
+        """Forget the open utterance, keeping the session's numbering."""
+        self._pcm = bytearray()
+        self._start_ms = None
+        self._continues = False
+
     def _reset_state(self) -> None:
         self._pcm = bytearray()
         self._start_ms: Optional[float] = None
@@ -228,8 +234,7 @@ class BufferManager:
                     result.finals.append(self._finalize(FinalizeReason.PAUSE))
                 else:
                     # A length cut consumed everything just before the close.
-                    self._start_ms = None
-                    self._continues = False
+                    self._discard_open()
 
         result.partial = self._maybe_partial()
         if result.partial is not None:
@@ -246,7 +251,7 @@ class BufferManager:
               ) -> BufferOutput:
         """Commit whatever is still open, at the end of a session."""
         if not self.is_open or not self._pcm:
-            self._start_ms = None
+            self._discard_open()
             return BufferOutput()
         return BufferOutput(finals=[self._finalize(reason)])
 
