@@ -30,7 +30,7 @@ Handshake
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
@@ -307,17 +307,3 @@ def validate_audio_chunk(data: bytes) -> None:
             f"({CHUNK_DURATION_MS} ms at {SAMPLE_RATE} Hz mono 16-bit), "
             f"got {len(data)}"
         )
-
-
-@dataclass
-class SessionStats:
-    """Counters both sides keep so a run can be compared end to end."""
-
-    chunks: int = 0
-    bytes_transferred: int = 0
-    control_messages: int = 0
-    errors: list[str] = field(default_factory=list)
-
-    @property
-    def audio_seconds(self) -> float:
-        return self.bytes_transferred / SAMPLE_WIDTH / SAMPLE_RATE

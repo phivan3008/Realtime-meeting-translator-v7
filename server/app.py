@@ -18,7 +18,6 @@ changes, the fix is a pool of pre-loaded models, not a shared one.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
