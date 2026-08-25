@@ -195,6 +195,45 @@ Gắn `Speaker_unknown` chứ **không đoán theo người nói trước**: câ
 thường là của người đang *nghe*, nên phép đoán đó sai đúng vào chỗ nó hấp dẫn
 nhất.
 
+### Gom cụm lại — sửa nhãn đã gán
+
+| Thông số | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `SPEAKER_RECLUSTER_EVERY` | `15` | Cứ bấy nhiêu câu thì gom cụm lại cả cuộc họp |
+| `SPEAKER_RECLUSTER_MAX` | `300` | Số voiceprint giữ lại; chi phí tăng theo bình phương |
+
+`SpeakerIdentifier` phải trả lời **ngay**, từ một voiceprint, dựa trên những
+gì đã nghe **tính đến lúc đó**. Hai thứ nó sai mà không ngưỡng nào chữa được:
+
+- câu trả lời **phụ thuộc thứ tự** cuộc họp diễn ra. Câu đầu tiên không có gì
+  để so nên luôn tạo người mới; các câu sau so với centroid đã dịch chuyển.
+- trả lời rồi là xong. Một nhầm lẫn ở phút đầu sống sót qua mười phút bằng
+  chứng phía sau.
+
+> **Đo được (họp thật, hơn 4 phút):** mọi câu đều ra `Speaker_01`. Cơ chế là
+> `_update` chạy với **mọi** lần khớp, kể cả lần vừa đủ 0.31, và kéo centroid
+> 30% về phía đó. Gán một utterance trộn giọng vào một người làm centroid
+> người đó pha thêm, pha thêm thì khớp được nhiều người hơn. Vòng lặp dương,
+> không có gì kéo ngược.
+
+Gom cụm nhìn **cả cuộc họp cùng lúc** nên không phụ thuộc thứ tự, và sửa được
+nhãn đã lỡ gán. Thuật toán là agglomerative liên kết trung bình trên cosine,
+cắt tại đúng `SPEAKER_MATCH_THRESHOLD` — cùng con số đã đo, áp lên đúng loại
+voiceprint cả câu mà nó được đo trên đó. Liên kết **trung bình** chứ không
+phải gần nhất: một câu ở ranh giới không được phép nối hai người thành một.
+
+Nhãn được chọn để **đứng yên**: mỗi cụm giữ cái tên mà phần lớn thành viên của
+nó đang mang, nên một lần sửa chỉ dịch chuyển vài câu sai chứ không đổi tên
+tất cả. Khi hai cụm cùng đòi một tên, cụm lớn giữ.
+
+Server gửi lại message `speakers` chứa `{sentence_id: speaker_id}`, chỉ những
+hàng đổi. Client khoá hàng theo `sentence_id` nên sửa tại chỗ.
+
+- `SPEAKER_RECLUSTER_EVERY` giảm: sửa nhanh hơn, tốn CPU trên **luồng đọc
+  socket** thường xuyên hơn. Thời gian đo được nằm ở `stages` mục `recluster`.
+- `SPEAKER_RECLUSTER_MAX` tăng: cụm chính xác hơn với họp dài, nhưng chi phí
+  gom cụm tăng theo **bình phương**.
+
 **Voiceprint lấy từ audio thô**, chưa qua tầng chồng lấn.
 
 > **Đo được:** gate trước khi trích voiceprint làm mất **0.06** cosine

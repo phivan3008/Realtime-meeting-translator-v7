@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
+import numpy as np
+
 from common.protocol import (
     ClientMessage,
     Hello,
@@ -30,6 +32,7 @@ from common.protocol import (
     make_translation,
     make_partial,
     make_ready,
+    make_speakers,
     make_utterance,
     make_vad,
     parse_message,
@@ -46,6 +49,7 @@ from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
+from server.pipeline.reclustering import SpeakerHistory
 from server.pipeline.speaker_change import SpeakerChangeDetector
 from server.pipeline.translate import Translator, Turn
 from server.pipeline.translation_queue import TranslationWorker
@@ -82,6 +86,8 @@ class ServerSessionStats:
     #: Sentences ended because a second voice took over rather than because
     #: anybody paused.
     speaker_changes: int = 0
+    #: Labels the live matcher got wrong and clustering put right.
+    speaker_corrections: int = 0
     utterances_with_language: int = 0
     transcripts: int = 0
     translations: int = 0
@@ -135,6 +141,8 @@ class Analysis:
     label: str = ""                 # what it sounded like, when dropped
     speech_score: float = 0.0
     speaker_id: str = ""
+    #: Kept for reclustering the meeting later, not used by any other stage.
+    voiceprint: Optional[np.ndarray] = None
     lang_code: str = ""
     transcript: Optional[Transcript] = None
 
@@ -170,6 +178,9 @@ class ServerSession:
             if self.speaker_identifier is not None and SPEAKER_CHANGE_ENABLED
             else None
         )
+        #: Second thoughts about the labels the live matcher gave out.
+        self.speaker_history = (SpeakerHistory()
+                                if self.speaker_identifier is not None else None)
         self.language_identifier = self.stages.language_identifier
         self.transcriber = self.stages.transcriber
         self.translator = self.stages.translator
@@ -247,6 +258,8 @@ class ServerSession:
             self.speaker_identifier.reset()
         if self.speaker_change is not None:
             self.speaker_change.reset()
+        if self.speaker_history is not None:
+            self.speaker_history.reset()
         if self.language_identifier is not None:
             self.language_identifier.reset()
         if self.transcriber is not None:
@@ -387,9 +400,27 @@ class ServerSession:
             self.stats.partials += 1
             messages += self._transcribe_partial(result.partial)
 
+        messages += self._recluster_speakers()
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
         return messages
+
+    def _recluster_speakers(self) -> list[str]:
+        """Cluster the meeting again and send back the labels that moved.
+
+        The live matcher answers each sentence from what it had heard by then.
+        Clustering sees the whole meeting at once, so it does not depend on
+        the order things were said in, and it can undo a mistake made in the
+        first minute.
+        """
+        if self.speaker_history is None or not self.speaker_history.due:
+            return []
+        with self._timed("recluster", {}):
+            corrections = self.speaker_history.recluster()
+        if not corrections:
+            return []
+        self.stats.speaker_corrections += len(corrections)
+        return [make_speakers(corrections)]
 
     def _analyse(self, utterance, spent: dict) -> "Analysis":
         """Every stage that reads audio, in order, for one utterance."""
@@ -420,6 +451,7 @@ class ServerSession:
             with self._timed("speaker", spent):
                 assignment = self.speaker_identifier.identify(utterance.pcm)
             found.speaker_id = assignment.speaker_id
+            found.voiceprint = assignment.embedding
             self.stats.utterances_identified += 1
             # The score is what decides whether two turns are one person.
             # Logged so a real meeting can be read back for where the
@@ -462,6 +494,9 @@ class ServerSession:
     def _commit_sentence(self, found: "Analysis") -> list[str]:
         """Send the sentence now and queue its translation to follow."""
         self._sentences += 1
+        if self.speaker_history is not None and found.voiceprint is not None:
+            self.speaker_history.add(self._sentences, found.voiceprint,
+                                     found.speaker_id)
         transcript = found.transcript
         messages = [make_final(
             sentence_id=self._sentences,

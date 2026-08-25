@@ -275,6 +275,12 @@ def _log_summary(session: ServerSession) -> None:
                                     key=lambda kv: -kv[1])},
         stats.translations_dropped, stats.worst_translation_lag,
     )
+    if session.speaker_history is not None:
+        history = session.speaker_history.stats
+        log.info("Session %s speakers: %d after %d reclustering runs, "
+                 "%d labels corrected",
+                 session.session_id or "?", history.speakers, history.runs,
+                 history.corrections)
     _log_voice_scores(session)
 
 

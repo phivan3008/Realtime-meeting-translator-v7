@@ -30,6 +30,7 @@ chunk 200 ms ─────────►   3. Noise Filter (AST)     bỏ ti�
                           6. Language ID            tiếng Việt hay tiếng Nhật
                           7. ASR (Whisper large-v3) chuyển thành chữ
       ◄──── final ────    8. Translation (Qwen/vLLM)  chạy ngoài luồng audio
+      ◄── speakers ───   (5b) gom cụm lại       sửa nhãn người nói đã gửi
       ◄─ translation ──
 ```
 

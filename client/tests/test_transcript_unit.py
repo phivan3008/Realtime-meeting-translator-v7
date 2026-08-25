@@ -214,3 +214,36 @@ def test_apply_returns_the_row_that_changed():
     assert isinstance(added, Sentence) and added.sentence_id == 4
     updated = model.apply(translation(sentence_id=4))
     assert updated is added
+
+
+# ---------------------------------------------------------------------------
+# Second thoughts about who said what
+# ---------------------------------------------------------------------------
+def test_a_corrected_speaker_reaches_the_row_already_on_screen():
+    model = TranscriptModel()
+    model.apply({"type": "final", "sentence_id": 4, "speaker_id": "Speaker_01",
+                 "lang_code": "vi", "transcript": "Xin chào."})
+    model.apply({"type": "speakers", "labels": {"4": "Speaker_03"}})
+    assert model.sentences[0].speaker_id == "Speaker_03"
+
+
+def test_a_correction_for_a_row_that_scrolled_away_is_ignored():
+    model = TranscriptModel(max_rows=1)
+    model.apply({"type": "final", "sentence_id": 1, "speaker_id": "Speaker_01",
+                 "lang_code": "vi", "transcript": "Câu một."})
+    model.apply({"type": "final", "sentence_id": 2, "speaker_id": "Speaker_01",
+                 "lang_code": "vi", "transcript": "Câu hai."})
+    model.apply({"type": "speakers", "labels": {"1": "Speaker_09"}})
+    assert [s.speaker_id for s in model.sentences] == ["Speaker_01"]
+
+
+def test_corrections_change_the_speaker_count():
+    """Two people merged into one is what this exists to undo."""
+    model = TranscriptModel()
+    for index in (1, 2, 3):
+        model.apply({"type": "final", "sentence_id": index,
+                     "speaker_id": "Speaker_01", "lang_code": "vi",
+                     "transcript": f"Câu {index}."})
+    assert model.speakers() == ["Speaker_01"]
+    model.apply({"type": "speakers", "labels": {"2": "Speaker_02"}})
+    assert model.speakers() == ["Speaker_01", "Speaker_02"]

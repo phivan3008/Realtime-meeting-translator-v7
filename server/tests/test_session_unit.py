@@ -28,7 +28,7 @@ from common.protocol import (
     make_ready,
 )
 from server.net.session import ServerSession, SessionState
-from server.pipeline.diarization import SpeakerIdentifier
+from server.pipeline.diarization import SpeakerIdentifier, SpeakerRegistry
 from server.pipeline.noise import Classification, NoiseFilter
 from server.pipeline.vad import VAD_FRAME_SAMPLES, VADEvent, VADSegmenter
 
@@ -1101,3 +1101,61 @@ def test_the_cut_is_off_unless_asked_for():
 
 def test_without_a_speaker_identifier_there_is_nothing_to_compare(cutting_on):
     assert make_session().speaker_change is None
+
+
+# ---------------------------------------------------------------------------
+# Second thoughts about who said what
+# ---------------------------------------------------------------------------
+def merged_session() -> ServerSession:
+    """A session whose live matcher merges everybody, as reported from a real
+    meeting: after four minutes every sentence was Speaker_01.
+
+    The buffer cuts every second so a few chunks make several sentences -
+    with nobody pausing, the only other boundary is the seven-second limit.
+    """
+    from server.pipeline.asr import Transcriber
+    from server.pipeline.buffer import BufferManager
+
+    vad = ScriptedVAD((0.9,))
+    return ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        buffer_factory=lambda: BufferManager(max_duration_ms=1_000,
+                                             partial_interval_ms=600,
+                                             split_search_ms=200),
+        transcriber=Transcriber(decoder=StubDecoder()),
+        speaker_identifier=SpeakerIdentifier(
+            embedder=VoiceByVolume(),
+            registry=SpeakerRegistry(match_threshold=-1.0)),
+    )
+
+
+def test_the_meeting_is_clustered_again_and_the_labels_come_back():
+    """The live matcher merged two voices; clustering pulls them apart."""
+    session = merged_session()
+    session.speaker_history.every = 1
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 10, LOUD) + speak(session, 10, QUIET)
+    payloads += [json.loads(m) for m in session.finish().messages]
+
+    corrections = [p for p in payloads if p["type"] == "speakers"]
+    assert corrections, "no second thoughts were ever sent"
+    labels = {}
+    for payload in corrections:
+        labels.update(payload["labels"])
+    finals = {str(p["sentence_id"]): p["speaker_id"]
+              for p in payloads if p["type"] == "final"}
+    for key, value in labels.items():
+        finals[key] = value
+    assert len(set(finals.values())) == 2, "the two voices stayed merged"
+
+
+def test_nothing_is_sent_when_the_labels_were_already_right():
+    session = merged_session()
+    session.speaker_history.every = 1
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 20, LOUD)
+    assert [p for p in payloads if p["type"] == "speakers"] == []
+
+
+def test_a_session_without_a_speaker_model_has_nothing_to_recluster():
+    assert make_session().speaker_history is None

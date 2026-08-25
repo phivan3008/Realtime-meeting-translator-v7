@@ -157,11 +157,12 @@ class MeetingWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def on_message(self, message: dict) -> None:
+        kind = message.get("type")
         changed = self.model.apply(message)
-        if message.get("type") == "partial":
+        if kind == "partial":
             self._show_running_text()
             return
-        if changed is not None or message.get("type") == "utterance":
+        if changed is not None or kind in {"utterance", "speakers"}:
             self._show_running_text()
             self._redraw()
 

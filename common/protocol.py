@@ -67,6 +67,7 @@ class ServerMessage(str, Enum):
     #: showing the moment it is transcribed, and waiting for an LLM to answer
     #: before saying anything holds up the whole connection.
     TRANSLATION = "translation"
+    SPEAKERS = "speakers"
     ERROR = "error"
 
 
@@ -263,6 +264,24 @@ def make_translation(sentence_id: int, translation: str, reason: str = "",
             "translation": translation,
             "reason": reason,
             "raw": raw,
+        },
+        ensure_ascii=False,
+    )
+
+
+def make_speakers(labels: dict[int, str]) -> str:
+    """Corrected speaker labels for sentences already sent.
+
+    The live matcher answers each sentence from what it had heard by then, so
+    its answer depends on the order the meeting happened in and can never be
+    revised. Clustering the whole meeting again gives a better one, and this
+    carries it back: ``{sentence_id: speaker_id}``, only for the rows that
+    changed.
+    """
+    return json.dumps(
+        {
+            "type": ServerMessage.SPEAKERS.value,
+            "labels": {str(key): value for key, value in labels.items()},
         },
         ensure_ascii=False,
     )

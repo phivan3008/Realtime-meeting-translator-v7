@@ -29,7 +29,7 @@ Layering:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Protocol
 
@@ -86,6 +86,10 @@ class Assignment:
     similarity: float
     is_new: bool
     reason: str
+    #: The voiceprint this answer came from, for clustering the meeting again
+    #: later. Out of comparisons: an array has no useful equality.
+    embedding: Optional[np.ndarray] = field(default=None, compare=False,
+                                            repr=False)
 
 
 class SpeakerRegistry:
@@ -285,6 +289,7 @@ class SpeakerIdentifier:
             return assignment
 
         assignment = self.registry.assign(embedding)
+        assignment = replace(assignment, embedding=embedding)
         self.stats.record(assignment)
         return assignment
 

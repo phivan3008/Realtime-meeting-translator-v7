@@ -91,6 +91,12 @@ SPEAKER_CENTROID_MOMENTUM = 0.7
 #: listening.
 SPEAKER_UNKNOWN = "Speaker_unknown"
 
+# Second thoughts: the whole meeting is clustered again every this many
+# sentences, and corrected labels are sent back. Cost grows with the square
+# of the number of voiceprints kept.
+SPEAKER_RECLUSTER_EVERY = 15
+SPEAKER_RECLUSTER_MAX = 300
+
 # --- 5b. Speaker change boundary (DESIGN.md 3.2) ----------------------------
 # Two people whose turns are less than VAD_MIN_SILENCE_MS apart land in one
 # utterance, which then gets one voiceprint, one language and one ASR pass.

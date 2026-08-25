@@ -7,6 +7,7 @@ arrive in the order they are displayed:
 ``final``       a committed sentence, with a ``sentence_id``
 ``translation`` its translation, arriving separately and matched by that id
 ``utterance``   a sentence boundary, including ones the noise filter dropped
+``speakers``    corrected labels for sentences already on screen
 
 A translation can arrive before the reader has finished the sentence, after
 several later sentences, or never - the server always answers, but the answer
@@ -80,9 +81,25 @@ class TranscriptModel:
             return self._add_sentence(message)
         if kind == "translation":
             return self._attach_translation(message)
+        if kind == "speakers":
+            self._relabel(message.get("labels", {}))
+            return None
         if kind == "utterance" and not message.get("kept", True):
             self.dropped += 1
         return None
+
+    def _relabel(self, labels: dict) -> None:
+        """Second thoughts from the server about who said what.
+
+        The live matcher answers each sentence from what it had heard by then;
+        clustering the whole meeting gives a better answer and can revise one
+        it already gave. Rows are keyed by id at both ends, so this is an
+        update to what is already on screen.
+        """
+        for key, speaker_id in labels.items():
+            sentence = self._by_id.get(int(key))
+            if sentence is not None:
+                sentence.speaker_id = speaker_id
 
     def _add_sentence(self, message: dict) -> Sentence:
         sentence = Sentence(
