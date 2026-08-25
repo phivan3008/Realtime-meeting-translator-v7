@@ -94,7 +94,12 @@ SPEAKER_UNKNOWN = "Speaker_unknown"
 # --- 5b. Speaker change boundary (DESIGN.md 3.2) ----------------------------
 # Two people whose turns are less than VAD_MIN_SILENCE_MS apart land in one
 # utterance, which then gets one voiceprint, one language and one ASR pass.
-SPEAKER_CHANGE_ENABLED = os.environ.get("SPEAKER_CHANGE_ENABLED", "1") != "0"
+#
+# OFF: measured on a real meeting, one-second voiceprints do not separate
+# speakers - the comparisons form one unbroken cluster with no threshold to
+# put between them. See docs/TUNING.md 5b. Set SPEAKER_CHANGE_ENABLED=1 to
+# experiment.
+SPEAKER_CHANGE_ENABLED = os.environ.get("SPEAKER_CHANGE_ENABLED", "0") == "1"
 SPEAKER_CHANGE_WINDOW_MS = 1_000
 SPEAKER_CHANGE_THRESHOLD = 0.25
 

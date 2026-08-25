@@ -1031,6 +1031,13 @@ class VoiceByVolume:
         return np.array([1.0, 0.0]) if loud else np.array([0.0, 1.0])
 
 
+@pytest.fixture
+def cutting_on(monkeypatch):
+    """The boundary ships off - one-second voiceprints did not separate
+    speakers on a real meeting. These test the mechanism, not the default."""
+    monkeypatch.setattr("server.net.session.SPEAKER_CHANGE_ENABLED", True)
+
+
 def two_voice_session(**kwargs) -> ServerSession:
     vad = ScriptedVAD((0.9,))
     return ServerSession(
@@ -1052,7 +1059,7 @@ def speak(session, chunks: int, level: int) -> list[dict]:
 LOUD, QUIET = 8_000, 500
 
 
-def test_a_second_voice_ends_the_sentence_without_a_pause():
+def test_a_second_voice_ends_the_sentence_without_a_pause(cutting_on):
     """The VAD needs 500 ms of silence; people do not leave that much."""
     session = two_voice_session()
     session.handle_text(Hello(session_id="abc").to_json())
@@ -1062,7 +1069,7 @@ def test_a_second_voice_ends_the_sentence_without_a_pause():
     assert session.stats.speaker_changes == 1
 
 
-def test_one_voice_talking_on_is_not_cut():
+def test_one_voice_talking_on_is_not_cut(cutting_on):
     session = two_voice_session()
     session.handle_text(Hello(session_id="abc").to_json())
     payloads = speak(session, 24, LOUD)
@@ -1071,7 +1078,7 @@ def test_one_voice_talking_on_is_not_cut():
     assert session.stats.speaker_changes == 0
 
 
-def test_the_two_voices_become_two_sentences():
+def test_the_two_voices_become_two_sentences(cutting_on):
     """The point of the cut: each half gets its own ASR and language pass."""
     session = two_voice_session()
     session.handle_text(Hello(session_id="abc").to_json())
@@ -1081,9 +1088,9 @@ def test_the_two_voices_become_two_sentences():
     assert len(utterances) >= 2, "both voices came out as one sentence"
 
 
-def test_the_cut_can_be_turned_off(monkeypatch):
-    """So a meeting can fall back to the old behaviour without a redeploy."""
-    monkeypatch.setattr("server.net.session.SPEAKER_CHANGE_ENABLED", False)
+def test_the_cut_is_off_unless_asked_for():
+    """Measured on a real meeting, one-second voiceprints put 53% of all
+    comparisons over the threshold, which shredded the transcript."""
     session = two_voice_session()
     assert session.speaker_change is None
     session.handle_text(Hello(session_id="abc").to_json())
@@ -1092,5 +1099,5 @@ def test_the_cut_can_be_turned_off(monkeypatch):
     assert "speaker_change" not in reasons
 
 
-def test_without_a_speaker_identifier_there_is_nothing_to_compare():
+def test_without_a_speaker_identifier_there_is_nothing_to_compare(cutting_on):
     assert make_session().speaker_change is None

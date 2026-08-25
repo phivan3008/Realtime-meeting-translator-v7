@@ -23,7 +23,7 @@ chạy thử.
 Client                    Server (8 tầng)
 ──────                    ───────────────
 WASAPI loopback           1. VAD (Silero)           cắt thành đoạn có tiếng nói
-16 kHz mono 16-bit        2. Buffer Manager         chốt câu khi ngắt hoặc đổi giọng
+16 kHz mono 16-bit        2. Buffer Manager         gom thành câu, chốt khi ngắt
 chunk 200 ms ─────────►   3. Noise Filter (AST)     bỏ tiếng gõ phím, ho
                           4. Overlap Resolver       hạ giọng chồng lấn
                           5. Diarization (ECAPA)    ai đang nói
@@ -163,6 +163,9 @@ vùng đo được rất hẹp.
   Nó đọc lên như một chuỗi ví dụ mẫu.
 - **Đừng bật `condition_on_previous_text`.** Đó là cách một câu bịa thành cả
   đoạn bịa.
+- **Voiceprint trên cửa sổ 1 giây không phân biệt được giọng.** Cùng một
+  đoạn cho 0.12 theo cửa sổ và 0.77 theo cả câu. Đã thử cắt câu theo đó và đã
+  tắt lại — xem `docs/TUNING.md` mục 5b.
 
 ## Cấu trúc thư mục
 

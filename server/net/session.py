@@ -424,9 +424,9 @@ class ServerSession:
             # The score is what decides whether two turns are one person.
             # Logged so a real meeting can be read back for where the
             # same-voice and different-voice ranges actually sit.
-            log.info("utterance %d speaker %s similarity %.3f%s",
+            log.info("utterance %d speaker %s similarity %.3f (%s)",
                      utterance.index, assignment.speaker_id,
-                     assignment.similarity, " new" if assignment.is_new else "")
+                     assignment.similarity, assignment.reason)
 
         if self.language_identifier is not None:
             with self._timed("language", spent):

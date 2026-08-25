@@ -203,11 +203,11 @@ nhất.
 
 ---
 
-## 5b. Cắt câu khi đổi người nói
+## 5b. Cắt câu khi đổi người nói — ĐANG TẮT
 
 | Thông số | Mặc định | Ý nghĩa |
 | --- | --- | --- |
-| `SPEAKER_CHANGE_ENABLED` | `True` | Đặt biến môi trường `=0` để tắt hẳn |
+| `SPEAKER_CHANGE_ENABLED` | `False` | Đặt biến môi trường `=1` để bật thử |
 | `SPEAKER_CHANGE_WINDOW_MS` | `1000` | Độ dài đoạn đem đi so giọng |
 | `SPEAKER_CHANGE_THRESHOLD` | `0.25` | Cosine dưới ngưỡng này là đã đổi người |
 
@@ -220,32 +220,63 @@ chỉ được một voiceprint, một lần nhận dạng ngôn ngữ, một l�
 > nó bị nuốt vào utterance của câu tiếng Nhật nối ngay sau, trôi khỏi cửa sổ
 > partial 4 giây, và không bao giờ được chốt.
 
-Giây đầu của utterance là **mốc** — người mở lời. Mỗi nhịp partial, giây gần
-nhất được so với mốc đó. Lệch quá ngưỡng thì cắt **ngay trước** cửa sổ lệch,
-không phải tại chỗ phát hiện, để giây của người mới không dính vào câu của
-người cũ.
+Cách làm: giây đầu utterance là **mốc**, mỗi nhịp partial so giây gần nhất với
+mốc, lệch quá ngưỡng thì cắt ngay trước cửa sổ lệch.
 
-**`SPEAKER_CHANGE_THRESHOLD`** thấp hơn `SPEAKER_MATCH_THRESHOLD` (0.30) một
-cách có chủ ý: đoạn so ở đây chỉ dài 1 giây thay vì cả câu, nên cosine
-cùng-giọng nhiễu hơn và tụt xuống. Cắt nhầm tốn kém hơn bỏ sót — một câu bị
-xé đôi thì cả hai nửa đều dịch kém, còn bỏ sót chỉ là giữ nguyên hành vi cũ.
+### Vì sao tắt
 
-> **Chưa đo trên dữ liệu thật.** 0.25 là chỗ đặt tạm giữa hai vùng đã đo cho
-> cả câu. Mỗi lần so đều được ghi vào `ChangeStats.scores` và log ở mức DEBUG,
-> nên một lần chạy thật đủ để dựng phân bố và chọn lại số này.
+> **Đo được (họp thật, 175 giây audio, 137 phép so):**
+>
+> | | |
+> | --- | --- |
+> | số nhát cắt | **73 / 137 phép so — 53%** |
+> | decile của cosine | 0.017, 0.092, 0.127, 0.166, 0.207, 0.244, 0.258, 0.283, 0.332, 0.379, 0.558 |
+>
+> Phân bố **liền một mạch, một cụm duy nhất, không có khoảng trống**. Ngưỡng
+> 0.25 rơi đúng trung vị.
 
-- Giảm xuống: ít cắt hơn, quay dần về hành vi cũ (hai người chung một câu).
-- Tăng lên: cắt vụn. Một người đổi giọng — cười, hạ giọng, ho — cũng thành
-  ranh giới câu, và ASR mất ngữ cảnh ở mỗi mảnh.
+Đây không phải chọn sai số. Cả cách làm dựa trên giả định có **hai cụm** để
+tách ra, và phép đo nói là không có. Cửa sổ 1 giây không phân biệt được giọng
+trên audio họp.
 
-**`SPEAKER_CHANGE_WINDOW_MS`** quyết định phát hiện được sớm đến đâu: cần đủ
-audio cho **hai** cửa sổ không chồng nhau, nên 1000 ms nghĩa là sớm nhất
-2 giây sau khi utterance mở. Giảm xuống thì phát hiện sớm hơn nhưng voiceprint
-của đoạn ngắn nhiễu hơn — dưới `SPEAKER_MIN_DURATION_MS` (600 ms) thì chính
-tầng nhận dạng người nói đã coi là quá ngắn để tin.
+Cùng một đoạn audio, hai thước đo khác hẳn nhau:
 
-Chi phí: **một lần embed ECAPA mỗi 600 ms**. Mốc chỉ embed một lần cho mỗi
-utterance.
+| utterance | cosine cửa sổ 1 giây | cosine cả câu (`SpeakerIdentifier`) |
+| --- | --- | --- |
+| 34 | 0.122 | 0.765 |
+| 46 | 0.017 | 0.640 |
+| 74 | 0.193 | 0.752 |
+| 80 | 0.131 | 0.741 |
+
+0.017 là gần như vuông góc — hai giọng người khác nhau cũng hiếm khi rời nhau
+đến thế (dải khác-giọng đo được cho cả câu là −0.129…0.232).
+
+**Hậu quả khi bật**, đo trên cùng lần chạy: 93 utterance trong 175 giây, tức
+**một câu mỗi 1.9 giây**. Kéo theo:
+
+- registry chạm trần `SPEAKER_MAX_SPEAKERS` (12) sau 21 utterance, và từ đó
+  mọi câu bị ép gán vào centroid gần nhất **bất kể ngưỡng** — log hiện
+  `similarity 0.219` cho một câu được coi là khớp
+- mảnh vụn gần-im-lặng làm Whisper bịa thêm, và bị loại `no speech` nhiều hơn
+- **mất câu nhiều hơn hẳn** so với khi tắt
+
+Nghĩa là bật tính năng này làm hỏng đúng ba thứ nó định sửa.
+
+### Muốn bật lại thì phải đo gì trước
+
+Chạy `server/tests_real/` với bản ghi **một người nói duy nhất**, đủ dài, rồi
+dựng hai phân bố: cùng-giọng (hai cửa sổ trong cùng bản ghi) và khác-giọng
+(cửa sổ từ hai bản ghi khác nhau). Chỉ khi hai phân bố **tách rời** thì mới có
+ngưỡng để đặt. Cần quét cả `SPEAKER_CHANGE_WINDOW_MS` — 1000 ms chỉ hơn
+`SPEAKER_MIN_DURATION_MS` (600 ms) một chút, và chính tầng nhận dạng người nói
+đã coi 600 ms là quá ngắn để tin.
+
+Cũng cần kiểm tra **mốc**: giây đầu utterance chứa `VAD_SPEECH_PAD_MS`
+(256 ms) đệm trước và phần chớm tiếng, nên có thể là giây ít đại diện nhất
+trong cả câu. Nếu mốc là thủ phạm thì đổi mốc rẻ hơn nhiều so với bỏ cách làm.
+
+Chi phí khi bật: **một lần embed ECAPA mỗi 600 ms**. Mốc chỉ embed một lần cho
+mỗi utterance.
 
 ---
 
