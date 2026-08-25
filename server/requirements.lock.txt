@@ -1,13 +1,9 @@
 aiohappyeyeballs==2.7.1
     # via aiohttp
 aiohttp==3.14.3
-    # via
-    #   fsspec
-    #   vllm
+    # via vllm
 aiosignal==1.4.0
     # via aiohttp
-alembic==1.19.1
-    # via optuna
 annotated-doc==0.0.5
     # via
     #   fastapi
@@ -34,8 +30,6 @@ apache-tvm-ffi==0.1.10
     #   tokenspeed-mla
     #   vllm
     #   xgrammar
-asteroid-filterbanks==0.4.0
-    # via pyannote-audio
 astor==0.8.1
     # via depyf
 attrs==26.1.0
@@ -73,12 +67,8 @@ cloudpickle==3.1.2
     # via
     #   tilelang
     #   vllm
-colorlog==6.12.0
-    # via optuna
 compressed-tensors==0.17.0
     # via vllm
-contourpy==1.3.3
-    # via matplotlib
 cryptography==50.0.0
     # via pyjwt
 ctranslate2==4.8.1
@@ -105,8 +95,6 @@ cuda-tile==1.5.0
     # via flashinfer-python
 cuda-toolkit==13.0.2
     # via torch
-cycler==0.12.1
-    # via matplotlib
 depyf==0.20.0
     # via vllm
 detect-installer==0.1.0
@@ -120,7 +108,6 @@ docstring-parser==0.18.0
 einops==0.8.2
     # via
     #   flashinfer-python
-    #   pyannote-audio
     #   quack-kernels
     #   vllm
 email-validator==2.3.0
@@ -147,15 +134,12 @@ fastsafetensors==0.3.3
 filelock==3.32.4
     # via
     #   huggingface-hub
-    #   pyannote-pipeline
     #   torch
     #   vllm
 flashinfer-python==0.6.14
     # via vllm
 flatbuffers==25.12.19
     # via onnxruntime
-fonttools==4.63.0
-    # via matplotlib
 frozenlist==1.8.0
     # via
     #   aiohttp
@@ -163,15 +147,11 @@ frozenlist==1.8.0
 fsspec==2026.7.0
     # via
     #   huggingface-hub
-    #   lightning
-    #   pytorch-lightning
     #   torch
 googleapis-common-protos==1.75.1
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-greenlet==3.5.5
-    # via sqlalchemy
 grpcio==1.83.0
     # via opentelemetry-exporter-otlp-proto-grpc
 h11==0.16.0
@@ -201,7 +181,6 @@ httpx2==2.12.0
 huggingface-hub==1.28.0
     # via
     #   faster-whisper
-    #   pyannote-audio
     #   speechbrain
     #   tokenizers
     #   transformers
@@ -233,9 +212,7 @@ jiter==0.16.0
 jmespath==1.1.0
     # via model-hosting-container-standards
 joblib==1.5.3
-    # via
-    #   scikit-learn
-    #   speechbrain
+    # via speechbrain
 jsonschema==4.26.0
     # via
     #   mcp
@@ -243,19 +220,8 @@ jsonschema==4.26.0
     #   vllm
 jsonschema-specifications==2025.9.1
     # via jsonschema
-julius==0.2.8
-    # via torch-audiomentations
-kiwisolver==1.5.0
-    # via matplotlib
 lark==1.2.2
     # via vllm
-lightning==2.6.5
-    # via pyannote-audio
-lightning-utilities==0.15.3
-    # via
-    #   lightning
-    #   pytorch-lightning
-    #   torchmetrics
 llguidance==1.7.6
     # via vllm
 llvmlite==0.47.0
@@ -264,16 +230,10 @@ lm-format-enforcer==0.11.3
     # via vllm
 loguru==0.7.3
     # via compressed-tensors
-mako==1.4.1
-    # via alembic
 markdown-it-py==4.2.0
     # via rich
 markupsafe==3.0.3
-    # via
-    #   jinja2
-    #   mako
-matplotlib==3.11.1
-    # via pyannote-audio
+    # via jinja2
 mcp==2.0.0
     # via vllm
 mcp-types==2.0.0
@@ -294,8 +254,6 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-narwhals==2.25.0
-    # via scikit-learn
 networkx==3.6.1
     # via torch
 ninja==1.13.0
@@ -307,13 +265,10 @@ numba==0.65.0
 numpy==2.3.5
     # via
     #   -r server/requirements.txt
-    #   asteroid-filterbanks
-    #   contourpy
     #   ctranslate2
     #   cuda-core
     #   flashinfer-python
     #   humming-kernels
-    #   matplotlib
     #   mistral-common
     #   ml-dtypes
     #   numba
@@ -323,19 +278,12 @@ numpy==2.3.5
     #   nvidia-cutlass-dsl-libs-cu13
     #   onnxruntime
     #   opencv-python-headless
-    #   optuna
-    #   pandas
     #   pedalboard
-    #   pyannote-core
-    #   pyannote-metrics
-    #   pytorch-metric-learning
-    #   scikit-learn
     #   scipy
     #   soundfile
     #   soxr
     #   speechbrain
     #   tilelang
-    #   torchmetrics
     #   torchvision
     #   transformers
     #   vllm
@@ -444,12 +392,9 @@ opentelemetry-api==1.44.0
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-    #   pyannote-audio
     #   vllm
 opentelemetry-exporter-otlp==1.44.0
-    # via
-    #   pyannote-audio
-    #   vllm
+    # via vllm
 opentelemetry-exporter-otlp-proto-common==1.44.0
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
@@ -468,7 +413,6 @@ opentelemetry-sdk==1.44.0
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-semantic-conventions-ai
-    #   pyannote-audio
     #   vllm
 opentelemetry-semantic-conventions==0.65b0
     # via
@@ -476,43 +420,26 @@ opentelemetry-semantic-conventions==0.65b0
     #   opentelemetry-semantic-conventions-ai
 opentelemetry-semantic-conventions-ai==0.5.1
     # via vllm
-optuna==4.9.0
-    # via pyannote-pipeline
 outlines-core==0.2.14
     # via vllm
 packaging==26.3
     # via
     #   flashinfer-python
     #   huggingface-hub
-    #   lightning
-    #   lightning-utilities
     #   lm-format-enforcer
-    #   matplotlib
     #   onnxruntime
-    #   optuna
-    #   pytorch-lightning
     #   silero-vad
     #   speechbrain
-    #   torch-pitch-shift
-    #   torchmetrics
     #   transformers
-pandas==3.0.5
-    # via
-    #   pyannote-core
-    #   pyannote-database
-    #   pyannote-metrics
 partial-json-parser==0.2.1.1.post7
     # via vllm
 pedalboard==0.9.24
     # via -r server/requirements.txt
 pillow==12.3.0
     # via
-    #   matplotlib
     #   mistral-common
     #   torchvision
     #   vllm
-primepy==1.3
-    # via torch-pitch-shift
 prometheus-client==0.26.0
     # via
     #   prometheus-fastapi-instrumentator
@@ -539,25 +466,6 @@ psutil==7.2.2
     #   vllm
 py-cpuinfo==9.0.0
     # via vllm
-pyannote-audio==4.0.7
-    # via -r server/requirements.txt
-pyannote-core==6.0.1
-    # via
-    #   pyannote-audio
-    #   pyannote-database
-    #   pyannote-metrics
-    #   pyannote-pipeline
-pyannote-database==6.1.1
-    # via
-    #   pyannote-audio
-    #   pyannote-metrics
-    #   pyannote-pipeline
-pyannote-metrics==4.1
-    # via pyannote-audio
-pyannote-pipeline==4.0.0
-    # via pyannote-audio
-pyannoteai-sdk==0.4.0
-    # via pyannote-audio
 pybase64==1.5.0
     # via vllm
 pycountry==26.2.16
@@ -597,12 +505,6 @@ pyjwt==2.13.0
     # via mcp
 pynvvideocodec==2.0.4
     # via vllm
-pyparsing==3.3.2
-    # via matplotlib
-python-dateutil==2.9.0.post0
-    # via
-    #   matplotlib
-    #   pandas
 python-dotenv==1.2.3
     # via
     #   -r server/requirements.txt
@@ -614,21 +516,12 @@ python-multipart==0.0.32
     # via
     #   fastapi
     #   mcp
-pytorch-lightning==2.6.5
-    # via lightning
-pytorch-metric-learning==2.9.0
-    # via pyannote-audio
 pyyaml==6.0.3
     # via
     #   ctranslate2
     #   huggingface-hub
     #   hyperpyyaml
-    #   lightning
     #   lm-format-enforcer
-    #   optuna
-    #   pyannote-database
-    #   pyannote-pipeline
-    #   pytorch-lightning
     #   transformers
     #   uvicorn
     #   vllm
@@ -650,14 +543,12 @@ requests==2.34.2
     #   flashinfer-python
     #   mistral-common
     #   opentelemetry-exporter-otlp-proto-http
-    #   pyannoteai-sdk
     #   speechbrain
     #   tiktoken
     #   vllm
 rich==15.0.0
     # via
     #   -r server/requirements.txt
-    #   pyannote-audio
     #   rich-toolkit
     #   typer
 rich-toolkit==0.20.3
@@ -677,18 +568,11 @@ ruamel-yaml-clib==0.2.15
 safetensors==0.8.0
     # via
     #   humming-kernels
-    #   pyannote-audio
     #   transformers
     #   vllm
-scikit-learn==1.9.0
-    # via
-    #   pyannote-metrics
-    #   pytorch-metric-learning
 scipy==1.17.1
     # via
     #   -r server/requirements.txt
-    #   pyannote-metrics
-    #   scikit-learn
     #   speechbrain
 sentencepiece==0.2.2
     # via
@@ -707,14 +591,10 @@ shellingham==1.5.4
     # via typer
 silero-vad==6.2.1
     # via -r server/requirements.txt
-six==1.17.0
-    # via python-dateutil
 sniffio==1.3.1
     # via
     #   anthropic
     #   openai
-sortedcontainers==2.4.0
-    # via pyannote-core
 soundfile==0.14.0
     # via
     #   -r server/requirements.txt
@@ -723,10 +603,6 @@ soxr==1.1.0
     # via -r server/requirements.txt
 speechbrain==1.1.0
     # via -r server/requirements.txt
-sqlalchemy==2.0.52
-    # via
-    #   alembic
-    #   optuna
 sse-starlette==3.4.8
     # via mcp
 starlette==1.6.0
@@ -745,8 +621,6 @@ tabulate==0.10.0
     # via
     #   flashinfer-python
     #   humming-kernels
-threadpoolctl==3.6.0
-    # via scikit-learn
 tiktoken==0.14.0
     # via
     #   mistral-common
@@ -765,53 +639,30 @@ tokenspeed-triton==3.8.10.post20260721
 torch==2.11.0
     # via
     #   -r server/requirements.txt
-    #   asteroid-filterbanks
     #   compressed-tensors
     #   flashinfer-python
     #   humming-kernels
-    #   julius
-    #   lightning
-    #   pyannote-audio
-    #   pytorch-lightning
-    #   pytorch-metric-learning
     #   quack-kernels
     #   silero-vad
     #   speechbrain
     #   tilelang
     #   tokenspeed-mla
-    #   torch-audiomentations
     #   torch-c-dlpack-ext
-    #   torch-pitch-shift
-    #   torchmetrics
     #   torchvision
     #   vllm
     #   xgrammar
-torch-audiomentations==0.12.0
-    # via pyannote-audio
 torch-c-dlpack-ext==0.1.5
     # via
     #   quack-kernels
     #   tilelang
-torch-pitch-shift==1.2.5
-    # via torch-audiomentations
 torchaudio==2.11.0
     # via
     #   -r server/requirements.txt
-    #   pyannote-audio
     #   silero-vad
     #   speechbrain
-    #   torch-audiomentations
-    #   torch-pitch-shift
     #   vllm
 torchcodec==0.16.0
-    # via
-    #   pyannote-audio
-    #   vllm
-torchmetrics==1.9.0
-    # via
-    #   lightning
-    #   pyannote-audio
-    #   pytorch-lightning
+    # via vllm
 torchvision==0.26.0
     # via
     #   -r server/requirements.txt
@@ -822,11 +673,6 @@ tqdm==4.70.0
     #   flashinfer-python
     #   huggingface-hub
     #   humming-kernels
-    #   lightning
-    #   optuna
-    #   pyannote-pipeline
-    #   pytorch-lightning
-    #   pytorch-metric-learning
     #   speechbrain
     #   tilelang
     #   transformers
@@ -856,19 +702,15 @@ typing-extensions==4.16.0
     # via
     #   aiohttp
     #   aiosignal
-    #   alembic
     #   anthropic
     #   anyio
     #   apache-tvm-ffi
-    #   asteroid-filterbanks
     #   blake3
     #   cuda-tile
     #   fastapi
     #   grpcio
     #   httpx2
     #   huggingface-hub
-    #   lightning
-    #   lightning-utilities
     #   mcp
     #   mcp-types
     #   mistral-common
@@ -885,11 +727,9 @@ typing-extensions==4.16.0
     #   pydantic
     #   pydantic-core
     #   pydantic-extra-types
-    #   pytorch-lightning
     #   referencing
     #   rich-toolkit
     #   soundfile
-    #   sqlalchemy
     #   starlette
     #   tilelang
     #   torch

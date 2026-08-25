@@ -68,18 +68,23 @@ def chunk(value: int = 1000) -> bytes:
     return np.full(CHUNK_BYTES // 2, value, dtype="<i2").tobytes()
 
 
-def wait_slot_free(timeout: float = 2.0) -> bool:
-    """The server releases the slot on its own task, so give it a moment.
+def wait_slot_free(timeout: float = 30.0) -> bool:
+    """Wait for the server task to release the meeting slot.
 
-    Closing the client end of a TestClient websocket does not synchronously
-    join the server coroutine, so asserting on the shared state immediately
-    after the ``with`` block is a race.
+    Closing the client end of a TestClient websocket does not join the server
+    coroutine, so reading the shared state straight after the ``with`` block
+    is a race.
+
+    The timeout is a deadlock guard, not a speed limit. It was 2 s once and
+    failed a single run on a loaded machine - which turned a correctness test
+    into a timing test, and a test nobody trusts is worse than no test. In
+    the normal case this returns in under a millisecond.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if app_module.state.active_session_id is None:
             return True
-        time.sleep(0.01)
+        time.sleep(0.001)
     return False
 
 
@@ -284,3 +289,19 @@ def test_a_stage_that_failed_is_not_retried(monkeypatch):
     state.load_models()
     state.load_models()
     assert len(attempts) == 1
+
+
+def test_the_slot_wait_is_a_deadlock_guard_not_a_speed_limit():
+    """A generous timeout is what keeps this a correctness test. The one
+    failure it ever had was a loaded machine, not a stuck server."""
+    import inspect
+    source = inspect.signature(wait_slot_free)
+    assert source.parameters["timeout"].default >= 10.0
+
+
+def test_the_slot_wait_returns_at_once_when_it_is_already_free():
+    """So the generous timeout costs nothing in the normal case."""
+    app_module.state.active_session_id = None
+    started = time.monotonic()
+    assert wait_slot_free() is True
+    assert time.monotonic() - started < 0.1

@@ -52,19 +52,12 @@ pedalboard==0.9.24
 # (speechbrain/spkrec-ecapa-voxceleb), language ID is VoxLingua107.
 speechbrain==1.1.0
 
-# pyannote.audio is no longer imported by any code here. Its
-# PretrainedSpeakerEmbedding wrapper around the same ECAPA checkpoint calls
-# SpeechBrain with `token`, `huggingface_cache_dir` and `revision`, none of
-# which SpeechBrain 1.1.0 accepts, so it raises before loading a model - and
-# pyannote declares no version bound on SpeechBrain, so no resolver or
-# `pip check` can see it. server/pipeline/diarization.py calls SpeechBrain
-# directly instead.
-#
-# Left pinned for now rather than removed, because dropping it moves a dozen
-# transitive pins (lightning, asteroid-filterbanks, julius, ...) and would
-# force a full reinstall on a pod that already has this set working. Remove it
-# and re-resolve when a reinstall is convenient.
-pyannote.audio==4.0.7
+# pyannote.audio is deliberately absent. DESIGN.md names it for this stage
+# and it does ship a wrapper around the same ECAPA checkpoint, but that
+# wrapper calls SpeechBrain with `token`, `huggingface_cache_dir` and
+# `revision`, none of which SpeechBrain 1.1.0 accepts - and pyannote declares
+# no version bound on SpeechBrain, so no resolver and no `pip check` can see
+# it. server/pipeline/diarization.py calls SpeechBrain directly.
 
 # --- 6. ASR ---
 faster-whisper==1.2.1
@@ -84,7 +77,7 @@ rich==15.0.0
 #   vllm          ->  a specific torch minor
 #
 # torch then decides torchaudio and torchvision, and numpy >= 2 follows from
-# torch 2.11, vllm and pyannote 4.x alike.
+# torch 2.11 and vllm alike.
 #
 # The practical rule: change vllm or torch first, re-resolve the whole file,
 # and never pin a single line to fix one error.
