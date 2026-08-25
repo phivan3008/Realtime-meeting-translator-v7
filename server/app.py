@@ -275,3 +275,25 @@ def _log_summary(session: ServerSession) -> None:
                                     key=lambda kv: -kv[1])},
         stats.translations_dropped, stats.worst_translation_lag,
     )
+    _log_voice_scores(session)
+
+
+def _log_voice_scores(session: ServerSession) -> None:
+    """The distribution behind SPEAKER_CHANGE_THRESHOLD.
+
+    The threshold was placed between ranges measured on whole sentences, not
+    on the one-second windows this compares, so it needs a real meeting to
+    settle. Printed as deciles: a threshold belongs in the gap between the
+    same-voice cluster and the different-voice one, and deciles show whether
+    there is a gap at all.
+    """
+    watcher = session.speaker_change
+    if watcher is None or not watcher.stats.scores:
+        return
+    scores = sorted(watcher.stats.scores)
+    deciles = [round(scores[min(len(scores) - 1, len(scores) * n // 10)], 3)
+               for n in range(11)]
+    log.info("Session %s voice comparisons: %d checks, %d cuts, "
+             "threshold %.2f, deciles %s",
+             session.session_id or "?", watcher.stats.checks,
+             watcher.stats.changes, watcher.threshold, deciles)

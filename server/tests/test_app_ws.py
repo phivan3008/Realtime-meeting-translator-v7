@@ -11,9 +11,11 @@ Run with::
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -305,3 +307,33 @@ def test_the_slot_wait_returns_at_once_when_it_is_already_free():
     started = time.monotonic()
     assert wait_slot_free() is True
     assert time.monotonic() - started < 0.1
+
+
+# ---------------------------------------------------------------------------
+# The evidence for tuning the voice threshold
+# ---------------------------------------------------------------------------
+def test_the_voice_score_summary_is_skipped_when_nothing_was_compared(caplog):
+    """A pod with no speaker model must not log an empty distribution."""
+    from server.app import _log_voice_scores
+
+    session = SimpleNamespace(session_id="abc", speaker_change=None)
+    with caplog.at_level(logging.INFO):
+        _log_voice_scores(session)
+    assert "voice comparisons" not in caplog.text
+
+
+def test_the_voice_scores_are_reported_as_deciles(caplog):
+    """A threshold belongs in the gap between the two clusters, and deciles
+    are what show whether there is a gap."""
+    from server.app import _log_voice_scores
+    from server.pipeline.speaker_change import ChangeStats
+
+    stats = ChangeStats(checks=11, changes=3,
+                        scores=[n / 10 for n in range(11)])
+    session = SimpleNamespace(
+        session_id="abc",
+        speaker_change=SimpleNamespace(stats=stats, threshold=0.25))
+    with caplog.at_level(logging.INFO):
+        _log_voice_scores(session)
+    assert "11 checks, 3 cuts" in caplog.text
+    assert "1.0]" in caplog.text, "the top of the range was not reported"
