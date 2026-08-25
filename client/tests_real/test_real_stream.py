@@ -38,7 +38,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -148,17 +148,46 @@ class Collected:
                 for t, m in self.translations
                 if m.get("sentence_id") in sent_at]
 
-    def lags_ms(self) -> list[float]:
+    def lags_ms(self, gaps: Sequence[tuple[float, float]] = ()) -> list[float]:
         """How late each event arrived, relative to the audio it describes.
 
-        ``at_ms`` is the event's position in the stream the server received,
-        so the audio it refers to was captured at ``stream_start + at_ms``.
-        Anything after that is capture buffering, network and server compute.
+        ``at_ms`` counts audio the server *received*, so it advances only
+        while this machine is recording. Every second the capture stalls,
+        at_ms falls a second further behind the wall clock, and a naive
+        subtraction hands that back as latency the server never spent.
+
+        On a ten-minute run a single 0.5 s stall in the first second put the
+        mean at 1209 ms against 391 ms for the same server minutes earlier -
+        a threefold error from half a second of missing audio, and every event
+        in the run carried it.
+
+        So the stalls are subtracted. ``gaps`` is ``(seconds into the run,
+        seconds waited)`` from :func:`pump_audio`; a gap shifts every event
+        recorded after it and nothing before it.
         """
         return [
-            (arrived - self.stream_start) * 1000.0 - float(payload["at_ms"])
+            (arrived - self.stream_start) * 1000.0
+            - float(payload["at_ms"]) - self._stalled_before_ms(payload, gaps)
             for arrived, payload in self.vad_events
         ]
+
+    @staticmethod
+    def _stalled_before_ms(payload: dict,
+                           gaps: Sequence[tuple[float, float]]) -> float:
+        """Milliseconds of capture stall that precede this event's audio.
+
+        A gap is recorded against wall-clock time, while ``at_ms`` is a
+        position in the recording, so each gap has to be placed back into the
+        recording: subtract the stalls that came before it.
+        """
+        at_ms = float(payload["at_ms"])
+        stalled = 0.0
+        for gap_at, waited in sorted(gaps):
+            audio_position_ms = (gap_at - stalled / 1000.0) * 1000.0
+            if audio_position_ms > at_ms:
+                break
+            stalled += waited * 1000.0
+        return stalled
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +239,9 @@ def check_health(base_url: str, report: Report) -> bool:
     return contract_ok
 
 
-async def stream_for(url: str, device_hint: str | None, seconds: float,
-                     report: Report) -> tuple[StreamClient, Collected]:
+async def stream_for(
+    url: str, device_hint: str | None, seconds: float, report: Report,
+) -> tuple[StreamClient, Collected, list[tuple[float, float]]]:
     collected = Collected()
     client = StreamClient(url.rstrip("/") + "/ws/stream",
                           on_message=collected.record)
@@ -222,7 +252,7 @@ async def stream_for(url: str, device_hint: str | None, seconds: float,
                    "; ".join(client.stats.errors) or "timed out")
         await client.stop()
         await task
-        return client, collected
+        return client, collected, []
     report.add("Handshake accepted", True, f"session {client.session_id}")
 
     capture = LoopbackCapture(device_name_hint=device_hint)
@@ -239,7 +269,7 @@ async def stream_for(url: str, device_hint: str | None, seconds: float,
         await asyncio.wait_for(task, timeout=10.0)
     print()
     report_capture_gaps(capture, gaps)
-    return client, collected
+    return client, collected, gaps
 
 
 async def pump_audio(capture, client, collected: Collected,
@@ -322,7 +352,8 @@ def check_stream(client: StreamClient, collected: Collected, seconds: float,
 
 
 def check_events(collected: Collected, report: Report,
-                 audio_seconds: float = 0.0, wall_seconds: float = 0.0) -> None:
+                 audio_seconds: float = 0.0, wall_seconds: float = 0.0,
+                 gaps: Sequence[tuple[float, float]] = ()) -> None:
     """Judge the server on how fast events came back.
 
     ``audio_seconds`` and ``wall_seconds`` are here for a reason worth
@@ -355,19 +386,29 @@ def check_events(collected: Collected, report: Report,
     report.add("Every speech segment is opened and closed", starts == ends,
                f"{starts} speech_start, {ends} speech_end")
 
-    lags = collected.lags_ms()
+    lags = collected.lags_ms(gaps)
     if not lags:
         return
     worst = max(lags)
+    stalled = sum(waited for _at, waited in gaps)
     print(f"\n  End-to-end lag: mean {statistics.fmean(lags):.0f} ms, "
           f"max {worst:.0f} ms (budget {MAX_EVENT_LAG_MS:.0f} ms)")
+    if stalled:
+        uncorrected = collected.lags_ms()
+        print(f"    ({stalled:.1f} s of capture stall subtracted; "
+              f"uncorrected mean would read "
+              f"{statistics.fmean(uncorrected):.0f} ms)")
 
-    missing = wall_seconds - audio_seconds if wall_seconds else 0.0
+    # Whatever the stalls do not explain. A stall can be subtracted because
+    # its size is known; audio that went missing without one cannot be, and
+    # then the figures cannot be scored at all.
+    missing = (wall_seconds - audio_seconds - stalled) if wall_seconds else 0.0
     if missing > MISSING_AUDIO_TOLERANCE_S:
         print(f"    NOT JUDGED: {missing:.1f} s of audio never left this "
-              f"machine, so at_ms trails the wall clock by that much and "
-              f"every lag above is inflated by it. Fix the capture first; "
-              f"these numbers say nothing about the server until then.")
+              f"machine and no capture stall accounts for it, so at_ms "
+              f"trails the wall clock by an unknown amount and every lag "
+              f"above is inflated by it. Fix the capture first; these "
+              f"numbers say nothing about the server until then.")
         return
 
     report.add("Events come back fast enough to be useful",
@@ -468,6 +509,12 @@ KNOWN_HALLUCINATIONS = (
     "you",
     # Confirmed absent from the recording it was transcribed from.
     "Chào tạm biệt.",
+    "Hãy đăng ký kênh để "
+    "ủng hộ kênh của mình nhé.",
+    # A committed sentence at 331.4 s of a ten-minute run, scored 0.57 for
+    # speech and translated into Japanese before anybody read it.
+    "Hẹn gặp lại các bạn trong "
+    "những video tiếp theo.",
 )
 _UNSPOKEN = re.compile(
     r"[\s.,!?;:\-\u2010-\u2015\u3001\u3002\u30fb\uff01\uff1f\uff0c\uff0e"
@@ -712,8 +759,8 @@ async def main_async(args) -> int:
         print("\nRESULT: FAIL - server not usable, stopping before streaming")
         return 2
 
-    client, collected = await stream_for(args.url, args.device, args.seconds,
-                                         report)
+    client, collected, gaps = await stream_for(args.url, args.device,
+                                               args.seconds, report)
     if client.stats.connects == 0 or not client.stats.chunks_sent:
         print("\nRESULT: FAIL - never streamed anything")
         for error in client.stats.errors:
@@ -723,7 +770,7 @@ async def main_async(args) -> int:
     check_stream(client, collected, args.seconds, report)
     check_events(collected, report,
                  audio_seconds=client.stats.chunks_sent * CHUNK_DURATION_MS / 1000.0,
-                 wall_seconds=args.seconds)
+                 wall_seconds=args.seconds, gaps=gaps)
     check_utterances(collected, report)
     check_transcripts(collected, report)
 

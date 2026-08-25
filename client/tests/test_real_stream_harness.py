@@ -1073,8 +1073,9 @@ def patch_stream(monkeypatch, connects: bool = True):
 def test_stream_for_runs_end_to_end_without_a_sound_card(monkeypatch, capsys):
     patch_stream(monkeypatch)
     report = harness.Report()
-    client, collected = asyncio.run(
+    client, collected, gaps = asyncio.run(
         harness.stream_for("ws://stub", None, 0.3, report))
+    assert gaps == []
     assert client.sent, "no audio reached the client"
     assert collected.stream_start > 0
     assert report.failed == []
@@ -1085,7 +1086,7 @@ def test_stream_for_runs_end_to_end_without_a_sound_card(monkeypatch, capsys):
 
 def test_stream_for_stops_the_capture_and_the_client(monkeypatch):
     patch_stream(monkeypatch)
-    client, _collected = asyncio.run(
+    client, _collected, _gaps = asyncio.run(
         harness.stream_for("ws://stub", None, 0.3, harness.Report()))
     assert StubLoopbackCapture.last.stopped
     assert client.stopped
@@ -1187,5 +1188,140 @@ def test_a_pitch_reaching_a_sentence_is_caught_by_the_client_too():
     harness.check_transcripts(
         collected_of((1.0, partial()), *sentence(transcript=LA_LA)), report)
     assert "No committed sentence is a Whisper sign-off" in [
+        c.name for c in report.failed
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Capture stalls are subtracted, not blamed on the server
+#
+# A ten-minute run stalled 0.5 s in its first second and reported a mean lag
+# of 1209 ms. The same server minutes earlier measured 391 ms. Every event in
+# the run carried that half second, and the tolerance was set loose enough
+# (1.0 s) to say nothing about it.
+# ---------------------------------------------------------------------------
+def one_event(at_ms: float, arrived_s: float):
+    return make_collected(0.0, [(arrived_s, at_ms, "speech_start")])
+
+
+def test_a_stall_is_subtracted_from_every_event_after_it():
+    collected = one_event(at_ms=1000.0, arrived_s=1.9)      # 900 ms raw
+    assert collected.lags_ms() == pytest.approx([900.0])
+    assert collected.lags_ms([(0.0, 0.5)]) == pytest.approx([400.0])
+
+
+def test_a_stall_after_the_event_changes_nothing():
+    """It cannot shift audio that was already recorded."""
+    collected = one_event(at_ms=1000.0, arrived_s=1.4)
+    assert collected.lags_ms([(60.0, 5.0)]) == pytest.approx([400.0])
+
+
+def test_stalls_accumulate_for_later_events():
+    collected = one_event(at_ms=10_000.0, arrived_s=11.4)   # 1400 ms raw
+    assert collected.lags_ms([(1.0, 0.5), (5.0, 0.5)]) == pytest.approx([400.0])
+
+
+def test_a_gap_is_placed_back_into_the_recording():
+    """A gap is stamped in wall-clock time but at_ms is a position in the
+    recording, so the second gap sits earlier in the recording than its
+    wall-clock stamp suggests."""
+    collected = one_event(at_ms=4_000.0, arrived_s=9.4)
+    # Two 1 s stalls at t=2 s and t=6 s: in the recording they land at 2 s
+    # and 5 s, so only the first precedes 4 s of audio.
+    assert collected.lags_ms([(2.0, 1.0), (6.0, 1.0)]) == pytest.approx([4400.0])
+
+
+def test_the_real_run_reads_correctly_once_corrected():
+    """The numbers from that run: first event at at_ms=0 arriving 866 ms in,
+    after a 0.5 s stall at t=0."""
+    collected = one_event(at_ms=0.0, arrived_s=0.866)
+    assert collected.lags_ms()[0] == pytest.approx(866.0)
+    assert collected.lags_ms([(0.0, 0.5)])[0] == pytest.approx(366.0)
+
+
+def test_a_corrected_run_is_judged():
+    report = harness.Report()
+    harness.check_events(
+        make_collected(0.0, [(0.866, 0.0, "speech_start"),
+                             (5.4, 5000.0, "speech_end")]),
+        report, audio_seconds=599.4, wall_seconds=600.0, gaps=[(0.0, 0.5)])
+    assert report.failed == []
+
+
+def test_the_uncorrected_figure_is_shown_alongside(capsys):
+    """So a stall large enough to matter is visible, not silently absorbed."""
+    harness.check_events(
+        make_collected(0.0, [(0.866, 0.0, "speech_start"),
+                             (5.4, 5000.0, "speech_end")]),
+        harness.Report(), audio_seconds=599.4, wall_seconds=600.0,
+        gaps=[(0.0, 0.5)])
+    out = capsys.readouterr().out
+    assert "0.5 s of capture stall subtracted" in out
+    assert "uncorrected mean would read" in out
+
+
+def test_audio_lost_some_other_way_still_stops_the_judging():
+    """A stall can be subtracted because its size is known. Audio that went
+    missing without one cannot be."""
+    report = harness.Report()
+    harness.check_events(late_events(), report,
+                         audio_seconds=107.0, wall_seconds=120.0, gaps=[])
+    assert "Events come back fast enough to be useful" not in [
+        c.name for c in report.checks
+    ]
+
+
+def test_main_async_passes_the_gaps_to_the_lag_check(monkeypatch, capsys):
+    """The join that carries the correction from the capture loop to the
+    check. A stall that is recorded and then not used is no correction at
+    all, and nothing else here executes this line."""
+    patch_stream(monkeypatch)
+    seen = {}
+    real = harness.check_events
+
+    def spy(collected, report, **kwargs):
+        seen.update(kwargs)
+        return real(collected, report, **kwargs)
+
+    monkeypatch.setattr(harness, "check_events", spy)
+    server, url = serve_health(GOOD_HEALTH)
+    try:
+        monkeypatch.setattr(sys, "argv",
+                            ["x", "--url", url, "--seconds", "0.3"])
+        harness.main()
+    finally:
+        server.shutdown()
+    assert "gaps" in seen, "the correction never reached the check"
+
+
+def test_the_correction_decides_whether_the_lag_check_passes():
+    """The one that matters. Raw lag over budget, corrected lag under it: if
+    check_events ignored the gaps this would fail, and an earlier version of
+    these tests let exactly that through by only ever using lags well inside
+    the budget."""
+    over_budget = harness.MAX_EVENT_LAG_MS / 1000.0 + 1.0     # 2.5 s raw
+    collected = make_collected(
+        0.0, [(over_budget, 0.0, "speech_start"),
+              (over_budget + 5.0, 5000.0, "speech_end")])
+
+    loose = harness.Report()
+    harness.check_events(collected, loose)
+    assert "Events come back fast enough to be useful" in [
+        c.name for c in loose.failed
+    ], "the raw lag was supposed to be over budget"
+
+    corrected = harness.Report()
+    harness.check_events(collected, corrected, gaps=[(0.0, 2.0)])
+    assert corrected.failed == []
+
+
+def test_a_stall_cannot_excuse_a_genuinely_slow_server():
+    """Subtracting more than the stall would turn the correction into a way
+    of passing anything."""
+    report = harness.Report()
+    collected = make_collected(0.0, [(20.0, 0.0, "speech_start"),
+                                     (25.0, 5000.0, "speech_end")])
+    harness.check_events(collected, report, gaps=[(0.0, 0.5)])
+    assert "Events come back fast enough to be useful" in [
         c.name for c in report.failed
     ]

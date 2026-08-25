@@ -263,6 +263,12 @@ ASR_HALLUCINATIONS = (
     # instead of assumed from one.
     "H\u00e3y \u0111\u0103ng k\u00fd k\u00eanh \u0111\u1ec3 \u1ee7ng h\u1ed9 "
     "k\u00eanh c\u1ee7a m\u00ecnh nh\u00e9.",
+    # A committed sentence at 331.4 s of a ten-minute run, scored 0.57 for
+    # speech - squarely among the real sentences, which is one more nail in
+    # the score-based idea - and translated into Japanese. The closing line
+    # of a video, not of a meeting.
+    "H\u1eb9n g\u1eb7p l\u1ea1i c\u00e1c b\u1ea1n trong "
+    "nh\u1eefng video ti\u1ebfp theo.",
 )
 
 # What the list above cannot do: it matches whole sentences, so the same
