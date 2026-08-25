@@ -23,6 +23,7 @@ from server.pipeline.buffer import (
     FRAME_BYTES,
     BufferManager,
     FinalizeReason,
+    PartialWindow,
     bytes_to_ms,
     ms_to_bytes,
 )
@@ -335,3 +336,78 @@ def test_reset_clears_everything_for_the_next_meeting():
     assert buffer.is_open is False
     assert buffer.stats.utterances == 0
     assert buffer.open_index == 0
+
+
+# ---------------------------------------------------------------------------
+# The running prediction only decodes the tail of a long sentence
+#
+# Uncapped it re-decodes from the start every 600 ms, which over ten minutes
+# cost 97.8 s against 21.6 s for every committed sentence put together, with
+# one pass reaching 4.7 s while the slowest sentence took 0.4 s.
+# ---------------------------------------------------------------------------
+def window(seconds: float, start_ms: float = 0.0) -> PartialWindow:
+    return PartialWindow(index=0, start_ms=start_ms,
+                         pcm=bytes(int(seconds * SAMPLE_RATE) * SAMPLE_WIDTH))
+
+
+def test_a_short_window_is_left_alone():
+    """Most sentences never reach the cap, and copying them would be waste."""
+    short = window(2.0)
+    assert short.tail(4.0) is short
+
+
+def test_a_window_exactly_at_the_cap_is_left_alone():
+    assert window(4.0).tail(4.0).duration_ms == pytest.approx(4000.0)
+
+
+def test_a_long_window_is_cut_to_the_cap():
+    assert window(7.0).tail(4.0).duration_ms == pytest.approx(4000.0)
+
+
+def test_the_tail_is_the_end_not_the_beginning():
+    """It has to be the end: the point is to show what is being said now."""
+    # A second of silence then a second of 0x11, so the tail must be the
+    # second half. Sized from SAMPLE_RATE: at 8000 samples each half is only
+    # half a second, the whole window fits inside the cap, and the test passes
+    # by never cutting anything.
+    full = PartialWindow(
+        index=0, start_ms=0.0,
+        pcm=b"\x00\x00" * SAMPLE_RATE + b"\x11\x11" * SAMPLE_RATE)
+    assert full.duration_ms == pytest.approx(2000.0)
+    assert set(full.tail(1.0).pcm) == {0x11}
+
+
+def test_the_cut_window_says_where_it_now_starts():
+    """Or the timestamps stop lining up with the audio the server received."""
+    cut = window(7.0, start_ms=1000.0).tail(4.0)
+    assert cut.start_ms == pytest.approx(4000.0)
+    assert cut.end_ms == pytest.approx(8000.0)
+
+
+def test_the_cut_window_keeps_its_index():
+    assert window(7.0).tail(4.0).index == 0
+
+
+def test_the_cut_lands_on_a_sample_boundary():
+    """Half a sample would shift every value after it by one byte."""
+    assert len(window(7.0).tail(3.3333).pcm) % SAMPLE_WIDTH == 0
+
+
+def test_a_cap_of_zero_or_less_changes_nothing():
+    """Rather than emptying the window and transcribing silence."""
+    full = window(7.0)
+    assert full.tail(0.0) is full
+    assert full.tail(-1.0) is full
+
+
+def test_the_configured_cap_bounds_the_worst_pass():
+    """The 4.7 s pass that stalled a run could not happen under this."""
+    from server.config import PARTIAL_WINDOW_SECONDS
+    assert window(30.0).tail(PARTIAL_WINDOW_SECONDS).duration_ms / 1000.0 \
+        == pytest.approx(PARTIAL_WINDOW_SECONDS)
+
+
+def test_the_cap_is_below_the_max_utterance():
+    """Above it the cap would never fire and nothing would change."""
+    from server.config import FINALIZE_MAX_DURATION_MS, PARTIAL_WINDOW_SECONDS
+    assert PARTIAL_WINDOW_SECONDS * 1000 < FINALIZE_MAX_DURATION_MS

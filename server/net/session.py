@@ -35,7 +35,7 @@ from common.protocol import (
     parse_message,
     validate_audio_chunk,
 )
-from server.config import SAMPLE_RATE
+from server.config import PARTIAL_WINDOW_SECONDS, SAMPLE_RATE
 from server.pipeline.asr import Transcriber
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
@@ -456,6 +456,9 @@ class ServerSession:
         """
         if self.transcriber is None:
             return []
+        # Only the tail of a long sentence. See PARTIAL_WINDOW_SECONDS: the
+        # full window cost more than every committed sentence put together.
+        partial = partial.tail(PARTIAL_WINDOW_SECONDS)
         spent: dict[str, float] = {}
         lang_code = ""
         if self.language_identifier is not None:

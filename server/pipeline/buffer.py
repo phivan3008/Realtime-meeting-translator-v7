@@ -106,6 +106,38 @@ class PartialWindow:
     def end_ms(self) -> float:
         return self.start_ms + self.duration_ms
 
+    def tail(self, seconds: float) -> "PartialWindow":
+        """The last ``seconds`` of it, for the ASR to decode.
+
+        The running prediction re-decodes the whole open utterance every
+        600 ms, so a seven-second sentence is decoded eleven times at growing
+        lengths - about 45 seconds of audio for 7 seconds of speech, and the
+        last pass is always the most expensive. Measured over ten minutes,
+        partial decoding took 97.8 s against 21.6 s for every committed
+        sentence put together, and one pass reached 4.7 s while the slowest
+        sentence was 0.4 s. Every second of that is a second the socket was
+        not being read.
+
+        Capping the window bounds the worst pass and cuts the total. What it
+        costs is the start of a long sentence: the grey text shows what is
+        being said now rather than the whole sentence so far. The committed
+        sentence is unaffected - it is decoded once, in full.
+
+        The cut is a plain one, mid-word if that is where it falls. Hunting
+        for a quiet frame is what the max-duration split does, and that
+        matters because the committed sentence keeps the result; here the text
+        is replaced 600 ms later.
+        """
+        wanted = int(seconds * SAMPLE_RATE) * SAMPLE_WIDTH
+        if wanted <= 0 or len(self.pcm) <= wanted:
+            return self
+        cut = len(self.pcm) - wanted
+        return PartialWindow(
+            index=self.index,
+            pcm=self.pcm[cut:],
+            start_ms=self.start_ms + bytes_to_ms(cut),
+        )
+
 
 @dataclass
 class BufferOutput:

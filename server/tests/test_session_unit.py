@@ -961,3 +961,58 @@ def test_the_partial_language_lookup_is_timed_as_well():
     for _ in range(6):
         session.handle_binary(chunk())
     assert "partial_language" in session.stats.stage_seconds
+
+
+# ---------------------------------------------------------------------------
+# The cap has to reach the decoder
+# ---------------------------------------------------------------------------
+def test_the_partial_decoder_never_sees_more_than_the_cap():
+    """Capping the window in the buffer is no use if the session hands the
+    full one to Whisper anyway. 97.8 s of a ten-minute run went here."""
+    from server.config import PARTIAL_WINDOW_SECONDS, SAMPLE_RATE
+    from server.pipeline.asr import Transcriber
+
+    vad = ScriptedVAD([0.9] * 200)
+    decoder = StubDecoder()
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        transcriber=Transcriber(decoder=decoder),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    for _ in range(40):                      # 8 s of audio, well past the cap
+        session.handle_binary(chunk())
+
+    # Partials only. A max-duration cut commits a sentence in the middle of
+    # this, and that one is decoded in full on purpose - an earlier version of
+    # this test measured both together and failed on the sentence.
+    from server.config import ASR_BEAM_SIZE_PARTIAL
+    partials = [samples for samples, _lang, beam in decoder.calls
+                if beam == ASR_BEAM_SIZE_PARTIAL]
+    assert partials, "the running text never ran"
+    longest = max(partials)
+    assert longest <= PARTIAL_WINDOW_SECONDS * SAMPLE_RATE + 1, \
+        f"{longest / SAMPLE_RATE:.1f} s reached the decoder"
+
+
+def test_the_committed_sentence_is_still_decoded_in_full():
+    """The cap is for the running text. A sentence cut short would be a
+    sentence with words missing from it for good."""
+    from server.config import SAMPLE_RATE
+    from server.pipeline.asr import Transcriber
+
+    vad = ScriptedVAD([0.9] * 200 + [0.02] * 200)
+    decoder = StubDecoder()
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        transcriber=Transcriber(decoder=decoder),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    for _ in range(40):
+        session.handle_binary(chunk())
+    for _ in range(20):
+        session.handle_binary(chunk())
+
+    finals = [samples for samples, _lang, beam in decoder.calls if beam > 1]
+    assert finals, "no sentence was committed"
+    assert max(finals) / SAMPLE_RATE > 5.0, \
+        "the committed sentence was cut down to the partial window"

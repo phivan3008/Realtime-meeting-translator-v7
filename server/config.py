@@ -47,6 +47,22 @@ PARTIAL_INTERVAL_MS = 600
 # through one.
 SPLIT_SEARCH_MS = 500
 
+# How much of the open utterance the running prediction decodes. It re-decodes
+# from the start every PARTIAL_INTERVAL_MS, so an uncapped window costs about
+# six times the audio it covers: a seven-second sentence is decoded eleven
+# times at 0.6, 1.2 ... 7.0 seconds.
+#
+# Measured over a ten-minute meeting, that came to 97.8 s of decoding against
+# 21.6 s for every committed sentence put together - 16% of the run spent on
+# text that is replaced 600 ms later, on the same thread that reads audio. The
+# worst single pass took 4.7 s while the slowest committed sentence took 0.4 s.
+#
+# Four seconds bounds the worst pass and cuts the total by about a third. The
+# cost is the start of a long sentence: the grey text shows what is being said
+# now rather than the whole sentence so far. The committed sentence is
+# decoded once, in full, and is unaffected.
+PARTIAL_WINDOW_SECONDS = 4.0
+
 # --- 3. Deep Noise Filter (AST, DESIGN.md section 3.3) ----------------------
 # DESIGN.md allows "YAMNet or a slimmed AST". AST wins on this pod: YAMNet
 # means TensorFlow, and TF 2.17 pins numpy < 2.1 and protobuf 4.x while vllm,
