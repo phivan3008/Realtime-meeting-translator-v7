@@ -12,7 +12,7 @@ Hệ thống phiên dịch thời gian thực hai chiều Việt Nam (VI) - Nh�
 Chịu trách nhiệm thu thập âm thanh, truyền lên Server và giao tiếp UI. Không xử lý ML.
 - **Audio Capture:** `pyaudiowpatch` qua WASAPI Loopback (16kHz, 16-bit PCM, Mono). Bắt toàn bộ âm thanh cuộc họp (Zoom, Teams...).
 - **Streaming:** Đóng gói audio thành các chunk 200ms (6400 bytes), gửi liên tục lên Server qua WebSocket. Client KHÔNG lọc gì cả, gửi toàn bộ audio kể cả khoảng lặng (~256 kbps).
-- **UI Render:** Lắng nghe JSON từ Server, hiển thị 2 trạng thái: Partial (chữ mờ - đang dự đoán) và Final (chữ đậm - chốt câu + bản dịch).
+- **UI Render (PySide6):** Lắng nghe JSON từ Server, hiển thị 2 trạng thái: Partial (chữ mờ - đang dự đoán) và Final (chữ đậm - chốt câu + bản dịch). Câu và bản dịch tới trong hai message riêng, ghép theo `sentence_id`, nên một hàng được cập nhật tại chỗ chứ không nối thêm theo thứ tự tới. Câu không dịch được hiển thị kèm lý do và nguyên văn model trả lời. Toàn bộ phần thu âm và socket chạy trong luồng riêng, chỉ chạm vào giao diện qua Qt signal.
 
 ## 3. Server Architecture (GPU Pod)
 Đường ống (Pipeline) xử lý khép kín tuần tự:

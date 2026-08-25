@@ -39,3 +39,8 @@ httpx2==2.12.0             # starlette's TestClient backend. It warns that
 #       --python-platform x86_64-unknown-linux-gnu \
 #       server/requirements.txt -o server/requirements.lock.txt
 uv==0.12.5
+
+# --- UI tests ---
+# Same pin as client/requirements.txt. The window itself needs a display,
+# but the transcript model behind it is pure Python and tested here.
+pyside6==6.11.2

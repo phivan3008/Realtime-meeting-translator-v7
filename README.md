@@ -104,6 +104,22 @@ còn hơn từ chối cuộc họp — nhưng lúc đó phụ đề không đán
 # Nếu pod không truy cập trực tiếp được, mở tunnel ở cửa sổ riêng và để đó:
 ssh -N -L 8000:127.0.0.1:8000 <user>@<pod-ssh-host>
 ```
+Cửa sổ phiên dịch:
+
+```powershell
+py -3.11 -m client.ui.main --url ws://127.0.0.1:8000
+```
+
+Bấm **Bắt đầu**, rồi phát âm thanh cuộc họp. Chữ mờ nghiêng là dự đoán đang
+chạy; chữ đậm là câu đã chốt, bản dịch màu xanh ngay dưới. Câu nào không dịch
+được sẽ nói rõ lý do và nguyên văn model đã trả lời, thay vì để trống — một ô
+trống trông giống lỗi client hơn là một câu trả lời từ máy chủ.
+
+Đóng cửa sổ sẽ gửi `bye` và **chờ máy chủ dịch xong câu cuối**, nên đừng tắt
+bằng cách kill tiến trình.
+
+Hoặc chạy bằng script kiểm thử, không giao diện:
+
 ```powershell
 python client\tests_real\test_real_stream.py --url ws://127.0.0.1:8000 --seconds 120
 ```
