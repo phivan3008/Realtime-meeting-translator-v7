@@ -277,16 +277,52 @@ def test_the_partial_index_matches_the_utterance_it_will_become():
 # ---------------------------------------------------------------------------
 # Speaker change and end of stream
 # ---------------------------------------------------------------------------
-def test_a_speaker_change_finalises_the_open_utterance():
-    buffer = manager()
-    buffer.push(output(span(tone(400), 0, opens=True)))
-    result = buffer.notify_speaker_change()
+def test_a_speaker_change_commits_the_head_and_keeps_the_rest():
+    buffer = manager(max_duration_ms=10_000)
+    buffer.push(output(span(tone(900), 0, opens=True)))
+    result = buffer.cut_at(600)
     assert [u.reason for u in result.finals] == [FinalizeReason.SPEAKER_CHANGE]
-    assert buffer.is_open is False
+    assert buffer.is_open, "the newcomer's audio was thrown away"
+
+
+def test_the_two_halves_of_a_speaker_change_share_no_audio():
+    buffer = manager(max_duration_ms=10_000)
+    buffer.push(output(span(tone(900), 0, opens=True)))
+    head = buffer.cut_at(600).finals[0]
+    tail = buffer.flush().finals[0]
+    assert head.duration_ms + tail.duration_ms == pytest.approx(900, abs=1)
+    assert tail.start_ms == pytest.approx(head.end_ms, abs=1)
+
+
+def test_the_newcomer_does_not_continue_the_previous_sentence():
+    """A max-duration cut is one sentence in two halves; this is two people."""
+    buffer = manager(max_duration_ms=10_000)
+    buffer.push(output(span(tone(900), 0, opens=True)))
+    buffer.cut_at(600)
+    assert buffer.flush().finals[0].continues_previous is False
 
 
 def test_a_speaker_change_with_nothing_open_is_a_no_op():
-    assert manager().notify_speaker_change().finals == []
+    assert manager().cut_at(500).finals == []
+
+
+@pytest.mark.parametrize("offset_ms", [0, -100, 5_000])
+def test_a_cut_outside_the_open_audio_is_refused(offset_ms):
+    """Nothing may produce an empty sentence or throw the newcomer away."""
+    buffer = manager(max_duration_ms=10_000)
+    buffer.push(output(span(tone(900), 0, opens=True)))
+    assert buffer.cut_at(offset_ms).finals == []
+    assert buffer.open_duration_ms == pytest.approx(900, abs=1)
+
+
+def test_the_cut_lands_on_the_quietest_frame_before_the_offset():
+    """So the committed half ends between words, not mid-syllable."""
+    buffer = manager(max_duration_ms=10_000, split_search_ms=200)
+    loud = tone(500)
+    quiet = tone(60, amplitude=1)
+    buffer.push(output(span(loud + quiet + tone(400), 0, opens=True)))
+    head = buffer.cut_at(620).finals[0]
+    assert 500 <= head.duration_ms <= 570
 
 
 def test_flush_commits_what_is_still_open():

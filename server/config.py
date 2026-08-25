@@ -91,6 +91,13 @@ SPEAKER_CENTROID_MOMENTUM = 0.7
 #: listening.
 SPEAKER_UNKNOWN = "Speaker_unknown"
 
+# --- 5b. Speaker change boundary (DESIGN.md 3.2) ----------------------------
+# Two people whose turns are less than VAD_MIN_SILENCE_MS apart land in one
+# utterance, which then gets one voiceprint, one language and one ASR pass.
+SPEAKER_CHANGE_ENABLED = os.environ.get("SPEAKER_CHANGE_ENABLED", "1") != "0"
+SPEAKER_CHANGE_WINDOW_MS = 1_000
+SPEAKER_CHANGE_THRESHOLD = 0.25
+
 # --- 6. Language ID (DESIGN.md 3.6) -----------------------------------------
 LID_MODEL = os.environ.get("LID_MODEL", "speechbrain/lang-id-voxlingua107-ecapa")
 LID_DEVICE = os.environ.get("LID_DEVICE", "")

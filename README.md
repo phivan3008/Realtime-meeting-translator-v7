@@ -23,7 +23,7 @@ chạy thử.
 Client                    Server (8 tầng)
 ──────                    ───────────────
 WASAPI loopback           1. VAD (Silero)           cắt thành đoạn có tiếng nói
-16 kHz mono 16-bit        2. Buffer Manager         gom thành câu, chốt khi ngắt
+16 kHz mono 16-bit        2. Buffer Manager         chốt câu khi ngắt hoặc đổi giọng
 chunk 200 ms ─────────►   3. Noise Filter (AST)     bỏ tiếng gõ phím, ho
                           4. Overlap Resolver       hạ giọng chồng lấn
                           5. Diarization (ECAPA)    ai đang nói

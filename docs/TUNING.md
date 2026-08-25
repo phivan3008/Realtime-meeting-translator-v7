@@ -203,6 +203,52 @@ nhất.
 
 ---
 
+## 5b. Cắt câu khi đổi người nói
+
+| Thông số | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `SPEAKER_CHANGE_ENABLED` | `True` | Đặt biến môi trường `=0` để tắt hẳn |
+| `SPEAKER_CHANGE_WINDOW_MS` | `1000` | Độ dài đoạn đem đi so giọng |
+| `SPEAKER_CHANGE_THRESHOLD` | `0.25` | Cosine dưới ngưỡng này là đã đổi người |
+
+VAD chỉ đóng đoạn sau `VAD_MIN_SILENCE_MS` (500 ms) im lặng. Người sau nói
+tiếp nhanh hơn thế thì **hai giọng nằm chung một utterance**, và utterance đó
+chỉ được một voiceprint, một lần nhận dạng ngôn ngữ, một lần ASR.
+
+> **Đo được (họp thật một tiếng, 30 phút đầu):** hai người nói tiếng Việt
+> cùng ra `Speaker_01`. 3–5 lần một câu tiếng Việt ngắn (5–7 chữ) mất hẳn:
+> nó bị nuốt vào utterance của câu tiếng Nhật nối ngay sau, trôi khỏi cửa sổ
+> partial 4 giây, và không bao giờ được chốt.
+
+Giây đầu của utterance là **mốc** — người mở lời. Mỗi nhịp partial, giây gần
+nhất được so với mốc đó. Lệch quá ngưỡng thì cắt **ngay trước** cửa sổ lệch,
+không phải tại chỗ phát hiện, để giây của người mới không dính vào câu của
+người cũ.
+
+**`SPEAKER_CHANGE_THRESHOLD`** thấp hơn `SPEAKER_MATCH_THRESHOLD` (0.30) một
+cách có chủ ý: đoạn so ở đây chỉ dài 1 giây thay vì cả câu, nên cosine
+cùng-giọng nhiễu hơn và tụt xuống. Cắt nhầm tốn kém hơn bỏ sót — một câu bị
+xé đôi thì cả hai nửa đều dịch kém, còn bỏ sót chỉ là giữ nguyên hành vi cũ.
+
+> **Chưa đo trên dữ liệu thật.** 0.25 là chỗ đặt tạm giữa hai vùng đã đo cho
+> cả câu. Mỗi lần so đều được ghi vào `ChangeStats.scores` và log ở mức DEBUG,
+> nên một lần chạy thật đủ để dựng phân bố và chọn lại số này.
+
+- Giảm xuống: ít cắt hơn, quay dần về hành vi cũ (hai người chung một câu).
+- Tăng lên: cắt vụn. Một người đổi giọng — cười, hạ giọng, ho — cũng thành
+  ranh giới câu, và ASR mất ngữ cảnh ở mỗi mảnh.
+
+**`SPEAKER_CHANGE_WINDOW_MS`** quyết định phát hiện được sớm đến đâu: cần đủ
+audio cho **hai** cửa sổ không chồng nhau, nên 1000 ms nghĩa là sớm nhất
+2 giây sau khi utterance mở. Giảm xuống thì phát hiện sớm hơn nhưng voiceprint
+của đoạn ngắn nhiễu hơn — dưới `SPEAKER_MIN_DURATION_MS` (600 ms) thì chính
+tầng nhận dạng người nói đã coi là quá ngắn để tin.
+
+Chi phí: **một lần embed ECAPA mỗi 600 ms**. Mốc chỉ embed một lần cho mỗi
+utterance.
+
+---
+
 ## 6. Nhận dạng ngôn ngữ
 
 | Thông số | Mặc định | Ý nghĩa |

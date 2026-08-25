@@ -28,6 +28,7 @@ from common.protocol import (
     make_ready,
 )
 from server.net.session import ServerSession, SessionState
+from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.noise import Classification, NoiseFilter
 from server.pipeline.vad import VAD_FRAME_SAMPLES, VADEvent, VADSegmenter
 
@@ -1016,3 +1017,80 @@ def test_the_committed_sentence_is_still_decoded_in_full():
     assert finals, "no sentence was committed"
     assert max(finals) / SAMPLE_RATE > 5.0, \
         "the committed sentence was cut down to the partial window"
+
+
+# ---------------------------------------------------------------------------
+# A second voice ends the sentence
+# ---------------------------------------------------------------------------
+class VoiceByVolume:
+    """A voiceprint that is just loud-or-quiet, so two "people" fit in a test."""
+
+    def embed(self, pcm: bytes) -> np.ndarray:
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float64)
+        loud = float(np.abs(samples).mean()) > 4_000
+        return np.array([1.0, 0.0]) if loud else np.array([0.0, 1.0])
+
+
+def two_voice_session(**kwargs) -> ServerSession:
+    vad = ScriptedVAD((0.9,))
+    return ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        speaker_identifier=SpeakerIdentifier(embedder=VoiceByVolume()),
+        **kwargs,
+    )
+
+
+def speak(session, chunks: int, level: int) -> list[dict]:
+    """Feed uninterrupted speech at one volume; return every message sent."""
+    payloads = []
+    for _ in range(chunks):
+        payloads += [json.loads(m)
+                     for m in session.handle_binary(chunk(level)).messages]
+    return payloads
+
+
+LOUD, QUIET = 8_000, 500
+
+
+def test_a_second_voice_ends_the_sentence_without_a_pause():
+    """The VAD needs 500 ms of silence; people do not leave that much."""
+    session = two_voice_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 12, LOUD) + speak(session, 12, QUIET)
+    reasons = [p["reason"] for p in payloads if p["type"] == "utterance"]
+    assert "speaker_change" in reasons
+    assert session.stats.speaker_changes == 1
+
+
+def test_one_voice_talking_on_is_not_cut():
+    session = two_voice_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 24, LOUD)
+    reasons = [p["reason"] for p in payloads if p["type"] == "utterance"]
+    assert "speaker_change" not in reasons
+    assert session.stats.speaker_changes == 0
+
+
+def test_the_two_voices_become_two_sentences():
+    """The point of the cut: each half gets its own ASR and language pass."""
+    session = two_voice_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = (speak(session, 12, LOUD) + speak(session, 12, QUIET)
+                + [json.loads(m) for m in session.finish().messages])
+    utterances = [p for p in payloads if p["type"] == "utterance"]
+    assert len(utterances) >= 2, "both voices came out as one sentence"
+
+
+def test_the_cut_can_be_turned_off(monkeypatch):
+    """So a meeting can fall back to the old behaviour without a redeploy."""
+    monkeypatch.setattr("server.net.session.SPEAKER_CHANGE_ENABLED", False)
+    session = two_voice_session()
+    assert session.speaker_change is None
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 12, LOUD) + speak(session, 12, QUIET)
+    reasons = [p["reason"] for p in payloads if p["type"] == "utterance"]
+    assert "speaker_change" not in reasons
+
+
+def test_without_a_speaker_identifier_there_is_nothing_to_compare():
+    assert make_session().speaker_change is None

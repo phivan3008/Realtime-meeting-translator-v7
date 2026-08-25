@@ -3,8 +3,9 @@
 ``DESIGN.md`` 3.2: gather the speech coming out of the VAD into sentences and
 fire a Finalize Event when one is over. Three things end a sentence: a pause
 (the VAD closed the segment), a max-duration cut (somebody has talked past
-the limit without stopping), or a speaker change - a hook that exists but
-nothing calls yet.
+the limit without stopping), or a speaker change, which
+:mod:`server.pipeline.speaker_change` detects and turns into a call to
+:meth:`BufferManager.cut_at`.
 
 A max-duration cut lands on the quietest 32 ms frame within
 ``SPLIT_SEARCH_MS`` rather than exactly on the limit, because Whisper turns
@@ -225,11 +226,30 @@ class BufferManager:
             self.stats.partials += 1
         return result
 
-    def notify_speaker_change(self) -> BufferOutput:
-        """Diarization hook: a new voice means the previous sentence is done."""
+    def cut_at(self, offset_ms: float) -> BufferOutput:
+        """End the open utterance ``offset_ms`` into it and keep the rest.
+
+        Used when a second voice has taken over: the head belongs to whoever
+        started, the tail to whoever is talking now. The split lands on the
+        quietest frame in the ``split_search_ms`` before the offset, so it
+        falls between words and keeps the newcomer's audio out of the
+        committed half.
+
+        Ties go to the latest frame. Two people talking over each other leave
+        no dip to find, and cutting half a second early there leaves the old
+        voice at the head of the new utterance, which is detected as another
+        change and cut again - one handover, two sentences.
+        """
         if not self.is_open:
             return BufferOutput()
-        return BufferOutput(finals=[self._finalize(FinalizeReason.SPEAKER_CHANGE)])
+        wanted = ms_to_bytes(offset_ms)
+        if wanted <= 0 or wanted >= len(self._pcm):
+            return BufferOutput()
+        cut = self._quietest_split_point(wanted, prefer_late=True)
+        if cut <= 0 or cut >= len(self._pcm):
+            return BufferOutput()
+        return BufferOutput(finals=[
+            self._split(cut, FinalizeReason.SPEAKER_CHANGE, continues=False)])
 
     def flush(self, reason: FinalizeReason = FinalizeReason.END_OF_STREAM
               ) -> BufferOutput:
@@ -265,27 +285,42 @@ class BufferManager:
         return utterance
 
     def _cut_for_length(self) -> Utterance:
-        """Commit the first part of an over-long utterance and keep the rest."""
+        """Commit the first part of an over-long utterance and keep the rest.
+
+        The speaker never stopped, so the second half carries straight on from
+        the cut - no gap, no repeated audio.
+        """
+        return self._split(self._quietest_split_point(),
+                           FinalizeReason.MAX_DURATION, continues=True)
+
+    def _split(self, cut: int, reason: FinalizeReason,
+               continues: bool) -> Utterance:
+        """Commit ``self._pcm[:cut]`` and reopen on the rest."""
         assert self._start_ms is not None
-        cut = self._quietest_split_point()
         head, tail = bytes(self._pcm[:cut]), bytes(self._pcm[cut:])
         start_ms = self._start_ms
 
         self._pcm = bytearray(head)
-        utterance = self._finalize(FinalizeReason.MAX_DURATION)
+        utterance = self._finalize(reason)
 
-        # The speaker never stopped, so the next utterance carries straight on
-        # from the cut - no gap, no repeated audio.
         self._open(start_ms + bytes_to_ms(len(head)))
         self._pcm = bytearray(tail)
-        self._continues = True
+        self._continues = continues
         return utterance
 
-    def _quietest_split_point(self) -> int:
-        """Byte offset of the quietest frame boundary near the length limit."""
-        limit = ms_to_bytes(self.max_duration_ms)
-        earliest = max(FRAME_BYTES, ms_to_bytes(self.max_duration_ms
-                                                - self.split_search_ms))
+    def _quietest_split_point(self, limit: Optional[int] = None,
+                              prefer_late: bool = False) -> int:
+        """Byte offset of the quietest frame boundary just before ``limit``.
+
+        ``limit`` defaults to the max-duration cut point. ``prefer_late``
+        settles ties at the latest frame rather than the earliest: speech with
+        no dip in it has no boundary to find, and then the honest answer is
+        ``limit`` itself rather than half a second earlier.
+        """
+        if limit is None:
+            limit = ms_to_bytes(self.max_duration_ms)
+        limit = min(limit, len(self._pcm))
+        earliest = max(FRAME_BYTES, limit - ms_to_bytes(self.split_search_ms))
         if limit <= earliest:                       # pragma: no cover - guarded
             return limit
 
@@ -300,7 +335,9 @@ class BufferManager:
             .astype(np.float32)
             .reshape(frames, VAD_FRAME_SAMPLES)
         )
-        quietest = int(np.argmin(np.mean(energy * energy, axis=1)))
+        power = np.mean(energy * energy, axis=1)
+        quietest = (frames - 1 - int(np.argmin(power[::-1])) if prefer_late
+                    else int(np.argmin(power)))
         # Cut after the quiet frame, so the silence stays with the first half
         # rather than opening the next utterance with it.
         return earliest + (quietest + 1) * FRAME_BYTES

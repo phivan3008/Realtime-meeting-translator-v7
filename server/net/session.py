@@ -35,13 +35,18 @@ from common.protocol import (
     parse_message,
     validate_audio_chunk,
 )
-from server.config import PARTIAL_WINDOW_SECONDS, SAMPLE_RATE
+from server.config import (
+    PARTIAL_WINDOW_SECONDS,
+    SAMPLE_RATE,
+    SPEAKER_CHANGE_ENABLED,
+)
 from server.pipeline.asr import Transcriber, Transcript
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
+from server.pipeline.speaker_change import SpeakerChangeDetector
 from server.pipeline.translate import Translator, Turn
 from server.pipeline.translation_queue import TranslationWorker
 from server.pipeline.vad import VADSegmenter
@@ -74,6 +79,9 @@ class ServerSessionStats:
     utterances_dropped: int = 0
     utterances_shaped: int = 0
     utterances_identified: int = 0
+    #: Sentences ended because a second voice took over rather than because
+    #: anybody paused.
+    speaker_changes: int = 0
     utterances_with_language: int = 0
     transcripts: int = 0
     translations: int = 0
@@ -155,6 +163,13 @@ class ServerSession:
         self.noise_filter = self.stages.noise_filter
         self.overlap_resolver = self.stages.overlap_resolver
         self.speaker_identifier = self.stages.speaker_identifier
+        # Two people whose turns are less than VAD_MIN_SILENCE_MS apart arrive
+        # as one utterance. This watches for the second voice and cuts.
+        self.speaker_change: Optional[SpeakerChangeDetector] = (
+            SpeakerChangeDetector(self.speaker_identifier.embedder)
+            if self.speaker_identifier is not None and SPEAKER_CHANGE_ENABLED
+            else None
+        )
         self.language_identifier = self.stages.language_identifier
         self.transcriber = self.stages.transcriber
         self.translator = self.stages.translator
@@ -230,6 +245,8 @@ class ServerSession:
         if self.speaker_identifier is not None:
             # A new meeting starts with nobody known.
             self.speaker_identifier.reset()
+        if self.speaker_change is not None:
+            self.speaker_change.reset()
         if self.language_identifier is not None:
             self.language_identifier.reset()
         if self.transcriber is not None:
@@ -265,12 +282,34 @@ class ServerSession:
         ]
         self.stats.events_sent += len(messages)
         self.stats.speech_segments = self.segmenter.stats.segments
-        messages += self._safely_announce(self.buffer.push(out))
+        messages += self._safely_announce(
+            self._split_on_speaker_change(self.buffer.push(out)))
         # Translations finished since the last chunk. Audio arrives every
         # 200 ms, so this is a cheap and regular heartbeat to hand them back
         # on - no extra timer, and at most 200 ms of extra delay.
         messages += self._collect_translations()
         return Response(messages=messages)
+
+    def _split_on_speaker_change(self, result: BufferOutput) -> BufferOutput:
+        """End the open utterance when a second voice has taken it over.
+
+        The partial window is the open utterance in full, so the detector gets
+        it before it is trimmed for the running ASR. A cut turns the head into
+        a committed sentence; the running text that described the whole thing
+        is dropped, because the committed sentence replaces it on screen
+        anyway.
+        """
+        if self.speaker_change is None or result.partial is None:
+            return result
+        assert self.buffer is not None
+        change = self.speaker_change.observe(result.partial)
+        if change is None:
+            return result
+        extra = self.buffer.cut_at(change.at_ms)
+        if not extra.finals:
+            return result
+        self.stats.speaker_changes += len(extra.finals)
+        return BufferOutput(finals=result.finals + extra.finals, partial=None)
 
     def _language_for(self, decision) -> str:
         """The language to force on the ASR when the LID could not decide.
