@@ -240,8 +240,17 @@ async def stream(socket: WebSocket) -> None:
         # A dropped connection mid-sentence still has to close the segment,
         # or the buffer manager waits forever for an end that never comes.
         final = session.finish()
-        with contextlib.suppress(Exception):
-            await _send(socket, final)
+        if final.messages:
+            try:
+                await _send(socket, final)
+            except Exception as exc:
+                # Not suppressed silently: these are the last sentence of the
+                # meeting and its translation, and a socket already closed is
+                # exactly how one of them went missing once.
+                log.warning(
+                    "Session %s: %d closing message(s) could not be sent "
+                    "(%s: %s)", session.session_id or "?",
+                    len(final.messages), type(exc).__name__, exc)
         if claimed and state.active_session_id == session.session_id:
             state.active_session_id = None
         log.info(

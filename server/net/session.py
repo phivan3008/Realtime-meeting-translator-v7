@@ -168,8 +168,9 @@ class ServerSession:
             # A clean goodbye can still land mid-sentence. Close the segment
             # here, while the socket is open and the event can still be
             # delivered, or the last sentence of the meeting never gets an
-            # end and never gets finalised.
-            messages = self._close_segment()
+            # end and never gets finalised - and wait for its translation
+            # too, because after this the socket is gone.
+            messages = self._finalise()
             self.state = SessionState.CLOSED
             return Response(messages=messages, close=True,
                             close_reason=f"client bye: {reason}")
@@ -464,14 +465,29 @@ class ServerSession:
         Safe to call after a ``bye`` has already closed it: the segmenter
         reports no events the second time, so no duplicate end is emitted.
         """
-        messages = self._close_segment()
-        if self.worker is not None:
-            # Whatever is still queued has no later chance. Each one says so
-            # rather than simply never arriving.
-            messages += [self._as_message(done)
-                         for done in self.worker.stop()]
+        messages = self._finalise()
         self.state = SessionState.CLOSED
         return Response(messages=messages)
+
+    def _finalise(self) -> list[str]:
+        """Close the last segment and settle every outstanding translation.
+
+        Used by both ``bye`` and ``finish``, and it has to be, because the
+        socket closes as soon as ``bye`` is answered. The last sentence of a
+        meeting is committed here and queued for translation here; if the
+        answer is collected any later there is nowhere left to send it. On the
+        run that found this, the final sentence arrived and its translation
+        never did - the connection was already shut.
+
+        Stopping the worker waits for the sentence in flight (about 0.2 s) and
+        accounts for anything still queued, so every sentence gets an answer
+        even if the answer is "the meeting ended first".
+        """
+        messages = self._close_segment()
+        if self.worker is not None:
+            messages += [self._as_message(done)
+                         for done in self.worker.stop()]
+        return messages
 
     def _collect_translations(self) -> list[str]:
         """Whatever the worker has finished, in the order it finished it."""

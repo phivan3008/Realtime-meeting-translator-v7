@@ -835,3 +835,58 @@ def test_the_threshold_is_a_few_chunks_of_audio():
     """At 200 ms a chunk, a second is five chunks the socket did not read."""
     from server.net.session import SLOW_UTTERANCE_SECONDS
     assert SLOW_UTTERANCE_SECONDS == 1.0
+
+
+# ---------------------------------------------------------------------------
+# The last sentence of the meeting
+#
+# It is committed when the client says goodbye, queued for translation there,
+# and the socket closes as soon as that is answered. On the tenth end-to-end
+# run the sentence arrived and its translation never did.
+# ---------------------------------------------------------------------------
+def test_the_last_sentence_gets_its_translation_before_the_socket_closes():
+    session, _decoder, _backend = full_session([0.9] * 14)
+    for _ in range(3):
+        session.handle_binary(chunk())
+    response = session.handle_text(make_bye("client stopped"))
+    finals = of_type(response, "final")
+    translations = of_type(response, "translation")
+    assert finals, "the last sentence never made it"
+    assert response.close is True
+    assert [t["sentence_id"] for t in translations] == \
+        [f["sentence_id"] for f in finals]
+
+
+def test_every_sentence_committed_on_bye_is_answered():
+    """Answered, not necessarily translated - but never simply absent."""
+    session, _decoder, _backend = full_session([0.9] * 14,
+                                               backend=StubBackend(answer=""))
+    for _ in range(3):
+        session.handle_binary(chunk())
+    response = session.handle_text(make_bye(""))
+    finals = of_type(response, "final")
+    translations = of_type(response, "translation")
+    assert len(translations) == len(finals)
+    assert all(t["reason"] for t in translations)
+
+
+def test_finishing_after_a_bye_repeats_nothing():
+    """finish() still runs in the server's finally block."""
+    session, _decoder, _backend = full_session([0.9] * 14)
+    for _ in range(3):
+        session.handle_binary(chunk())
+    session.handle_text(make_bye(""))
+    assert session.finish().messages == []
+
+
+def test_a_dropped_connection_still_answers_its_last_sentence():
+    """No bye at all: the finally block has to do the same job."""
+    session, _decoder, _backend = full_session([0.9] * 14)
+    for _ in range(3):
+        session.handle_binary(chunk())
+    response = session.finish()
+    finals = of_type(response, "final")
+    translations = of_type(response, "translation")
+    assert finals
+    assert [t["sentence_id"] for t in translations] == \
+        [f["sentence_id"] for f in finals]
