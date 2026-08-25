@@ -68,6 +68,13 @@ MAX_EVENT_LAG_MS = 1_500.0
 # Chunks the client is allowed to lose to back-pressure over the whole run.
 MAX_DROPPED_CHUNKS = 0
 
+#: Audio this machine failed to capture, past which the lag figures stop
+#: meaning anything: at_ms counts what the server received, so audio never
+#: recorded here shifts every event's apparent lag by the same amount. A run
+#: legitimately ends part-way through a chunk, so a little slack. Thirteen
+#: seconds is not slack.
+MISSING_AUDIO_TOLERANCE_S = 1.0
+
 
 @dataclass
 class Check:
@@ -241,7 +248,30 @@ async def stream_for(url: str, device_hint: str | None, seconds: float,
         await client.stop(drain_timeout=2.0)
         await asyncio.wait_for(task, timeout=10.0)
     print()
+    report_capture_gaps(capture, gaps)
     return client, collected
+
+
+def report_capture_gaps(capture: LoopbackCapture,
+                        gaps: list[tuple[float, float]]) -> None:
+    """Where the audio went, when some of it did not arrive.
+
+    Missing audio and a slow server look identical in the lag figures, and the
+    lag figures were what the test judged. This is what tells them apart, and
+    it lives on the client because that is where audio is either read or lost.
+    """
+    stats = capture.stats
+    print(f"  Capture: {stats.callbacks} callbacks, "
+          f"{stats.chunks_emitted} chunks emitted, "
+          f"{stats.chunks_dropped} dropped by the capture queue, "
+          f"{stats.input_overflows} device overflow(s)")
+    if not gaps:
+        return
+    total = sum(waited for _at, waited in gaps)
+    print(f"  Capture stalled {len(gaps)} time(s), {total:.1f} s in total. "
+          f"The audio that would have filled those gaps was never recorded:")
+    for at, waited in sorted(gaps, key=lambda gap: -gap[1])[:5]:
+        print(f"    at t={at:6.1f}s  waited {waited:.2f}s for a chunk")
 
 
 def check_stream(client: StreamClient, collected: Collected, seconds: float,
@@ -267,7 +297,21 @@ def check_stream(client: StreamClient, collected: Collected, seconds: float,
                "; ".join(stats.errors) or "none")
 
 
-def check_events(collected: Collected, report: Report) -> None:
+def check_events(collected: Collected, report: Report,
+                 audio_seconds: float = 0.0, wall_seconds: float = 0.0) -> None:
+    """Judge the server on how fast events came back.
+
+    ``audio_seconds`` and ``wall_seconds`` are here for a reason worth
+    stating. Lag is ``arrival - (stream_start + at_ms)``, and ``at_ms`` counts
+    audio the server *received*. If this machine failed to read part of the
+    meeting, at_ms trails the wall clock by exactly the amount missing and
+    every lag is inflated by it - a run that sent 107 s of audio over 120 s
+    reported a flat 13 s lag on every event and blamed the server, which had
+    done nothing wrong.
+
+    So when audio is missing the lag figures are printed and not judged. A
+    check that names the wrong culprit is worse than no check at all.
+    """
     events = collected.vad_events
     print("\n  VAD events from the server:")
     for arrived, payload in events:
@@ -288,16 +332,26 @@ def check_events(collected: Collected, report: Report) -> None:
                f"{starts} speech_start, {ends} speech_end")
 
     lags = collected.lags_ms()
-    if lags:
-        worst = max(lags)
-        print(f"\n  End-to-end lag: mean {statistics.fmean(lags):.0f} ms, "
-              f"max {worst:.0f} ms (budget {MAX_EVENT_LAG_MS:.0f} ms)")
-        report.add("Events come back fast enough to be useful",
-                   worst < MAX_EVENT_LAG_MS,
-                   f"worst {worst:.0f} ms < {MAX_EVENT_LAG_MS:.0f} ms")
-        report.add("No event arrives before its audio was captured",
-                   min(lags) > -CHUNK_DURATION_MS,
-                   f"smallest lag {min(lags):.0f} ms")
+    if not lags:
+        return
+    worst = max(lags)
+    print(f"\n  End-to-end lag: mean {statistics.fmean(lags):.0f} ms, "
+          f"max {worst:.0f} ms (budget {MAX_EVENT_LAG_MS:.0f} ms)")
+
+    missing = wall_seconds - audio_seconds if wall_seconds else 0.0
+    if missing > MISSING_AUDIO_TOLERANCE_S:
+        print(f"    NOT JUDGED: {missing:.1f} s of audio never left this "
+              f"machine, so at_ms trails the wall clock by that much and "
+              f"every lag above is inflated by it. Fix the capture first; "
+              f"these numbers say nothing about the server until then.")
+        return
+
+    report.add("Events come back fast enough to be useful",
+               worst < MAX_EVENT_LAG_MS,
+               f"worst {worst:.0f} ms < {MAX_EVENT_LAG_MS:.0f} ms")
+    report.add("No event arrives before its audio was captured",
+               min(lags) > -CHUNK_DURATION_MS,
+               f"smallest lag {min(lags):.0f} ms")
 
 
 def check_utterances(collected: Collected, report: Report) -> None:
@@ -609,7 +663,9 @@ async def main_async(args) -> int:
         return 1
 
     check_stream(client, collected, args.seconds, report)
-    check_events(collected, report)
+    check_events(collected, report,
+                 audio_seconds=client.stats.chunks_sent * CHUNK_DURATION_MS / 1000.0,
+                 wall_seconds=args.seconds)
     check_utterances(collected, report)
     check_transcripts(collected, report)
 

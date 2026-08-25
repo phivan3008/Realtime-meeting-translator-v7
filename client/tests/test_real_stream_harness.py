@@ -814,3 +814,70 @@ def test_the_client_lag_budget_is_tighter_than_the_servers():
     """So drift shows up in the test before the server starts dropping."""
     from server.config import TRANSLATION_MAX_LAG_SECONDS
     assert harness.MAX_TRANSLATION_LAG_S < TRANSLATION_MAX_LAG_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# Missing audio must not be reported as a slow server
+# ---------------------------------------------------------------------------
+def late_events(lag_ms: float = 13_000.0):
+    """One event, arriving `lag_ms` after the audio it describes."""
+    return make_collected(0.0, [(lag_ms / 1000.0, 0.0, "speech_start"),
+                                (lag_ms / 1000.0 + 1, 1000.0, "speech_end")])
+
+
+def test_a_slow_server_is_still_caught_when_all_the_audio_arrived():
+    report = harness.Report()
+    harness.check_events(late_events(), report,
+                         audio_seconds=120.0, wall_seconds=120.0)
+    assert "Events come back fast enough to be useful" in [
+        c.name for c in report.failed
+    ]
+
+
+def test_missing_audio_is_not_blamed_on_the_server():
+    """A run sent 107 s of audio over 120 s and reported a flat 13 s lag on
+    every event. The server had done nothing wrong."""
+    report = harness.Report()
+    harness.check_events(late_events(), report,
+                         audio_seconds=107.0, wall_seconds=120.0)
+    assert "Events come back fast enough to be useful" not in [
+        c.name for c in report.checks
+    ]
+
+
+def test_missing_audio_says_so_on_screen(capsys):
+    """Refusing to judge without saying why is just a check that vanished."""
+    harness.check_events(late_events(), harness.Report(),
+                         audio_seconds=107.0, wall_seconds=120.0)
+    out = capsys.readouterr().out
+    assert "NOT JUDGED" in out
+    assert "13.0 s of audio never left this machine" in out
+
+
+def test_a_run_ending_mid_chunk_is_still_judged():
+    """A fraction of a second short is how every run ends."""
+    report = harness.Report()
+    collected = make_collected(0.0, [(0.6, 200.0, "speech_start"),
+                                     (5.4, 5000.0, "speech_end")])
+    harness.check_events(collected, report,
+                         audio_seconds=119.8, wall_seconds=120.0)
+    assert report.failed == []
+    assert "Events come back fast enough to be useful" in [
+        c.name for c in report.checks
+    ]
+
+
+def test_the_lag_is_still_printed_when_it_is_not_judged(capsys):
+    """The numbers are still worth reading; they just cannot be scored."""
+    harness.check_events(late_events(), harness.Report(),
+                         audio_seconds=107.0, wall_seconds=120.0)
+    assert "End-to-end lag:" in capsys.readouterr().out
+
+
+def test_without_a_wall_clock_nothing_is_assumed_missing():
+    """The default for callers that have no figure to give."""
+    report = harness.Report()
+    harness.check_events(late_events(), report)
+    assert "Events come back fast enough to be useful" in [
+        c.name for c in report.checks
+    ]
