@@ -89,9 +89,10 @@ partial; cửa sổ này bị **giới hạn 4 giây cuối**, vì giải mã l�
 Có tầng cắt câu theo **đổi giọng** (`speaker_change.py`) nhưng **đang tắt**:
 voiceprint cửa sổ 1 giây không phân biệt được giọng. Xem `TUNING.md` 5b.
 
-**3. Noise Filter mặc định tắt** (`ENABLE_NOISE_FILTER=1` để bật). Đo trên
-họp thật: 155.8 giây luồng socket cho 593.6 giây audio — 26% — và bỏ được 0
-trên 119 câu. Trên GPU nó rẻ, nhưng GPU thì đổ ở cuDNN rồi segfault.
+**3. Noise Filter mặc định tắt** (`ENABLE_NOISE_FILTER=1` để bật). Hai cuộc
+họp thật: **237 utterance, bỏ được 0 câu**, tốn 1.31 giây mỗi utterance tức
+22% luồng đọc socket, và `slowest sentence` 2.1 s thay vì 0.4 s. Lý do tắt là
+nó không bỏ được gì, không phải chi phí.
 
 Khi bật, nó **rụt rè có chủ đích.** Chỉ bỏ khi speech score thấp **và**
 có lớp non-speech đạt ngưỡng. Hai điểm gần 0 không phải bằng chứng, đó là model

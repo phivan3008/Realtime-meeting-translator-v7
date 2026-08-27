@@ -132,34 +132,42 @@ tới giới hạn.
 
 **Tầng này mặc định TẮT.** Bật bằng `ENABLE_NOISE_FILTER=1`.
 
-> ⚠️ **Phép đo dưới đây lấy từ một lần chạy NGOÀI venv** (conda base). Bản
-> torch/cuDNN ở đó khác bản dự án ghim, nên cả lỗi cuDNN lẫn chi phí CPU đều
-> có thể không đúng với môi trường thật. Cần đo lại — xem cuối mục này.
+Lý do không phải chi phí, mà là **nó không bỏ được gì**.
 
-> **Đo được (họp thật 10 phút, AST trên CPU):** tiêu **155.8 giây** trên luồng
-> đọc socket cho **593.6 giây** audio — **26%** — và bỏ được **0 trên 119 câu**.
-> Nó tốn nhiều hơn cả ASR partial (87.1 s) lẫn ASR final (21.6 s) cộng lại, và
-> gây đình trệ thật: `sentence 118 held the socket for 1.5 s - noise took
-> 1.3 s of it`.
+> **Đo được (hai cuộc họp thật trong venv, AST trên CPU):**
 >
-> Trên GPU nó chỉ tốn 0.9 s cho 175 s, tức 0.5% — nhưng GPU thì segfault
-> (xem dưới). Chi phí **cố định mỗi utterance**, không phụ thuộc độ dài câu:
-> AST luôn xử lý spectrogram 10.24 giây dù câu chỉ 3.6 giây.
+> | | lần 1 | lần 2 |
+> | --- | --- | --- |
+> | audio | 593.6 s | 718.2 s |
+> | utterance | 119 | 119 |
+> | **bỏ được** | **0** | **0** |
+> | `noise` | 155.8 s | 156.4 s |
+> | `slowest sentence` | 2.4 s | 2.1 s |
+>
+> **237 utterance, không bỏ được câu nào.** Chi phí cố định **1.31 giây mỗi
+> utterance** — không phụ thuộc độ dài câu, vì AST luôn xử lý spectrogram
+> 10.24 giây dù câu chỉ 3.6 giây. Tức 22–26% luồng đọc socket.
+>
+> Tắt nó thì `slowest sentence` xuống **0.4 s**. Đó là độ trễ người dùng cảm
+> nhận, nhỏ đi sáu lần.
+
+Những lần duy nhất tầng này từng bỏ câu — `Music 0.82`, `Beatboxing 0.78` —
+đều là **mảnh vụn do lỗi cắt câu theo giọng sinh ra**, thứ đã gỡ bỏ. Nó chưa
+bao giờ bỏ được tiếng ồn thật trên audio của dự án này.
 
 Việc nó làm cũng đã có lớp khác làm: các câu bịa mà nó nhắm tới đều bị
 [`server/data/`](../server/data/README.md) và ba ngưỡng thống kê của ASR chặn.
 
-**Cần đo lại, trong venv, theo thứ tự:**
+**Đường GPU chưa đo lại trong venv.** Lần đổ ở cuDNN là từ conda base, nên có
+thể do môi trường. Muốn có con số cho đủ bộ:
 
-1. `source .venv/bin/activate`, khởi động, kiểm `/health` có `in_venv: true`
-   và cả bảy cờ đúng.
-2. `ENABLE_NOISE_FILTER=1` **không** kèm `NOISE_DEVICE` — để nó tự chọn cuda.
-   Nếu vẫn đổ ở cuDNN thì lỗi là của pod, không phải môi trường.
-3. Nếu chạy được: đọc mục `noise` trong `stages` và số `dropped as noise` ở
-   dòng tổng kết. Trên GPU trước đây là 0.9 s cho 175 s.
+```bash
+NOISE_DEVICE=cuda ENABLE_NOISE_FILTER=1 python3.11 -m uvicorn server.app:app     --host 0.0.0.0 --port 8000
+```
 
-Chỉ khi cả hai vế đều tốt — rẻ **và** bỏ được câu thật — thì mới đáng bật mặc
-định trở lại.
+Nhưng nó **không đổi quyết định**: rẻ đi cũng không làm một tầng chưa từng kích
+hoạt trở nên đáng bật. Chỉ bật lại khi họp thật có tiếng ồn thật — gõ phím, ho,
+quạt — và tầng này bỏ được chúng.
 
 | Thông số | Mặc định | Ý nghĩa |
 | --- | --- | --- |
