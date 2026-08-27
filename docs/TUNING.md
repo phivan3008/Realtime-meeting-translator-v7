@@ -102,7 +102,7 @@ tới giới hạn.
 | `NOISE_MIN_NOISE_SCORE` | `0.3` | ...và chỉ bỏ khi model chắc chắn nghe thấy thứ khác |
 | `NOISE_WINDOW_SECONDS` | `10.0` | Cửa sổ AST đọc mỗi lần |
 | `AST_MODEL_ID` | `MIT/ast-finetuned-…` | Đổi qua biến môi trường `AST_MODEL_ID` |
-| `NOISE_DEVICE` | tự chọn | `cuda` / `cpu` — xem cảnh báo dưới |
+| `NOISE_DEVICE` | `cpu` | Đặt `cuda` để thử GPU — xem cảnh báo dưới |
 
 **Cần cả hai điều kiện, và đó là điểm mấu chốt.** Điểm tiếng nói thấp một
 mình không phải bằng chứng.
@@ -119,26 +119,28 @@ Từng có một câu tiếng Nhật thật bị xoá vì so sánh hai điểm s
 Vì vậy **đừng siết `NOISE_MIN_SPEECH_SCORE` lên** mà không chạy lại real test
 với dữ liệu có câu chêm ngắn.
 
-### `NOISE_DEVICE` — nếu tầng này tự tắt
+### `NOISE_DEVICE` — vì sao mặc định là CPU
 
-`DESIGN.md` định cho AST chạy **CPU** để không chiếm VRAM của Whisper và vLLM,
-nhưng mặc định rỗng nghĩa là tự chọn, và nó chọn cuda khi có.
+`DESIGN.md` vốn định cho AST chạy CPU để nhường VRAM cho Whisper và vLLM.
 
 > **Gặp thật trên pod:** AST trên GPU đổ ở đường attention của cuDNN —
-> `RuntimeError: cuDNN Frontend error: No valid execution plans built` — trên
-> **mọi** utterance. Hai phút họp không ra chữ nào.
+> `RuntimeError: cuDNN Frontend error: No valid execution plans built` — rồi
+> lần gọi kế tiếp vào đúng tầng đó **giết tiến trình**:
+> `Segmentation fault (core dumped)`.
+>
+> Mốc thời gian nói rõ thủ phạm. Lỗi cuDNN lúc `01:31:40.447`; ECAPA chạy
+> `01:31:40.478`; Whisper chạy bình thường tới `01:31:45.988`; rồi chết. CUDA
+> **không** hỏng ngay — thứ giết tiến trình là **vào lại tầng đã hỏng**.
 
-Nếu log server có dòng `stage 'noise' raised`, đặt biến môi trường trước khi
-khởi động server:
+Vì vậy một lỗi có chữ `cuda`, `cudnn`, `cublas` hay `out of memory` làm tầng
+đó **tắt ngay lần đầu**, không chờ đủ ba lần như lỗi thường. Ba lần với lỗi
+thiết bị là ba cơ hội để segfault.
 
-```bash
-NOISE_DEVICE=cpu python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
-```
-
-Rồi đọc mục `noise` trong `stages` ở dòng tổng kết cuối phiên — đó là số giây
-**luồng đọc socket** bỏ ra cho tầng này trong cả cuộc họp. Trên GPU nó dưới
-1 giây cho 3 phút họp; nếu trên CPU nó vọt lên vài chục giây thì cái giá quá
-đắt và nên tắt hẳn tầng lọc nhiễu thay vì chạy nó trên CPU.
+Muốn thử lại trên GPU thì đặt `NOISE_DEVICE=cuda`. Đo bằng mục `noise` trong
+`stages` ở dòng tổng kết — đó là số giây **luồng đọc socket** bỏ ra cho tầng
+này trong cả cuộc họp. Trên GPU nó dưới 1 giây cho 3 phút họp; nếu trên CPU nó
+vọt lên vài chục giây thì cái giá quá đắt, và nên tắt hẳn tầng lọc nhiễu chứ
+không chạy nó trên CPU.
 
 ---
 

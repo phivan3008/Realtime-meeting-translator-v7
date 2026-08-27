@@ -179,6 +179,9 @@ vùng đo được rất hẹp.
 - **Một tầng hỏng từng ăn cả cuộc họp.** Bắt lỗi ở mức *câu* nghĩa là hỏng
   100% trông y hệt hỏng 0%. Giờ bắt ở mức *tầng*: câu đi tiếp thiếu tầng đó,
   và tầng hỏng liên tục thì bị tắt và báo về client.
+- **Lỗi CUDA thì đừng thử lại.** Một lỗi cuDNN ném ra sạch sẽ, CUDA vẫn chạy
+  tiếp 5 giây, rồi lần gọi lại vào đúng tầng đó segfault cả tiến trình. Tầng
+  gặp lỗi thiết bị bị tắt ngay lần đầu.
 - **Đừng bật `condition_on_previous_text`.** Đó là cách một câu bịa thành cả
   đoạn bịa.
 - **`no_speech_prob` một mình không được phép loại đoạn nào.** Whisper đòi

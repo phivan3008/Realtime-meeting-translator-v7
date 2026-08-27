@@ -1169,16 +1169,14 @@ def test_a_session_without_a_speaker_model_has_nothing_to_recluster():
 # A stage that breaks
 # ---------------------------------------------------------------------------
 class BrokenClassifier:
-    """What the pod did: the same failure on every single utterance."""
+    """An ordinary bug, repeated. Not a device failure - see CudaBroken."""
 
     def __init__(self) -> None:
         self.calls = 0
 
     def classify(self, pcm: bytes):
         self.calls += 1
-        raise RuntimeError(
-            "cuDNN Frontend error: [cudnn_frontend] Error: "
-            "No valid execution plans built")
+        raise ValueError("the classifier fell over")
 
 
 def broken_noise_session():
@@ -1258,3 +1256,69 @@ def test_the_failures_are_counted_for_the_summary():
     speak(session, 40, LOUD)
     session.finish()
     assert session.stats.stage_failures.get("noise", 0) >= 1
+
+
+class CudaBroken:
+    """What the pod did. The second call did not raise - it segfaulted."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(self, pcm: bytes):
+        self.calls += 1
+        raise RuntimeError(
+            "cuDNN Frontend error: [cudnn_frontend] Error: "
+            "No valid execution plans built")
+
+
+def cuda_broken_session():
+    from server.pipeline.asr import Transcriber
+
+    vad = ScriptedVAD((0.9,))
+    broken = CudaBroken()
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        noise_filter=NoiseFilter(classifier=broken),
+        transcriber=Transcriber(decoder=StubDecoder()),
+    )
+    return session, broken
+
+
+def test_a_cuda_failure_switches_the_stage_off_at_once():
+    """The pod's timeline: the cuDNN error raised, then Whisper and ECAPA both
+    kept working on CUDA for five more seconds, and the process died on the
+    next call into the broken stage. Going back in is what killed it, so a
+    three-strike rule is three chances to segfault."""
+    session, broken = cuda_broken_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak(session, 80, LOUD)
+    session.finish()
+    assert session.noise_filter is None
+    assert broken.calls == 1, "the broken CUDA path was entered again"
+
+
+def test_a_cuda_failure_says_so_rather_than_blaming_the_stage():
+    session, _ = cuda_broken_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 80, LOUD)
+    payloads += [json.loads(m) for m in session.finish().messages]
+    errors = [p for p in payloads if p["type"] == "error"]
+    assert errors
+    assert "CUDA" in errors[0]["message"]
+    assert errors[0]["fatal"] is False
+
+
+def test_the_meeting_carries_on_without_the_stage():
+    session, _ = cuda_broken_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 80, LOUD)
+    payloads += [json.loads(m) for m in session.finish().messages]
+    assert [p for p in payloads if p["type"] == "final"]
+
+
+def test_an_ordinary_failure_still_gets_its_three_chances():
+    """A bad sentence is not a broken device."""
+    session = broken_noise_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak(session, 40, LOUD)
+    assert session.noise_filter is not None

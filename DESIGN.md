@@ -56,6 +56,12 @@ không bao giờ lệch với màn hình.
 Mỗi tầng một file trong `server/pipeline/`. Mọi tầng chạy trên **luồng đọc
 socket**, trừ tầng dịch.
 
+Một tầng ném lỗi thì **chỉ tầng đó** mất, câu vẫn đi tiếp qua các tầng còn lại
+— `Analysis` giữ giá trị mặc định, mà mặc định chính là hành vi khi thiếu tầng
+đó. Hỏng ba lần liên tiếp thì tắt tầng; lỗi **thiết bị** (`cuda`, `cudnn`,
+`cublas`, `out of memory`) thì tắt ngay lần đầu, vì vào lại tầng đã hỏng là thứ
+giết tiến trình. Client được báo bằng `error` không fatal.
+
 | # | Tầng | Model / kỹ thuật | Việc |
 | --- | --- | --- | --- |
 | 1 | VAD | Silero (CPU) | Cắt stream thành đoạn có tiếng nói, giữ pre-roll để không cụt phụ âm đầu |
@@ -83,7 +89,11 @@ partial; cửa sổ này bị **giới hạn 4 giây cuối**, vì giải mã l�
 Có tầng cắt câu theo **đổi giọng** (`speaker_change.py`) nhưng **đang tắt**:
 voiceprint cửa sổ 1 giây không phân biệt được giọng. Xem `TUNING.md` 5b.
 
-**3. Noise Filter — rụt rè có chủ đích.** Chỉ bỏ khi speech score thấp **và**
+**3. Noise Filter chạy CPU** (`NOISE_DEVICE`) — nhường VRAM cho Whisper và
+vLLM, và trên pod thật AST trên GPU đổ ở cuDNN rồi segfault tiến trình ở lần
+gọi sau.
+
+**Rụt rè có chủ đích.** Chỉ bỏ khi speech score thấp **và**
 có lớp non-speech đạt ngưỡng. Hai điểm gần 0 không phải bằng chứng, đó là model
 đang không biết. Bỏ nhầm câu thật thì mất luôn; để lọt tiếng ho chỉ tốn một lần
 gọi Whisper. Câu bị bỏ vẫn báo về client kèm nhãn (`kept: false`).

@@ -44,7 +44,9 @@ PARTIAL_WINDOW_SECONDS = 4.0
 AST_MODEL_ID = os.environ.get(
     "AST_MODEL_ID", "MIT/ast-finetuned-audioset-10-10-0.4593"
 )
-NOISE_DEVICE = os.environ.get("NOISE_DEVICE", "")
+# CPU by default: DESIGN.md wants this stage off the GPU so the VRAM belongs
+# to Whisper and vLLM, and on the pod AST on CUDA killed the server outright.
+NOISE_DEVICE = os.environ.get("NOISE_DEVICE", "cpu")
 
 # An utterance is dropped only when both hold: little speech, and something
 # else recognised confidently. Either alone is not evidence.

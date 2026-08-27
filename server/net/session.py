@@ -160,6 +160,14 @@ SLOW_UTTERANCE_SECONDS = 1.0
 #: sentence is a broken stage, and calling it again only buries the evidence.
 STAGE_FAILURE_LIMIT = 3
 
+#: A failure naming any of these is a broken device, not a bad sentence, and
+#: the stage goes off on the first one. On the pod a cuDNN error raised
+#: cleanly, CUDA kept working for five more seconds, and the process died on
+#: the next call into the same stage - so going back in is what kills it, and
+#: three chances are three chances to segfault. Matching the message is crude,
+#: but torch raises a plain RuntimeError for these with nothing else to go on.
+DEVICE_FAILURES = ("cuda", "cudnn", "cublas", "out of memory")
+
 #: Which attribute holds each stage, so a broken one can be switched off.
 STAGE_ATTRIBUTES = {
     "noise": "noise_filter",
@@ -400,19 +408,24 @@ class ServerSession:
         try:
             with self._timed(name, into):
                 yield
-        except Exception:
-            self._stage_broke(name)
+        except Exception as exc:
+            self._stage_broke(name, exc)
         else:
             self._stage_failures.pop(name, None)
 
-    def _stage_broke(self, name: str) -> None:
+    def _stage_broke(self, name: str, exc: BaseException) -> None:
         count = self._stage_failures.get(name, 0) + 1
         self._stage_failures[name] = count
         self.stats.stage_failures[name] = (
             self.stats.stage_failures.get(name, 0) + 1)
         log.exception("Session %s: stage %r raised (%d in a row)",
                       self.session_id or "?", name, count)
-        if count < STAGE_FAILURE_LIMIT or name in self.stats.stages_disabled:
+
+        message = str(exc).lower()
+        device = any(word in message for word in DEVICE_FAILURES)
+        if name in self.stats.stages_disabled:
+            return
+        if not device and count < STAGE_FAILURE_LIMIT:
             return
         setattr(self, STAGE_ATTRIBUTES[name], None)
         if name == "speaker":
@@ -421,6 +434,9 @@ class ServerSession:
             self.speaker_history = None
         self.stats.stages_disabled.append(name)
         self._stage_notices.append(
+            f"tầng {name} đã bị tắt vì lỗi CUDA/thiết bị; cuộc họp vẫn chạy "
+            f"nhưng thiếu tầng này"
+            if device else
             f"tầng {name} đã bị tắt sau {count} lần lỗi liên tiếp; "
             f"cuộc họp vẫn chạy nhưng thiếu tầng này")
 
