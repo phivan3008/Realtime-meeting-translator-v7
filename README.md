@@ -74,6 +74,15 @@ Client **không chạy ML**. Silero VAD nằm ở server — xem `DESIGN.md` m�
 
 ## Chạy
 
+> **Không cần đặt biến môi trường nào.** Mọi thông số đều có mặc định dùng
+> được. Nếu ai đó bảo bạn đặt một biến, đó là để **thử nghiệm** — xem bảng ở
+> [Biến môi trường](#biến-môi-trường) bên dưới, và nhớ mở terminal mới khi
+> chạy lại bình thường.
+>
+> Khởi động in ra `No environment overrides; running on the defaults`. Nếu
+> thay vào đó là `Environment overrides in effect: {...}` thì có biến còn sót
+> từ terminal trước, và nó đang đổi hành vi.
+
 Server cần **hai tiến trình**. vLLM chạy riêng: nó giữ trước một phần GPU lúc
 nạp, và tách ra thì LLM restart được mà không rớt cuộc họp.
 
@@ -166,6 +175,34 @@ python client\tests_real\test_real_stream.py --url ws://127.0.0.1:8000 --seconds
 ```
 
 Server nhận **một cuộc họp mỗi lần**; kết nối thứ hai bị từ chối với mã 1013.
+
+## Biến môi trường
+
+Không cần biến nào để chạy. Bảng này để **thử nghiệm**, và để đối chiếu khi
+`/health` báo `overrides` không rỗng.
+
+| Biến | Mặc định | Đặt khi nào |
+| --- | --- | --- |
+| `ENABLE_NOISE_FILTER` | không đặt | `=1` để bật tầng lọc nhiễu. Đo được: 237 utterance, bỏ 0 câu, tốn 22% luồng đọc socket |
+| `DISABLE_OVERLAP` | không đặt | `=1` cho ASR ăn audio thô. Tầng này tốn 0.2 s cho 10 phút họp |
+| `LANGUAGE_SPLIT` | `1` | `=0` để thôi cắt câu chứa hai ngôn ngữ |
+| `SPEAKER_CHANGE_ENABLED` | `0` | `=1` để bật lại phép cắt theo giọng — **đã đo và bác bỏ**, xem `TUNING.md` 5b |
+| `NOISE_DEVICE` | `cpu` | `cuda` để thử AST trên GPU. Từng đổ ở cuDNN rồi segfault |
+| `ASR_DEVICE`, `LID_DEVICE`, `SPEAKER_DEVICE` | tự chọn | `cuda` / `cpu` |
+| `ASR_MODEL`, `LID_MODEL`, `TRANSLATE_MODEL` | xem `config.py` | Đổi checkpoint |
+| `ASR_COMPUTE_TYPE` | tự chọn | `float16` / `int8` |
+| `ASR_CACHE_DIR`, `LID_CACHE_DIR`, `SPEAKER_CACHE_DIR` | `models/...` | Đổi chỗ tải model về |
+| `TRANSLATE_BASE_URL` | `http://127.0.0.1:8001/v1` | Khi vLLM ở cổng khác |
+| `TRANSLATE_TIMEOUT_S` | `20` | Khi vLLM chậm |
+
+**Sau mọi thử nghiệm, mở terminal mới.** `unset` từng biến dễ sót; terminal mới
+thì không.
+
+Xem biến nào đang đặt mà không cần khởi động server:
+
+```bash
+python3.11 -c "import sys; sys.path.insert(0,'.');     from server.config import overrides; print(overrides())"
+```
 
 ## Kiểm thử
 

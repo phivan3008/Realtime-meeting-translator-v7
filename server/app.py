@@ -34,6 +34,7 @@ from common.protocol import (
     SAMPLE_RATE,
     make_error,
 )
+from server.config import overrides
 from server.net.session import Response, ServerSession, Stages
 from server.pipeline.asr import AsrError, Transcriber
 from server.pipeline.diarization import DiarizationError, SpeakerIdentifier
@@ -89,6 +90,14 @@ class AppState:
         why rather than the pod going silent.
         """
         log.info("Python: %s", which_environment())
+        set_now = overrides()
+        if set_now:
+            log.warning("Environment overrides in effect: %s. Anything left "
+                        "over from an earlier terminal changes what this run "
+                        "does; the defaults need no variables at all.",
+                        set_now)
+        else:
+            log.info("No environment overrides; running on the defaults")
         if not in_venv():
             log.warning(
                 "Not running in a virtual environment. The pipeline will "
@@ -197,6 +206,7 @@ def health() -> dict:
         "status": "ok",
         "python": sys.executable,
         "in_venv": in_venv(),
+        "overrides": overrides(),
         "protocol_version": PROTOCOL_VERSION,
         "sample_rate": SAMPLE_RATE,
         "chunk_bytes": CHUNK_BYTES,

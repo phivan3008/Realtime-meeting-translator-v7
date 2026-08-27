@@ -405,3 +405,51 @@ def test_the_startup_log_says_which_interpreter(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         state.load_models()
     assert "Python:" in caplog.text
+
+
+def test_health_reports_environment_overrides(monkeypatch):
+    """A variable left over from an earlier terminal changes what the pipeline
+    does and says nothing. Three measurements in this project were taken
+    against a configuration nobody meant to be running."""
+    from server.app import health
+
+    monkeypatch.setenv("LANGUAGE_SPLIT", "0")
+    assert health()["overrides"]["LANGUAGE_SPLIT"] == "0"
+
+
+def test_no_overrides_reads_as_empty(monkeypatch):
+    from server.config import known_variables
+    from server.app import health
+
+    for name in known_variables():
+        monkeypatch.delenv(name, raising=False)
+    assert health()["overrides"] == {}
+
+
+def test_every_variable_the_config_reads_is_known():
+    """The list is derived from config.py, so a new one cannot be forgotten."""
+    import re
+    from pathlib import Path as P
+
+    from server.config import known_variables
+
+    source = (P(app_module.__file__).parent / "config.py").read_text(
+        encoding="utf-8")
+    found = set(re.findall(r'os\.environ\.get\("(\w+)"', source))
+    assert set(known_variables()) == found
+
+
+def test_the_startup_log_says_when_nothing_is_overridden(monkeypatch, caplog):
+    from server.app import AppState
+    from server.config import known_variables
+
+    for name in known_variables():
+        monkeypatch.delenv(name, raising=False)
+    state = AppState()
+    monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
+    for name in ("NoiseFilter", "OverlapResolver", "SpeakerIdentifier",
+                 "LanguageIdentifier", "Transcriber", "Translator"):
+        monkeypatch.setattr(app_module, name, lambda **kw: object())
+    with caplog.at_level(logging.INFO):
+        state.load_models()
+    assert "No environment overrides" in caplog.text

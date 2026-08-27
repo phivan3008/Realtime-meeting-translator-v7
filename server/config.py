@@ -11,6 +11,8 @@ The blocked-sentence lists are editable text files in ``server/data/``; see
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 
 # --- Audio contract ---------------------------------------------------------
 # Re-exported from common/protocol.py so the two sides cannot drift.
@@ -195,3 +197,28 @@ TRANSLATE_MAX_WRONG_SCRIPT = 0.30
 #: Which language each one becomes, and the names used in the prompt.
 TRANSLATE_PAIR = {"vi": "ja", "ja": "vi"}
 LANGUAGE_NAMES = {"vi": "Vietnamese", "ja": "Japanese"}
+
+
+# ---------------------------------------------------------------------------
+# Overrides
+# ---------------------------------------------------------------------------
+def known_variables() -> list[str]:
+    """Every environment variable this file reads, taken from the file.
+
+    Derived rather than listed by hand: a list that has to be kept in step
+    with the code is a list that stops being true.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    return sorted(set(re.findall(r'os\.environ\.get\("(\w+)"', source)))
+
+
+def overrides() -> dict[str, str]:
+    """The ones actually set right now.
+
+    Startup reports these, because a variable left over from an earlier
+    terminal changes what the pipeline does and says nothing about it. Three
+    measurements in this project were taken against a configuration nobody
+    had meant to be running.
+    """
+    return {name: os.environ[name]
+            for name in known_variables() if name in os.environ}
