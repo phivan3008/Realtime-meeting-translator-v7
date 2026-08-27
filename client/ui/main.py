@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 DEFAULT_URL = "ws://127.0.0.1:8000"
+DEFAULT_OUT_DIR = "recordings"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -22,6 +23,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", default="",
                         help="part of the loopback device name, if the wrong "
                              "one is picked")
+    parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR,
+                        help="where to write the meeting's two files "
+                             f"(default {DEFAULT_OUT_DIR}/)")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
 
@@ -39,7 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     from client.ui.window import MeetingWindow
 
     app = QApplication(sys.argv[:1])
-    window = MeetingWindow(args.url, args.device or None)
+    window = MeetingWindow(args.url, args.device or None,
+                           out_dir=Path(args.out_dir))
     window.show()
     return app.exec()
 

@@ -289,3 +289,44 @@ def test_a_redraw_does_not_count_as_the_reader_scrolling(window):
     # The position may land at the bottom - a shorter document has nowhere
     # else to put it - but that is the widget moving, not a decision.
     assert window._follow is False, "the follow restarted on its own"
+
+
+# ---------------------------------------------------------------------------
+# Keeping the meeting
+# ---------------------------------------------------------------------------
+def test_a_meeting_is_written_to_disk(qt_app, monkeypatch, tmp_path):
+    win = MeetingWindow("ws://127.0.0.1:8000", out_dir=tmp_path)
+    monkeypatch.setattr(win.session, "start", lambda: None)
+    monkeypatch.setattr(win.session, "stop", lambda timeout=5.0: None)
+    monkeypatch.setattr(type(win.session), "running", property(lambda _: False))
+    win.toggle()
+    win.on_message(final())
+    win.on_message(translation())
+    win.on_stopped()
+    win.close()
+
+    written = sorted(path.name for path in tmp_path.iterdir())
+    assert len(written) == 2, written
+    minutes = next(p for p in tmp_path.iterdir() if ".debug" not in p.name)
+    text = minutes.read_text(encoding="utf-8")
+    assert "Xin chào mọi người." in text
+    assert "こんにちは皆様。" in text
+
+
+def test_nothing_is_written_when_no_directory_was_asked_for(qt_app, monkeypatch):
+    win = MeetingWindow("ws://127.0.0.1:8000")
+    monkeypatch.setattr(win.session, "start", lambda: None)
+    monkeypatch.setattr(win.session, "stop", lambda timeout=5.0: None)
+    monkeypatch.setattr(type(win.session), "running", property(lambda _: False))
+    win.toggle()
+    win.on_message(final())
+    assert win.recorder is None
+    win.close()
+
+
+def test_the_status_bar_says_where_the_meeting_went(window, monkeypatch, tmp_path):
+    window.out_dir = tmp_path
+    monkeypatch.setattr(type(window.session), "running", property(lambda _: False))
+    window.toggle()
+    window.on_stopped()
+    assert "biên bản" in window.statusBar().currentMessage()

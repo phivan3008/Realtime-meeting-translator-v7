@@ -119,6 +119,20 @@ trống trông giống lỗi client hơn là một câu trả lời từ máy ch
 Đóng cửa sổ sẽ gửi `bye` và **chờ máy chủ dịch xong câu cuối**, nên đừng tắt
 bằng cách kill tiến trình.
 
+### Cuộc họp được ghi lại
+
+Mỗi lần bấm **Bắt đầu** sinh ra hai file trong `recordings/` (đổi bằng
+`--out-dir`):
+
+| File | Cho ai đọc |
+| --- | --- |
+| `meeting-<ngày>-<giờ>.txt` | Biên bản: từng câu đã chốt kèm bản dịch, người nói, giờ |
+| `meeting-<ngày>-<giờ>.debug.txt` | Mọi message theo đúng thứ tự tới, kể cả chữ mờ |
+
+Cả hai là UTF-8 và được ghi xuống đĩa ngay, nên kill tiến trình vẫn giữ được
+mọi thứ tới thời điểm đó. Biên bản được **viết lại** mỗi khi có bản dịch tới
+muộn hoặc máy chủ sửa nhãn người nói, nên nó luôn khớp với màn hình.
+
 Hoặc chạy bằng script kiểm thử, không giao diện:
 
 ```powershell

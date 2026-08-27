@@ -37,6 +37,7 @@ sound card:
 - `session.py` — thu âm và socket trên luồng riêng với asyncio loop riêng,
   chạm giao diện chỉ qua Qt signal.
 - `window.py` — widget. `sentence_html`/`partial_html` là hàm thuần.
+- `record.py` — ghi cuộc họp ra hai file, thuần Python.
 - `main.py` — điểm vào.
 
 Chữ mờ nghiêng là dự đoán đang chạy, nằm ở nhãn riêng dưới transcript. Chữ đậm
@@ -44,6 +45,11 @@ là câu đã chốt, bản dịch xanh ngay dưới. Câu không dịch đượ
 nguyên văn model — ô trống trông giống lỗi client hơn là câu trả lời.
 
 Transcript được **escape**, không render: Whisper sẵn sàng cho ra `<b>`.
+
+Mỗi cuộc họp ghi ra **hai file**: biên bản (câu đã chốt kèm bản dịch, cho người
+đọc lại) và nhật ký gỡ lỗi (mọi message theo thứ tự tới, kể cả chữ mờ). Bản
+dịch tới muộn và nhãn người nói được sửa đều làm biên bản **viết lại**, nên nó
+không bao giờ lệch với màn hình.
 
 ## 3. Server — tám tầng
 

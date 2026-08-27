@@ -18,6 +18,7 @@ transcript, which costs nothing and stays visible while reading back.
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from client.record import Recorder, paths_for
 from client.ui.session import MeetingSession
 from client.ui.transcript import Sentence, TranscriptModel
 
@@ -79,8 +81,12 @@ def partial_html(text: str, lang_code: str) -> str:
 class MeetingWindow(QMainWindow):
     """Live transcript and translation for one meeting."""
 
-    def __init__(self, url: str, device_hint: Optional[str] = None) -> None:
+    def __init__(self, url: str, device_hint: Optional[str] = None,
+                 out_dir: Optional[Path] = None) -> None:
         super().__init__()
+        #: Where each meeting's two files go. None keeps nothing.
+        self.out_dir = out_dir
+        self.recorder: Optional[Recorder] = None
         self.setWindowTitle("Phiên dịch cuộc họp VI ↔ JA")
         self.resize(900, 640)
 
@@ -146,9 +152,25 @@ class MeetingWindow(QMainWindow):
             return
         self.model.clear()
         self._redraw()
+        self._start_recording()
         self._set_busy("Đang kết nối…")
         self.start_button.setText("Dừng")
         self.session.start()
+
+    def _start_recording(self) -> None:
+        """One pair of files per meeting, opened before the first word."""
+        self._stop_recording()
+        if self.out_dir is None:
+            return
+        try:
+            self.recorder = Recorder(*paths_for(self.out_dir))
+        except OSError as exc:                  # a full disk, a bad path
+            self.statusBar().showMessage(f"Không ghi được biên bản: {exc}")
+
+    def _stop_recording(self) -> None:
+        if self.recorder is not None:
+            self.recorder.close()
+            self.recorder = None
 
     def _set_busy(self, message: str) -> None:
         """Connecting and closing both take seconds; a click in between is
@@ -158,6 +180,8 @@ class MeetingWindow(QMainWindow):
 
     def on_message(self, message: dict) -> None:
         kind = message.get("type")
+        if self.recorder is not None:
+            self.recorder.apply(message)
         changed = self.model.apply(message)
         if kind == "partial":
             self._show_running_text()
@@ -169,21 +193,29 @@ class MeetingWindow(QMainWindow):
     def on_status(self, text: str) -> None:
         # The session says nothing until it is connected and listening.
         self.start_button.setEnabled(True)
+        if self.recorder is not None:
+            self.recorder.note("status", text)
         self.statusBar().showMessage(text)
 
     def on_failed(self, text: str) -> None:
         self.start_button.setEnabled(True)
+        if self.recorder is not None:
+            self.recorder.note("failed", text)
         self.statusBar().showMessage(text)
 
     def on_stopped(self) -> None:
         self.start_button.setEnabled(True)
         self.start_button.setText("Bắt đầu")
-        self.statusBar().showMessage("Đã dừng")
+        where = self.recorder.minutes_path if self.recorder is not None else None
+        self._stop_recording()
+        self.statusBar().showMessage(
+            f"Đã dừng · biên bản: {where}" if where else "Đã dừng")
         self._show_running_text()
 
     def closeEvent(self, event) -> None:                    # noqa: N802 - Qt
         # The server needs the goodbye to finish the last sentence.
         self.session.stop()
+        self._stop_recording()
         super().closeEvent(event)
 
     def resizeEvent(self, event) -> None:                   # noqa: N802 - Qt
