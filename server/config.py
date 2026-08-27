@@ -149,6 +149,14 @@ ASR_BEAM_SIZE_FINAL = 5
 # Whisper answers near-silence with invented text. These three catch the
 # unconfident kind; server/data/ catches the rest.
 ASR_NO_SPEECH_THRESHOLD = 0.6
+
+# Below this, no_speech_prob alone is enough to refuse a segment. Above it,
+# avg_logprob has to agree - which is Whisper's own rule, and what stops a
+# real seven-second sentence being thrown away. Duration is what separates
+# the two cases: the sentence that rule was built for ran 6.8 s, and every
+# confirmed invention on a real meeting was under 2 s. The number is the
+# floor the speaker model and the LID already refuse to answer below.
+ASR_SHORT_UTTERANCE_MS = SPEAKER_MIN_DURATION_MS
 ASR_LOG_PROB_THRESHOLD = -1.0
 ASR_MAX_COMPRESSION_RATIO = 2.4
 

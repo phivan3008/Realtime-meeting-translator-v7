@@ -562,6 +562,7 @@ bất đồng ở trên.
 | `ASR_BEAM_SIZE_FINAL` | `5` | Câu chốt được beam search |
 | `ASR_NO_SPEECH_THRESHOLD` | `0.6` | Coi là im lặng — **cần thêm điều kiện logprob** |
 | `ASR_LOG_PROB_THRESHOLD` | `-1.0` | Dưới ngưỡng này là đoán mò |
+| `ASR_SHORT_UTTERANCE_MS` | `600` | Ngắn hơn thì `no_speech_prob` **một mình** đủ để loại |
 | `ASR_MAX_COMPRESSION_RATIO` | `2.4` | Trên ngưỡng này là đang lặp |
 | `ASR_CONDITION_ON_PREVIOUS` | `False` | **Đừng bật** |
 
@@ -617,6 +618,23 @@ Nó sai **hai chiều cùng lúc**, và đó là lý do phải bỏ: Whisper vi�
 với `avg_logprob` **cao hơn** khi phiên âm thật, nên `no_speech_prob` một mình
 vừa giết tiếng nói thật vừa để lọt câu bịa tự tin. Câu bịa là việc của
 [`server/data/`](../server/data/README.md), không phải của lớp thống kê.
+
+**Nhưng sự nghi ngờ đó chỉ dành cho đoạn đủ dài.** Dưới
+`ASR_SHORT_UTTERANCE_MS` thì `no_speech_prob` một mình lại đủ để loại.
+
+> **Đo được (họp thật 12 phút, người dùng nghe lại xác nhận):** mọi câu
+> `Cảm ơn...` lên tới câu chốt đều là bịa, và tất cả đều đến từ mảnh audio quá
+> ngắn — nhiều câu mang nhãn `Speaker_unknown`, tức dưới 600 ms. Whisper vẫn
+> trả lời, và trả lời **tự tin**: `no_speech 0.86, logprob -0.31`.
+
+Độ dài là thứ tách được hai trường hợp: câu được cứu dài **6.8 giây**, mọi câu
+bịa đã xác nhận đều **dưới 2 giây**. Con số 600 ms là đúng lằn ranh mà tầng
+người nói (`SPEAKER_MIN_DURATION_MS`) và tầng ngôn ngữ (`LID_MIN_DURATION_MS`)
+đã từ chối trả lời — Whisper là model duy nhất vẫn trả lời ở đó.
+
+- Tăng lên: bắt được nhiều câu bịa ngắn hơn, nhưng câu trả lời thật một hai từ
+  ("Vâng", "はい") bắt đầu bị mất.
+- Giảm xuống: quay về trạng thái câu bịa ngắn lọt lên màn hình.
 
 Mỗi đoạn bị loại giờ in kèm cả hai chỉ số, và mỗi đoạn **được giữ** dù
 `no_speech_prob` vượt ngưỡng cũng in ra một dòng — đó là bằng chứng để đặt lại

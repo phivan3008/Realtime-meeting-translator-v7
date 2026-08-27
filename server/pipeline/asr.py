@@ -44,6 +44,7 @@ from server.config import (
     ASR_MAX_COMPRESSION_RATIO,
     ASR_MODEL,
     ASR_NO_SPEECH_THRESHOLD,
+    ASR_SHORT_UTTERANCE_MS,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
 )
@@ -130,12 +131,14 @@ class Transcriber:
         self,
         decoder: Optional[Decoder] = None,
         no_speech_threshold: float = ASR_NO_SPEECH_THRESHOLD,
+        short_utterance_ms: float = ASR_SHORT_UTTERANCE_MS,
         log_prob_threshold: float = ASR_LOG_PROB_THRESHOLD,
         max_compression_ratio: float = ASR_MAX_COMPRESSION_RATIO,
         hallucinations: Optional[Hallucinations] = None,
     ) -> None:
         self.decoder = decoder if decoder is not None else WhisperDecoder()
         self.no_speech_threshold = no_speech_threshold
+        self.short_utterance_ms = short_utterance_ms
         self.log_prob_threshold = log_prob_threshold
         self.max_compression_ratio = max_compression_ratio
         self.hallucinations = (hallucinations if hallucinations is not None
@@ -153,9 +156,10 @@ class Transcriber:
         beam = ASR_BEAM_SIZE_FINAL if is_final else ASR_BEAM_SIZE_PARTIAL
         pieces, detected = self.decoder.decode(samples, lang_code, beam)
 
+        duration_ms = samples.size / SAMPLE_RATE * 1000.0
         kept, dropped = [], []
         for piece in pieces:
-            reason = self._refuse(piece)
+            reason = self._refuse(piece, duration_ms)
             if reason is None:
                 kept.append(piece)
             else:
@@ -188,17 +192,25 @@ class Transcriber:
                          piece.text.strip()[:60])
         return transcript
 
-    def _refuse(self, piece: Piece) -> Optional[str]:
+    def _refuse(self, piece: Piece,
+                duration_ms: float = float("inf")) -> Optional[str]:
         """Why this segment should not be shown, or None to keep it."""
         if not piece.text.strip():
             return "empty"
-        if (piece.no_speech_prob > self.no_speech_threshold
-                and piece.avg_logprob <= self.log_prob_threshold):
-            # Whisper's own rule needs both, and says why in its source:
-            # "don't skip if the logprob is high enough, despite the
+        if piece.no_speech_prob > self.no_speech_threshold:
+            # Whisper's own rule needs both signals, and says why in its
+            # source: "don't skip if the logprob is high enough, despite the
             # no_speech_prob". Reading no_speech_prob alone refused 6.8 s of
             # one man talking on a real meeting.
-            return "no speech"
+            #
+            # But that benefit of the doubt belongs to audio long enough to
+            # hold a sentence. Below the floor where the speaker model and
+            # the LID both decline to answer, Whisper answers anyway and
+            # answers confidently: every invention confirmed on a real
+            # meeting came from a scrap this short.
+            if (duration_ms < self.short_utterance_ms
+                    or piece.avg_logprob <= self.log_prob_threshold):
+                return "no speech"
         if piece.avg_logprob < self.log_prob_threshold:
             return "low confidence"
         if piece.compression_ratio > self.max_compression_ratio:

@@ -505,3 +505,39 @@ def test_these_were_only_caught_by_luck_before():
             "c\u1ee7a m\u00ecnh nh\u00e9.")
     kept = make([confident(line)], hallucinations=Hallucinations(patterns=(), keep=[]))
     assert kept.transcribe(audio()).text == line
+
+
+# ---------------------------------------------------------------------------
+# Short audio, confident nonsense
+# ---------------------------------------------------------------------------
+def short_audio(ms: float = 400) -> bytes:
+    return np.zeros(int(ms * SAMPLE_RATE / 1000.0), dtype="<i2").tobytes()
+
+
+def test_a_confident_invention_over_a_scrap_of_audio_is_refused():
+    """Confirmed on a real meeting: every "Cảm ơn..." reaching a committed
+    sentence was invented, and they all came from scraps too short for the
+    speaker model or the LID to answer at all. Whisper answers anyway, and
+    confidently - which is how the relaxed no-speech rule lets them past."""
+    invented = Piece(" Cảm ơn các bạn.", -0.31, 0.86, 1.4)
+    transcript = make([invented]).transcribe(short_audio(400))
+    assert transcript.text == ""
+    assert transcript.dropped[0][1] == "no speech"
+
+
+def test_the_long_sentence_that_rule_was_built_for_still_survives():
+    """The 6.8 s of one man talking that reading no_speech_prob alone threw
+    away. Duration is what separates it from the inventions."""
+    real = Piece(" 2011 thì mình đang lấy bởi vì là cái cả AMD mà bắt cung cấp",
+                 -0.35, 0.86, 1.6)
+    transcript = make([real]).transcribe(short_audio(6_800))
+    assert transcript.dropped == ()
+    assert "AMD" in transcript.text
+
+
+def test_a_scrap_that_whisper_is_sure_is_speech_is_kept():
+    """Short is not the same as invented. A one-word answer is a real thing
+    for somebody to say."""
+    real = Piece(" Vâng.", -0.30, 0.05, 1.2)
+    transcript = make([real]).transcribe(short_audio(400))
+    assert transcript.dropped == ()
