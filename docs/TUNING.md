@@ -102,7 +102,7 @@ tới giới hạn.
 | `NOISE_MIN_NOISE_SCORE` | `0.3` | ...và chỉ bỏ khi model chắc chắn nghe thấy thứ khác |
 | `NOISE_WINDOW_SECONDS` | `10.0` | Cửa sổ AST đọc mỗi lần |
 | `AST_MODEL_ID` | `MIT/ast-finetuned-…` | Đổi qua biến môi trường `AST_MODEL_ID` |
-| `NOISE_DEVICE` | tự chọn | `cuda` / `cpu` |
+| `NOISE_DEVICE` | tự chọn | `cuda` / `cpu` — xem cảnh báo dưới |
 
 **Cần cả hai điều kiện, và đó là điểm mấu chốt.** Điểm tiếng nói thấp một
 mình không phải bằng chứng.
@@ -118,6 +118,27 @@ Từng có một câu tiếng Nhật thật bị xoá vì so sánh hai điểm s
 
 Vì vậy **đừng siết `NOISE_MIN_SPEECH_SCORE` lên** mà không chạy lại real test
 với dữ liệu có câu chêm ngắn.
+
+### `NOISE_DEVICE` — nếu tầng này tự tắt
+
+`DESIGN.md` định cho AST chạy **CPU** để không chiếm VRAM của Whisper và vLLM,
+nhưng mặc định rỗng nghĩa là tự chọn, và nó chọn cuda khi có.
+
+> **Gặp thật trên pod:** AST trên GPU đổ ở đường attention của cuDNN —
+> `RuntimeError: cuDNN Frontend error: No valid execution plans built` — trên
+> **mọi** utterance. Hai phút họp không ra chữ nào.
+
+Nếu log server có dòng `stage 'noise' raised`, đặt biến môi trường trước khi
+khởi động server:
+
+```bash
+NOISE_DEVICE=cpu python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+Rồi đọc mục `noise` trong `stages` ở dòng tổng kết cuối phiên — đó là số giây
+**luồng đọc socket** bỏ ra cho tầng này trong cả cuộc họp. Trên GPU nó dưới
+1 giây cho 3 phút họp; nếu trên CPU nó vọt lên vài chục giây thì cái giá quá
+đắt và nên tắt hẳn tầng lọc nhiễu thay vì chạy nó trên CPU.
 
 ---
 

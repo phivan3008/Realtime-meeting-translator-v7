@@ -176,6 +176,9 @@ vùng đo được rất hẹp.
   thử và đã bác bỏ bằng số liệu.
 - **Lịch sử hội thoại có bản dịch trong đó sẽ lái model dịch sai ngôn ngữ.**
   Nó đọc lên như một chuỗi ví dụ mẫu.
+- **Một tầng hỏng từng ăn cả cuộc họp.** Bắt lỗi ở mức *câu* nghĩa là hỏng
+  100% trông y hệt hỏng 0%. Giờ bắt ở mức *tầng*: câu đi tiếp thiếu tầng đó,
+  và tầng hỏng liên tục thì bị tắt và báo về client.
 - **Đừng bật `condition_on_previous_text`.** Đó là cách một câu bịa thành cả
   đoạn bịa.
 - **`no_speech_prob` một mình không được phép loại đoạn nào.** Whisper đòi

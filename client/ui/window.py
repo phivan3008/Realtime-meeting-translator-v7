@@ -186,6 +186,10 @@ class MeetingWindow(QMainWindow):
         if kind == "partial":
             self._show_running_text()
             return
+        if kind == "error" and not message.get("fatal", True):
+            # A stage the server had to switch off. The meeting goes on, but
+            # short of that stage, and silence about it reads as working.
+            self.statusBar().showMessage(f"Máy chủ báo: {message.get('message', '')}")
         if changed is not None or kind in {"utterance", "speakers"}:
             self._show_running_text()
             self._redraw()

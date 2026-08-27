@@ -641,8 +641,9 @@ def test_the_translator_reads_the_language_the_pipeline_decided():
     assert backend.calls, "the translator was never called"
 
 
-def test_a_stage_that_raises_does_not_end_the_meeting():
-    """One broken sentence costs one sentence, not the connection."""
+def test_a_stage_that_raises_costs_that_stage_and_nothing_else():
+    """It used to cost the sentence. On the pod that meant every sentence,
+    because the failure was in the stage rather than in the audio."""
     class Exploding:
         def judge(self, pcm: bytes):
             raise RuntimeError("the noise filter fell over")
@@ -656,7 +657,10 @@ def test_a_stage_that_raises_does_not_end_the_meeting():
     responses = speak_then_pause(session)
     assert session.state is SessionState.STREAMING
     assert all(r.close is False for r in responses)
-    assert session.stats.pipeline_errors == 1
+    assert session.stats.stage_failures == {"noise": 1}
+    assert session.stats.pipeline_errors == 0, "the sentence was thrown away"
+    # The utterance still went out, without the filter's verdict on it.
+    assert of_type(responses[-1], "utterance") or session.stats.utterances == 1
     # And the next chunk is still accepted.
     assert session.handle_binary(chunk()).close is False
 
@@ -1159,3 +1163,98 @@ def test_nothing_is_sent_when_the_labels_were_already_right():
 
 def test_a_session_without_a_speaker_model_has_nothing_to_recluster():
     assert make_session().speaker_history is None
+
+
+# ---------------------------------------------------------------------------
+# A stage that breaks
+# ---------------------------------------------------------------------------
+class BrokenClassifier:
+    """What the pod did: the same failure on every single utterance."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(self, pcm: bytes):
+        self.calls += 1
+        raise RuntimeError(
+            "cuDNN Frontend error: [cudnn_frontend] Error: "
+            "No valid execution plans built")
+
+
+def broken_noise_session():
+    from server.pipeline.asr import Transcriber
+
+    vad = ScriptedVAD((0.9,))
+    return ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        noise_filter=NoiseFilter(classifier=BrokenClassifier()),
+        transcriber=Transcriber(decoder=StubDecoder()),
+    )
+
+
+def test_a_broken_stage_does_not_eat_the_whole_meeting():
+    """Reported from the pod: every sentence died in the noise filter, so two
+    minutes of talking produced nothing at all - and the client had no way to
+    tell that from nobody speaking."""
+    session = broken_noise_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 40, LOUD)
+    payloads += [json.loads(m) for m in session.finish().messages]
+    finals = [p for p in payloads if p["type"] == "final"]
+    assert finals, "the meeting produced nothing"
+    assert finals[0]["transcript"]
+
+
+def test_a_stage_that_keeps_breaking_is_switched_off():
+    """One failure is a bad sentence. The same failure every time is a broken
+    stage, and running it again per sentence only buries the evidence."""
+    session = broken_noise_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak(session, 80, LOUD)
+    session.finish()
+    assert session.noise_filter is None
+
+
+def test_the_client_is_told_which_stage_was_switched_off():
+    session = broken_noise_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 80, LOUD)
+    payloads += [json.loads(m) for m in session.finish().messages]
+    errors = [p for p in payloads if p["type"] == "error"]
+    assert errors, "the meeting went on short a stage and said nothing"
+    assert "noise" in errors[0]["message"]
+    assert errors[0]["fatal"] is False, "a missing stage is not fatal"
+
+
+def test_a_stage_that_recovers_is_not_switched_off():
+    """A single bad sentence must not cost the meeting a whole stage."""
+    from server.pipeline.asr import Transcriber
+
+    class SometimesBroken:
+        def __init__(self):
+            self.calls = 0
+
+        def classify(self, pcm):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("one bad sentence")
+            return SPEECHY
+
+    vad = ScriptedVAD((0.9,))
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        noise_filter=NoiseFilter(classifier=SometimesBroken()),
+        transcriber=Transcriber(decoder=StubDecoder()),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak(session, 80, LOUD)
+    session.finish()
+    assert session.noise_filter is not None
+
+
+def test_the_failures_are_counted_for_the_summary():
+    session = broken_noise_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak(session, 40, LOUD)
+    session.finish()
+    assert session.stats.stage_failures.get("noise", 0) >= 1

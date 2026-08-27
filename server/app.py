@@ -275,6 +275,10 @@ def _log_summary(session: ServerSession) -> None:
                                     key=lambda kv: -kv[1])},
         stats.translations_dropped, stats.worst_translation_lag,
     )
+    if stats.stage_failures:
+        log.warning("Session %s: stages that raised %s; switched off %s",
+                    session.session_id or "?", stats.stage_failures,
+                    stats.stages_disabled or "none")
     if session.speaker_history is not None:
         history = session.speaker_history.stats
         log.info("Session %s speakers: %d after %d reclustering runs, "

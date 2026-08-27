@@ -88,6 +88,9 @@ class ServerSessionStats:
     speaker_changes: int = 0
     #: Labels the live matcher got wrong and clustering put right.
     speaker_corrections: int = 0
+    #: How many times each stage raised, and which were switched off.
+    stage_failures: dict = field(default_factory=dict)
+    stages_disabled: list = field(default_factory=list)
     utterances_with_language: int = 0
     transcripts: int = 0
     translations: int = 0
@@ -152,6 +155,20 @@ class Analysis:
 #: second is five chunks the socket did not get to.
 SLOW_UTTERANCE_SECONDS = 1.0
 
+#: A stage that raises this many times in a row is switched off for the rest
+#: of the meeting. One failure is a bad sentence; the same failure on every
+#: sentence is a broken stage, and calling it again only buries the evidence.
+STAGE_FAILURE_LIMIT = 3
+
+#: Which attribute holds each stage, so a broken one can be switched off.
+STAGE_ATTRIBUTES = {
+    "noise": "noise_filter",
+    "overlap": "overlap_resolver",
+    "speaker": "speaker_identifier",
+    "language": "language_identifier",
+    "asr": "transcriber",
+}
+
 
 class ServerSession:
     """Drive one client connection: handshake, then audio into the VAD."""
@@ -199,6 +216,10 @@ class ServerSession:
         #: The last language this meeting was confidently in, used when the
         #: LID cannot decide. See :meth:`_language_for`.
         self._last_language = ""
+        #: Consecutive failures per stage, and what to tell the client about
+        #: the ones that were switched off.
+        self._stage_failures: dict[str, int] = {}
+        self._stage_notices: list[str] = []
         #: Counts sentences within this session so a translation can be
         #: matched to its sentence. Utterance indexes restart with each speech
         #: segment, so they cannot be used for it.
@@ -367,6 +388,43 @@ class ServerSession:
             return []
 
     @contextmanager
+    def _stage(self, name: str, into: dict):
+        """Time one stage, and let the meeting outlive a stage that breaks.
+
+        A stage that raises leaves :class:`Analysis` at its defaults, which
+        are what the pipeline does when that stage is absent - so the sentence
+        carries on through the rest of it instead of being thrown away. On the
+        pod, a cuDNN failure in the noise filter killed every sentence for two
+        minutes and the client had no way to tell that from silence.
+        """
+        try:
+            with self._timed(name, into):
+                yield
+        except Exception:
+            self._stage_broke(name)
+        else:
+            self._stage_failures.pop(name, None)
+
+    def _stage_broke(self, name: str) -> None:
+        count = self._stage_failures.get(name, 0) + 1
+        self._stage_failures[name] = count
+        self.stats.stage_failures[name] = (
+            self.stats.stage_failures.get(name, 0) + 1)
+        log.exception("Session %s: stage %r raised (%d in a row)",
+                      self.session_id or "?", name, count)
+        if count < STAGE_FAILURE_LIMIT or name in self.stats.stages_disabled:
+            return
+        setattr(self, STAGE_ATTRIBUTES[name], None)
+        if name == "speaker":
+            # Both of these read the identifier's model.
+            self.speaker_change = None
+            self.speaker_history = None
+        self.stats.stages_disabled.append(name)
+        self._stage_notices.append(
+            f"tầng {name} đã bị tắt sau {count} lần lỗi liên tiếp; "
+            f"cuộc họp vẫn chạy nhưng thiếu tầng này")
+
+    @contextmanager
     def _timed(self, stage: str, into: dict):
         """Charge the wall time of one stage to that stage.
 
@@ -401,6 +459,8 @@ class ServerSession:
             messages += self._transcribe_partial(result.partial)
 
         messages += self._recluster_speakers()
+        while self._stage_notices:
+            messages.append(make_error(self._stage_notices.pop(0), fatal=False))
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
         return messages
@@ -423,17 +483,23 @@ class ServerSession:
         return [make_speakers(corrections)]
 
     def _analyse(self, utterance, spent: dict) -> "Analysis":
-        """Every stage that reads audio, in order, for one utterance."""
+        """Every stage that reads audio, in order, for one utterance.
+
+        Each stage owns the whole of its block, result included: a stage that
+        raises must leave :class:`Analysis` at the defaults, which are what
+        the pipeline does when that stage is absent. Reading a stage's result
+        outside its own block reintroduces the crash it was meant to survive.
+        """
         found = Analysis(audio=utterance.pcm)
 
         if self.noise_filter is not None:
-            with self._timed("noise", spent):
+            with self._stage("noise", spent):
                 verdict = self.noise_filter.judge(utterance.pcm)
-            found.keep = verdict.keep
-            found.speech_score = verdict.classification.speech_score
-            if not verdict.keep:
-                found.label = verdict.classification.noise_label
-                self.stats.utterances_dropped += 1
+                found.keep = verdict.keep
+                found.speech_score = verdict.classification.speech_score
+                if not verdict.keep:
+                    found.label = verdict.classification.noise_label
+                    self.stats.utterances_dropped += 1
         if not found.keep:
             return found
 
@@ -441,39 +507,39 @@ class ServerSession:
         # the raw audio: the gate removes quiet syllables, and those carry
         # both voice and the cues that tell the two languages apart.
         if self.overlap_resolver is not None:
-            with self._timed("overlap", spent):
+            with self._stage("overlap", spent):
                 shaped = self.overlap_resolver.resolve(found.audio)
-            found.audio = shaped.pcm
-            if shaped.shaped:
-                self.stats.utterances_shaped += 1
+                found.audio = shaped.pcm
+                if shaped.shaped:
+                    self.stats.utterances_shaped += 1
 
         if self.speaker_identifier is not None:
-            with self._timed("speaker", spent):
+            with self._stage("speaker", spent):
                 assignment = self.speaker_identifier.identify(utterance.pcm)
-            found.speaker_id = assignment.speaker_id
-            found.voiceprint = assignment.embedding
-            self.stats.utterances_identified += 1
-            # The score is what decides whether two turns are one person.
-            # Logged so a real meeting can be read back for where the
-            # same-voice and different-voice ranges actually sit.
-            log.info("utterance %d speaker %s similarity %.3f (%s)",
-                     utterance.index, assignment.speaker_id,
-                     assignment.similarity, assignment.reason)
+                found.speaker_id = assignment.speaker_id
+                found.voiceprint = assignment.embedding
+                self.stats.utterances_identified += 1
+                # The score is what decides whether two turns are one person.
+                # Logged so a real meeting can be read back for where the
+                # same-voice and different-voice ranges actually sit.
+                log.info("utterance %d speaker %s similarity %.3f (%s)",
+                         utterance.index, assignment.speaker_id,
+                         assignment.similarity, assignment.reason)
 
         if self.language_identifier is not None:
-            with self._timed("language", spent):
+            with self._stage("language", spent):
                 decision = self.language_identifier.identify(utterance.pcm)
-            if decision.known:
-                self.stats.utterances_with_language += 1
-                self._last_language = decision.lang_code
-            found.lang_code = self._language_for(decision)
+                if decision.known:
+                    self.stats.utterances_with_language += 1
+                    self._last_language = decision.lang_code
+                found.lang_code = self._language_for(decision)
 
         if self.transcriber is not None:
-            with self._timed("asr", spent):
+            with self._stage("asr", spent):
                 found.transcript = self.transcriber.transcribe(
                     found.audio, found.lang_code, is_final=True)
-            if found.transcript.has_text:
-                self.stats.transcripts += 1
+                if found.transcript.has_text:
+                    self.stats.transcripts += 1
         return found
 
     def _utterance_message(self, utterance, found: "Analysis") -> str:
