@@ -357,3 +357,51 @@ def test_the_overlap_resolver_can_be_turned_off(monkeypatch):
     assert state.overlap_resolver is None
     assert state.overlap_error == "disabled by DISABLE_OVERLAP"
     assert state.transcriber is not None, "it took the ASR down with it"
+
+
+# ---------------------------------------------------------------------------
+# Which interpreter is running this
+# ---------------------------------------------------------------------------
+def test_health_names_the_interpreter():
+    """Running from the system or conda interpreter is silent - it starts,
+    loads most of the pipeline and serves meetings, and only the packages that
+    environment happens to lack give it away. It cost this project several
+    measurements taken against a pipeline that was not the one under test."""
+    from server.app import health
+
+    payload = health()
+    assert payload["python"], "no interpreter reported"
+    assert isinstance(payload["in_venv"], bool)
+
+
+def test_a_virtual_environment_is_recognised(monkeypatch):
+    from server import app as module
+
+    monkeypatch.setattr(module.sys, "prefix", "/workspace/project/.venv")
+    monkeypatch.setattr(module.sys, "base_prefix", "/usr")
+    assert module.in_venv() is True
+    assert "NOT a venv" not in module.which_environment()
+
+
+def test_the_conda_base_interpreter_is_not_mistaken_for_one(monkeypatch):
+    """This is the one that happened: /opt/conda, with torch and transformers
+    present and pedalboard missing."""
+    from server import app as module
+
+    monkeypatch.setattr(module.sys, "prefix", "/opt/conda")
+    monkeypatch.setattr(module.sys, "base_prefix", "/opt/conda")
+    assert module.in_venv() is False
+    assert "NOT a venv" in module.which_environment()
+
+
+def test_the_startup_log_says_which_interpreter(monkeypatch, caplog):
+    from server.app import AppState
+
+    state = AppState()
+    monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
+    for name in ("NoiseFilter", "OverlapResolver", "SpeakerIdentifier",
+                 "LanguageIdentifier", "Transcriber", "Translator"):
+        monkeypatch.setattr(app_module, name, lambda **kw: object())
+    with caplog.at_level(logging.INFO):
+        state.load_models()
+    assert "Python:" in caplog.text

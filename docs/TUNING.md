@@ -98,6 +98,10 @@ tới giới hạn.
 
 **Tầng này mặc định TẮT.** Bật bằng `ENABLE_NOISE_FILTER=1`.
 
+> ⚠️ **Phép đo dưới đây lấy từ một lần chạy NGOÀI venv** (conda base). Bản
+> torch/cuDNN ở đó khác bản dự án ghim, nên cả lỗi cuDNN lẫn chi phí CPU đều
+> có thể không đúng với môi trường thật. Cần đo lại — xem cuối mục này.
+
 > **Đo được (họp thật 10 phút, AST trên CPU):** tiêu **155.8 giây** trên luồng
 > đọc socket cho **593.6 giây** audio — **26%** — và bỏ được **0 trên 119 câu**.
 > Nó tốn nhiều hơn cả ASR partial (87.1 s) lẫn ASR final (21.6 s) cộng lại, và
@@ -110,6 +114,18 @@ tới giới hạn.
 
 Việc nó làm cũng đã có lớp khác làm: các câu bịa mà nó nhắm tới đều bị
 [`server/data/`](../server/data/README.md) và ba ngưỡng thống kê của ASR chặn.
+
+**Cần đo lại, trong venv, theo thứ tự:**
+
+1. `source .venv/bin/activate`, khởi động, kiểm `/health` có `in_venv: true`
+   và cả bảy cờ đúng.
+2. `ENABLE_NOISE_FILTER=1` **không** kèm `NOISE_DEVICE` — để nó tự chọn cuda.
+   Nếu vẫn đổ ở cuDNN thì lỗi là của pod, không phải môi trường.
+3. Nếu chạy được: đọc mục `noise` trong `stages` và số `dropped as noise` ở
+   dòng tổng kết. Trên GPU trước đây là 0.9 s cho 175 s.
+
+Chỉ khi cả hai vế đều tốt — rẻ **và** bỏ được câu thật — thì mới đáng bật mặc
+định trở lại.
 
 | Thông số | Mặc định | Ý nghĩa |
 | --- | --- | --- |

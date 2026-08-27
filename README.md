@@ -96,7 +96,16 @@ Chờ `Application startup complete`, rồi kiểm tra:
 curl -s http://127.0.0.1:8000/health
 ```
 
-Kiểm **đủ bảy cờ**, không phải sáu:
+**Kiểm `in_venv` trước tiên.** Nếu là `false`, server đang chạy bằng
+interpreter khác — nó vẫn khởi động, vẫn nạp gần hết pipeline, vẫn phục vụ
+cuộc họp, chỉ thiếu đúng những gói môi trường đó tình cờ không có. Mọi phép đo
+lấy từ một lần chạy như vậy đều không dùng được.
+
+```bash
+source .venv/bin/activate      # trước khi chạy uvicorn
+```
+
+Rồi kiểm **đủ bảy cờ**, không phải sáu:
 
 | Cờ | Phải là |
 | --- | --- |

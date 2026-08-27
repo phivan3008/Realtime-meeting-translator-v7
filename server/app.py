@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -86,6 +88,13 @@ class AppState:
         refusing the meeting, so ``/health`` names whichever is missing and
         why rather than the pod going silent.
         """
+        log.info("Python: %s", which_environment())
+        if not in_venv():
+            log.warning(
+                "Not running in a virtual environment. The pipeline will "
+                "start anyway from whatever this interpreter has, which is "
+                "not the set of versions this project pins. Activate it: "
+                "source .venv/bin/activate")
         if self.vad is None:
             log.info("Loading Silero VAD ...")
             self.vad = SileroVAD()
@@ -162,11 +171,32 @@ app = FastAPI(
 )
 
 
+def in_venv() -> bool:
+    """Whether this interpreter is the project's virtual environment.
+
+    Running the server from the system or conda interpreter is silent: the
+    heavy packages are there too, so it starts, loads most of the pipeline
+    and serves meetings. Only the one package that environment happens to be
+    missing gives it away, and only if somebody reads the right health flag.
+    It cost this project several measurements taken against a pipeline that
+    was not the one under test.
+    """
+    return sys.prefix != sys.base_prefix
+
+
+def which_environment() -> str:
+    """One line naming the interpreter, for the startup log."""
+    where = "venv" if in_venv() else "NOT a venv"
+    return f"{sys.executable} ({where}, python {sys.version.split()[0]})"
+
+
 @app.get("/health")
 def health() -> dict:
     """Cheap reachability probe - the client real test calls this first."""
     return {
         "status": "ok",
+        "python": sys.executable,
+        "in_venv": in_venv(),
         "protocol_version": PROTOCOL_VERSION,
         "sample_rate": SAMPLE_RATE,
         "chunk_bytes": CHUNK_BYTES,
