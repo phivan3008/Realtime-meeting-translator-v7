@@ -96,8 +96,24 @@ tới giới hạn.
 
 ## 3. Lọc nhiễu (AST)
 
+**Tầng này mặc định TẮT.** Bật bằng `ENABLE_NOISE_FILTER=1`.
+
+> **Đo được (họp thật 10 phút, AST trên CPU):** tiêu **155.8 giây** trên luồng
+> đọc socket cho **593.6 giây** audio — **26%** — và bỏ được **0 trên 119 câu**.
+> Nó tốn nhiều hơn cả ASR partial (87.1 s) lẫn ASR final (21.6 s) cộng lại, và
+> gây đình trệ thật: `sentence 118 held the socket for 1.5 s - noise took
+> 1.3 s of it`.
+>
+> Trên GPU nó chỉ tốn 0.9 s cho 175 s, tức 0.5% — nhưng GPU thì segfault
+> (xem dưới). Chi phí **cố định mỗi utterance**, không phụ thuộc độ dài câu:
+> AST luôn xử lý spectrogram 10.24 giây dù câu chỉ 3.6 giây.
+
+Việc nó làm cũng đã có lớp khác làm: các câu bịa mà nó nhắm tới đều bị
+[`server/data/`](../server/data/README.md) và ba ngưỡng thống kê của ASR chặn.
+
 | Thông số | Mặc định | Ý nghĩa |
 | --- | --- | --- |
+| `ENABLE_NOISE_FILTER` | không đặt | Đặt `=1` để bật tầng này |
 | `NOISE_MIN_SPEECH_SCORE` | `0.2` | Dưới ngưỡng này mới xét bỏ |
 | `NOISE_MIN_NOISE_SCORE` | `0.3` | ...và chỉ bỏ khi model chắc chắn nghe thấy thứ khác |
 | `NOISE_WINDOW_SECONDS` | `10.0` | Cửa sổ AST đọc mỗi lần |

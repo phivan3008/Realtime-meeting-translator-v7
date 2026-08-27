@@ -91,13 +91,16 @@ class AppState:
             self.vad = SileroVAD()
             log.info("Silero VAD ready")
 
-        if os.environ.get("DISABLE_NOISE_FILTER"):
-            self.noise_error = "disabled by DISABLE_NOISE_FILTER"
-            log.warning("Deep Noise Filter disabled by environment")
-        else:
+        # Off unless asked for. Measured over a ten-minute meeting on CPU it
+        # spent 155.8 s of the 593.6 s of audio - a quarter of the thread that
+        # reads the socket - and dropped nothing at all. See docs/TUNING.md 3.
+        if os.environ.get("ENABLE_NOISE_FILTER"):
             self._load("noise_filter", "noise_error", "audio classifier",
                        lambda: NoiseFilter(classifier=AstClassifier()),
                        NoiseFilterError)
+        else:
+            self.noise_error = "off by default; set ENABLE_NOISE_FILTER=1"
+            log.info("Deep Noise Filter off (ENABLE_NOISE_FILTER not set)")
 
         if os.environ.get("DISABLE_OVERLAP"):
             # The resolver's only consumer is the ASR, so this is the switch

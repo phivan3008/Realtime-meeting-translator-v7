@@ -96,7 +96,10 @@ Chờ `Application startup complete`, rồi kiểm tra:
 curl -s http://127.0.0.1:8000/health
 ```
 
-**Cả sáu cờ `*_loaded` phải là `true`.** Cái nào `false` thì dòng `*_error`
+Tầng lọc nhiễu mặc định **tắt** — nó tốn 26% luồng đọc socket và bỏ được 0
+câu trên một cuộc họp thật. `ENABLE_NOISE_FILTER=1` để bật lại.
+
+**Các cờ `*_loaded` còn lại phải là `true`.** Cái nào `false` thì dòng `*_error`
 bên cạnh nói lý do. Server vẫn khởi động khi thiếu một tầng — thiếu một tầng
 còn hơn từ chối cuộc họp — nhưng lúc đó phụ đề không đáng tin.
 

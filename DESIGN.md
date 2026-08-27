@@ -66,7 +66,7 @@ giết tiến trình. Client được báo bằng `error` không fatal.
 | --- | --- | --- | --- |
 | 1 | VAD | Silero (CPU) | Cắt stream thành đoạn có tiếng nói, giữ pre-roll để không cụt phụ âm đầu |
 | 2 | Buffer Manager | — | Gom thành câu, chốt khi ngắt hoặc quá dài |
-| 3 | Noise Filter | AST (AudioSet, CPU) | Bỏ tiếng gõ phím, tiếng ho |
+| 3 | Noise Filter | AST (AudioSet, CPU) | Bỏ tiếng gõ phím, tiếng ho — **mặc định tắt** |
 | 4 | Overlap Resolver | `pedalboard` gate + compressor | Hạ giọng nhỏ khi chồng lấn |
 | 5 | Diarization | ECAPA-TDNN (SpeechBrain) | Ai đang nói |
 | 5b | Reclustering | agglomerative, cosine | Gom cụm lại cả cuộc họp, **sửa nhãn đã gửi** |
@@ -89,11 +89,11 @@ partial; cửa sổ này bị **giới hạn 4 giây cuối**, vì giải mã l�
 Có tầng cắt câu theo **đổi giọng** (`speaker_change.py`) nhưng **đang tắt**:
 voiceprint cửa sổ 1 giây không phân biệt được giọng. Xem `TUNING.md` 5b.
 
-**3. Noise Filter chạy CPU** (`NOISE_DEVICE`) — nhường VRAM cho Whisper và
-vLLM, và trên pod thật AST trên GPU đổ ở cuDNN rồi segfault tiến trình ở lần
-gọi sau.
+**3. Noise Filter mặc định tắt** (`ENABLE_NOISE_FILTER=1` để bật). Đo trên
+họp thật: 155.8 giây luồng socket cho 593.6 giây audio — 26% — và bỏ được 0
+trên 119 câu. Trên GPU nó rẻ, nhưng GPU thì đổ ở cuDNN rồi segfault.
 
-**Rụt rè có chủ đích.** Chỉ bỏ khi speech score thấp **và**
+Khi bật, nó **rụt rè có chủ đích.** Chỉ bỏ khi speech score thấp **và**
 có lớp non-speech đạt ngưỡng. Hai điểm gần 0 không phải bằng chứng, đó là model
 đang không biết. Bỏ nhầm câu thật thì mất luôn; để lọt tiếng ho chỉ tốn một lần
 gọi Whisper. Câu bị bỏ vẫn báo về client kèm nhãn (`kept: false`).

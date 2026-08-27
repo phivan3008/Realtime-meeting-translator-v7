@@ -221,13 +221,14 @@ def test_a_refused_handshake_does_not_hold_the_slot(client):
 # ---------------------------------------------------------------------------
 # Loading the stages
 # ---------------------------------------------------------------------------
-def test_disabling_the_noise_filter_still_loads_everything_else(monkeypatch):
-    """The old code returned out of load_models() here, so setting
-    DISABLE_NOISE_FILTER silently left the pod without an ASR either."""
+def test_the_noise_filter_is_off_unless_asked_for(monkeypatch):
+    """Measured on CPU over a real meeting: a quarter of the socket thread,
+    and nothing dropped. The old code also returned out of load_models() here,
+    leaving the pod without an ASR either."""
     from server.app import AppState
 
     state = AppState()
-    monkeypatch.setenv("DISABLE_NOISE_FILTER", "1")
+    monkeypatch.delenv("ENABLE_NOISE_FILTER", raising=False)
     monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
     for name in ("OverlapResolver", "SpeakerIdentifier", "LanguageIdentifier",
                  "Transcriber", "Translator"):
@@ -236,7 +237,7 @@ def test_disabling_the_noise_filter_still_loads_everything_else(monkeypatch):
     state.load_models()
 
     assert state.noise_filter is None
-    assert state.noise_error == "disabled by DISABLE_NOISE_FILTER"
+    assert "ENABLE_NOISE_FILTER" in state.noise_error
     assert state.overlap_resolver is not None
     assert state.speaker_identifier is not None
     assert state.language_identifier is not None
@@ -249,7 +250,7 @@ def test_one_stage_failing_does_not_stop_the_others(monkeypatch):
     from server.pipeline.asr import AsrError
 
     state = AppState()
-    monkeypatch.delenv("DISABLE_NOISE_FILTER", raising=False)
+    monkeypatch.setenv("ENABLE_NOISE_FILTER", "1")
     monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
 
     def explode():
@@ -274,7 +275,7 @@ def test_a_stage_that_failed_is_not_retried(monkeypatch):
     from server.pipeline.asr import AsrError
 
     state = AppState()
-    monkeypatch.delenv("DISABLE_NOISE_FILTER", raising=False)
+    monkeypatch.setenv("ENABLE_NOISE_FILTER", "1")
     monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
     attempts = []
 
