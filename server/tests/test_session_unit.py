@@ -1442,3 +1442,77 @@ def test_an_utterance_with_no_prediction_before_it_is_not_a_flip():
     session.handle_binary(chunk())
     session.finish()
     assert session.stats.language_flips == 0
+
+
+# ---------------------------------------------------------------------------
+# An utterance holding two languages
+# ---------------------------------------------------------------------------
+class LidByVolume:
+    """Loud is Vietnamese, quiet is Japanese. Two "languages" in a test."""
+
+    def identify(self, pcm: bytes):
+        from server.pipeline.lid import LanguageDecision
+        level = float(np.abs(np.frombuffer(pcm, dtype="<i2")).mean())
+        code = "vi" if level > 4_000 else "ja"
+        return LanguageDecision(lang_code=code, confidence=0.9, margin=0.9,
+                                reason="stub")
+
+    def reset(self) -> None:
+        pass
+
+
+def two_language_session():
+    from server.pipeline.asr import Transcriber
+
+    vad = ScriptedVAD((0.9,))
+    return ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        language_identifier=LidByVolume(),
+        transcriber=Transcriber(decoder=StubDecoder()),
+    )
+
+
+def test_an_utterance_holding_two_languages_becomes_two_sentences():
+    """Measured on a real meeting: 4 turns per ten minutes were not
+    mistranslated but dropped, because the LID had to pick one language for
+    an utterance that held both."""
+    session = two_language_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 20, LOUD) + speak(session, 20, QUIET)
+    payloads += [json.loads(m) for m in session.finish().messages]
+    finals = [p for p in payloads if p["type"] == "final"]
+    assert session.stats.language_splits >= 1
+    assert {p["lang_code"] for p in finals} == {"vi", "ja"}, \
+        "one of the two languages was still lost"
+
+
+def test_one_language_throughout_is_left_whole():
+    session = two_language_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak(session, 40, LOUD)
+    session.finish()
+    assert session.stats.language_splits == 0
+
+
+def test_the_split_can_be_turned_off(monkeypatch):
+    monkeypatch.setattr("server.net.session.LANGUAGE_SPLIT_ENABLED", False)
+    session = two_language_session()
+    assert session.language_splitter is None
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak(session, 20, LOUD) + speak(session, 20, QUIET)
+    session.finish()
+    assert session.stats.language_splits == 0
+
+
+def test_without_a_language_model_there_is_nothing_to_split_on():
+    assert make_session().language_splitter is None
+
+
+def test_the_two_halves_share_no_audio():
+    session = two_language_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 20, LOUD) + speak(session, 20, QUIET)
+    payloads += [json.loads(m) for m in session.finish().messages]
+    utterances = [p for p in payloads if p["type"] == "utterance"]
+    for first, second in zip(utterances, utterances[1:]):
+        assert second["start_ms"] >= first["end_ms"] - 1

@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable, Optional
 
@@ -39,13 +39,23 @@ from common.protocol import (
     validate_audio_chunk,
 )
 from server.config import (
+    LANGUAGE_SPLIT_ENABLED,
     PARTIAL_WINDOW_SECONDS,
     SAMPLE_RATE,
     SPEAKER_CHANGE_ENABLED,
+    SPLIT_SEARCH_MS,
 )
 from server.pipeline.asr import Transcriber, Transcript
-from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
+from server.pipeline.buffer import (
+    BufferManager,
+    BufferOutput,
+    FinalizeReason,
+    bytes_to_ms,
+    ms_to_bytes,
+    quietest_split_point,
+)
 from server.pipeline.diarization import SpeakerIdentifier
+from server.pipeline.language_split import LanguageSplitter
 from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
@@ -88,6 +98,8 @@ class ServerSessionStats:
     speaker_changes: int = 0
     #: Labels the live matcher got wrong and clustering put right.
     speaker_corrections: int = 0
+    #: Utterances cut in two because they held two languages.
+    language_splits: int = 0
     #: Sentences whose language changed between the running text and the
     #: committed sentence. Two languages in one utterance, and one of them is
     #: silently dropped rather than mistranslated.
@@ -211,6 +223,13 @@ class ServerSession:
         self.speaker_history = (SpeakerHistory()
                                 if self.speaker_identifier is not None else None)
         self.language_identifier = self.stages.language_identifier
+        # Two languages in one utterance means one of them is lost rather
+        # than mistranslated. Measured: 4 turns per ten-minute meeting.
+        self.language_splitter: Optional[LanguageSplitter] = (
+            LanguageSplitter(self.language_identifier)
+            if self.language_identifier is not None and LANGUAGE_SPLIT_ENABLED
+            else None
+        )
         self.transcriber = self.stages.transcriber
         self.translator = self.stages.translator
         # `inline` runs translation on the calling thread instead of its own,
@@ -297,6 +316,8 @@ class ServerSession:
             self.speaker_history.reset()
         if self.language_identifier is not None:
             self.language_identifier.reset()
+        if self.language_splitter is not None:
+            self.language_splitter.reset()
         if self.transcriber is not None:
             self.transcriber.reset()
         if self.translator is not None:
@@ -468,13 +489,14 @@ class ServerSession:
     def _announce(self, result: BufferOutput) -> list[str]:
         """Run each finished sentence through the pipeline and send it."""
         messages = []
-        for utterance in result.finals:
-            spent: dict[str, float] = {}
-            found = self._analyse(utterance, spent)
-            messages.append(self._utterance_message(utterance, found))
-            if found.transcript is not None and found.transcript.has_text:
-                messages += self._commit_sentence(found)
-            self._report_if_slow(utterance, spent)
+        for whole in result.finals:
+            for utterance in self._by_language(whole):
+                spent: dict[str, float] = {}
+                found = self._analyse(utterance, spent)
+                messages.append(self._utterance_message(utterance, found))
+                if found.transcript is not None and found.transcript.has_text:
+                    messages += self._commit_sentence(found)
+                self._report_if_slow(utterance, spent)
 
         if result.partial is not None:
             self.stats.partials += 1
@@ -486,6 +508,38 @@ class ServerSession:
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
         return messages
+
+    def _by_language(self, utterance) -> list:
+        """One utterance, or its two halves when it holds two languages.
+
+        The language identifier has to answer for the whole utterance, so a
+        reply in the other language is not mistranslated - it is dropped. The
+        flag that found this (the running text disagreeing with the sentence)
+        was right half the time, which is not good enough to cut on, so the
+        decision is made by asking the LID about both ends directly.
+        """
+        if self.language_splitter is None:
+            return [utterance]
+        boundary = None
+        with self._stage("language_split", {}):
+            boundary = self.language_splitter.find(utterance.pcm)
+        if boundary is None:
+            return [utterance]
+
+        # The search knows the boundary is at or before this point, within
+        # one step of the binary search, so it looks backwards for a dip.
+        cut = quietest_split_point(utterance.pcm, ms_to_bytes(boundary.at_ms),
+                                   ms_to_bytes(SPLIT_SEARCH_MS))
+        if cut <= 0 or cut >= len(utterance.pcm):
+            return [utterance]
+
+        self.stats.language_splits += 1
+        return [
+            replace(utterance, pcm=utterance.pcm[:cut]),
+            replace(utterance, pcm=utterance.pcm[cut:],
+                    start_ms=utterance.start_ms + bytes_to_ms(cut),
+                    continues_previous=False),
+        ]
 
     def _recluster_speakers(self) -> list[str]:
         """Cluster the meeting again and send back the labels that moved.

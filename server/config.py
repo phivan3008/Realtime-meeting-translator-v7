@@ -126,6 +126,14 @@ LID_MIN_DURATION_MS = 600
 #: rather than letting Whisper choose from 99.
 LID_UNKNOWN = ""
 
+# --- 6b. Two languages in one utterance (DESIGN.md 3.2) ---------------------
+# People answer each other faster than VAD_MIN_SILENCE_MS, so a reply in the
+# other language lands in the same utterance and is lost rather than
+# mistranslated. Probe both ends; only a confident disagreement cuts.
+LANGUAGE_SPLIT_ENABLED = os.environ.get("LANGUAGE_SPLIT", "1") != "0"
+LANGUAGE_SPLIT_PROBE_MS = LID_MIN_DURATION_MS
+LANGUAGE_SPLIT_STEPS = 3
+
 # --- 7. ASR (faster-whisper, DESIGN.md 3.7) ---------------------------------
 ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
 ASR_DEVICE = os.environ.get("ASR_DEVICE", "")

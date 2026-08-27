@@ -49,6 +49,38 @@ def bytes_to_ms(size: int) -> float:
     return size / BYTES_PER_MS
 
 
+def quietest_split_point(pcm: bytes, limit: int, search: int,
+                         prefer_late: bool = False) -> int:
+    """Byte offset of the quietest frame boundary in ``search`` before ``limit``.
+
+    Cutting speech mid-word turns half a word into a different word, so a cut
+    goes looking for the nearest dip. ``prefer_late`` settles ties at the
+    latest frame rather than the earliest: speech with no dip in it has no
+    boundary to find, and then the honest answer is ``limit`` itself rather
+    than a search-window earlier.
+    """
+    limit = min(limit, len(pcm))
+    earliest = max(FRAME_BYTES, limit - search)
+    if limit <= earliest:
+        return limit
+
+    window = np.frombuffer(pcm[earliest:limit], dtype="<i2")
+    frames = window.size // VAD_FRAME_SAMPLES
+    if frames == 0:
+        return limit
+
+    usable = frames * VAD_FRAME_SAMPLES
+    energy = (
+        window[:usable].astype(np.float32).reshape(frames, VAD_FRAME_SAMPLES)
+    )
+    power = np.mean(energy * energy, axis=1)
+    quietest = (frames - 1 - int(np.argmin(power[::-1])) if prefer_late
+                else int(np.argmin(power)))
+    # Cut after the quiet frame, so the silence stays with the first half
+    # rather than opening the next utterance with it.
+    return earliest + (quietest + 1) * FRAME_BYTES
+
+
 class FinalizeReason(str, Enum):
     PAUSE = "pause"
     MAX_DURATION = "max_duration"
@@ -310,37 +342,13 @@ class BufferManager:
 
     def _quietest_split_point(self, limit: Optional[int] = None,
                               prefer_late: bool = False) -> int:
-        """Byte offset of the quietest frame boundary just before ``limit``.
-
-        ``limit`` defaults to the max-duration cut point. ``prefer_late``
-        settles ties at the latest frame rather than the earliest: speech with
-        no dip in it has no boundary to find, and then the honest answer is
-        ``limit`` itself rather than half a second earlier.
-        """
+        """Where to cut the open utterance. ``limit`` defaults to the
+        max-duration cut point."""
         if limit is None:
             limit = ms_to_bytes(self.max_duration_ms)
-        limit = min(limit, len(self._pcm))
-        earliest = max(FRAME_BYTES, limit - ms_to_bytes(self.split_search_ms))
-        if limit <= earliest:                       # pragma: no cover - guarded
-            return limit
-
-        window = np.frombuffer(self._pcm[earliest:limit], dtype="<i2")
-        frames = window.size // VAD_FRAME_SAMPLES
-        if frames == 0:
-            return limit
-
-        usable = frames * VAD_FRAME_SAMPLES
-        energy = (
-            window[:usable]
-            .astype(np.float32)
-            .reshape(frames, VAD_FRAME_SAMPLES)
-        )
-        power = np.mean(energy * energy, axis=1)
-        quietest = (frames - 1 - int(np.argmin(power[::-1])) if prefer_late
-                    else int(np.argmin(power)))
-        # Cut after the quiet frame, so the silence stays with the first half
-        # rather than opening the next utterance with it.
-        return earliest + (quietest + 1) * FRAME_BYTES
+        return quietest_split_point(bytes(self._pcm), limit,
+                                    ms_to_bytes(self.split_search_ms),
+                                    prefer_late)
 
     def _maybe_partial(self) -> Optional[PartialWindow]:
         if not self.is_open or not self._pcm:

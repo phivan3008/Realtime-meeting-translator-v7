@@ -319,6 +319,12 @@ def _log_summary(session: ServerSession) -> None:
                                     key=lambda kv: -kv[1])},
         stats.translations_dropped, stats.worst_translation_lag,
     )
+    if session.language_splitter is not None:
+        split = session.language_splitter.stats
+        log.info("Session %s language splits: %d of %d utterances held two "
+                 "languages, %d probes",
+                 session.session_id or "?", split.split, split.checked,
+                 split.probes)
     if stats.language_flips:
         log.warning("Session %s: %d sentence(s) came out in a different "
                     "language than the running text predicted - two languages "

@@ -71,6 +71,7 @@ giết tiến trình. Client được báo bằng `error` không fatal.
 | 5 | Diarization | ECAPA-TDNN (SpeechBrain) | Ai đang nói |
 | 5b | Reclustering | agglomerative, cosine | Gom cụm lại cả cuộc họp, **sửa nhãn đã gửi** |
 | 6 | Language ID | VoxLingua107 ECAPA | `vi`, `ja`, hoặc rỗng |
+| 6b | Language split | LID trên hai đầu câu | Cắt câu chứa **hai** ngôn ngữ |
 | 7 | ASR | faster-whisper large-v3 | Chuyển thành chữ |
 | 8 | Translation | Qwen3.5-9B qua vLLM | Dịch, **ngoài luồng audio** |
 
@@ -120,6 +121,14 @@ hai đầu nên đây là cập nhật hàng đã có trên màn hình.
 chúng. Model biết 107 thứ tiếng và sẽ trả lời tiếng Hàn cho tiếng Nhật nếu được
 tự do. Hai điểm quá gần nhau thì trả rỗng: **ép sai ngôn ngữ không báo lỗi**,
 Whisper vẫn trả về văn bản trôi chảy, tự tin và sai.
+
+**6b. Một câu chứa hai ngôn ngữ thì mất một.** LID phải chọn một cho cả câu,
+Whisper bị ép theo, và nửa còn lại **không** ra bản dịch sai — nó không ra gì.
+Đo được 4 lượt nói mất mỗi 10 phút họp.
+
+Thăm dò đầu và cuối câu. Hai đầu cùng ngôn ngữ thì không cắt. Khác nhau chắc
+chắn thì tìm nhị phân ranh giới rồi bắt vào khung im nhất. Hai lần thăm dò cho
+câu bình thường, tối đa năm khi phải cắt.
 
 **7. ASR.** Partial giải mã tham lam (beam 1) vì bị thay ngay; final beam 5,
 trên audio đã qua tầng 4. **Whisper bịa, và bịa tự tin hơn khi phiên âm thật** —

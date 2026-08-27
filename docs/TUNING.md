@@ -493,6 +493,41 @@ chỉ tại thời điểm đổi ngôn ngữ; Whisper đoán thì sai 100 %.
 - `LID_MIN_MARGIN` giảm: kết luận liều hơn, ép sai ngôn ngữ nhiều hơn.
 - Tăng: rơi về ngôn ngữ trước nhiều hơn, an toàn hơn nhưng chậm nhận đổi ngôn ngữ.
 
+### Hai ngôn ngữ trong một câu — cắt ra
+
+| Thông số | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `LANGUAGE_SPLIT_ENABLED` | `True` | Biến môi trường `LANGUAGE_SPLIT=0` để tắt |
+| `LANGUAGE_SPLIT_PROBE_MS` | `600` | Độ dài mỗi lần thăm dò, bằng `LID_MIN_DURATION_MS` |
+| `LANGUAGE_SPLIT_STEPS` | `3` | Số bước tìm nhị phân sau khi biết hai đầu khác nhau |
+
+> **Đo được (họp thật 10 phút, 119 câu):** chữ mờ và câu chốt bất đồng ngôn ngữ
+> ở **8 câu**. Đọc lại tám chỗ đó: **4 thật sự mất hẳn một lượt nói** — không
+> phải dịch sai, mà không còn trong bản ghi.
+
+Tín hiệu bất đồng đúng **50%**, quá thấp để cắt theo. Nên nó **không** phải
+thứ quyết định — nó chỉ là cách rẻ để phát hiện câu hỏi đáng hỏi. Câu hỏi thật
+là *audio này có chứa hai ngôn ngữ không*, và LID trả lời trực tiếp được.
+
+Cách làm: thăm dò **đầu** và **cuối** câu. Hai đầu cùng ngôn ngữ, hoặc một đầu
+không quyết được, thì **không cắt gì**. Chỉ khi hai đầu khác nhau một cách chắc
+chắn mới tìm nhị phân ranh giới giữa chúng, rồi bắt vào khung im nhất gần đó.
+
+So với phép cắt theo giọng đã phải bỏ: cái đó bắn **53%** số phép so vì
+voiceprint 1 giây không phân biệt được giọng. Cái này hỏi model một câu hỏi nó
+làm tốt, trên cửa sổ đúng bằng cỡ nó được đo.
+
+Chi phí: **2 lần thăm dò** cho câu một ngôn ngữ (trường hợp thường), tối đa 5
+khi phải cắt. LID tốn khoảng 6 ms mỗi lần.
+
+- `LANGUAGE_SPLIT_STEPS` tăng: ranh giới chính xác hơn, thêm một lần thăm dò
+  mỗi bước. Độ phân giải là độ dài câu chia 2^steps.
+- `LANGUAGE_SPLIT_PROBE_MS` giảm xuống dưới `LID_MIN_DURATION_MS`: chính tầng
+  LID đã coi cửa sổ ngắn hơn thế là quá ngắn để tin.
+
+Dòng tổng kết cuối phiên cho biết nó bắn bao nhiêu lần, để so với con số 8
+bất đồng ở trên.
+
 ---
 
 ## 7. ASR (Whisper)
