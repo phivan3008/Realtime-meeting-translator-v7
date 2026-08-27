@@ -88,6 +88,10 @@ class ServerSessionStats:
     speaker_changes: int = 0
     #: Labels the live matcher got wrong and clustering put right.
     speaker_corrections: int = 0
+    #: Sentences whose language changed between the running text and the
+    #: committed sentence. Two languages in one utterance, and one of them is
+    #: silently dropped rather than mistranslated.
+    language_flips: int = 0
     #: How many times each stage raised, and which were switched off.
     stage_failures: dict = field(default_factory=dict)
     stages_disabled: list = field(default_factory=list)
@@ -228,6 +232,8 @@ class ServerSession:
         #: the ones that were switched off.
         self._stage_failures: dict[str, int] = {}
         self._stage_notices: list[str] = []
+        #: What the last running text of the open utterance was decoded as.
+        self._partial_language = ""
         #: Counts sentences within this session so a translation can be
         #: matched to its sentence. Utterance indexes restart with each speech
         #: segment, so they cannot be used for it.
@@ -549,6 +555,7 @@ class ServerSession:
                     self.stats.utterances_with_language += 1
                     self._last_language = decision.lang_code
                 found.lang_code = self._language_for(decision)
+                self._note_language_flip(utterance, found.lang_code)
 
         if self.transcriber is not None:
             with self._stage("asr", spent):
@@ -557,6 +564,26 @@ class ServerSession:
                 if found.transcript.has_text:
                     self.stats.transcripts += 1
         return found
+
+    def _note_language_flip(self, utterance, lang_code: str) -> None:
+        """Count a sentence whose language is not the one being predicted.
+
+        Measured on a real meeting: the running text was Japanese twice over,
+        the committed sentence came out Vietnamese, and the Japanese was not
+        mistranslated - it was gone. Both languages were in the utterance, the
+        LID had to pick one, and Whisper was forced into it for all of it.
+
+        Counted rather than acted on. The last attempt at a speaker boundary
+        was built on a signal nobody had measured, and it shredded the
+        transcript; this one gets measured first.
+        """
+        predicted, self._partial_language = self._partial_language, ""
+        if not predicted or not lang_code or predicted == lang_code:
+            return
+        self.stats.language_flips += 1
+        log.info("utterance %d: running text was %r, sentence is %r - two "
+                 "languages in one utterance, and one of them is lost",
+                 utterance.index, predicted, lang_code)
 
     def _utterance_message(self, utterance, found: "Analysis") -> str:
         """The verdict on one utterance, sent whether it was kept or not."""
@@ -650,6 +677,7 @@ class ServerSession:
             with self._timed("partial_language", spent):
                 decision = self.language_identifier.identify(partial.pcm)
             lang_code = self._language_for(decision)
+            self._partial_language = lang_code
         with self._timed("partial_asr", spent):
             transcript = self.transcriber.transcribe(partial.pcm, lang_code,
                                                      is_final=False)

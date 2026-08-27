@@ -286,6 +286,12 @@ def _log_summary(session: ServerSession) -> None:
                                     key=lambda kv: -kv[1])},
         stats.translations_dropped, stats.worst_translation_lag,
     )
+    if stats.language_flips:
+        log.warning("Session %s: %d sentence(s) came out in a different "
+                    "language than the running text predicted - two languages "
+                    "in one utterance, and one of them was dropped rather "
+                    "than mistranslated",
+                    session.session_id or "?", stats.language_flips)
     if stats.stage_failures:
         log.warning("Session %s: stages that raised %s; switched off %s",
                     session.session_id or "?", stats.stage_failures,

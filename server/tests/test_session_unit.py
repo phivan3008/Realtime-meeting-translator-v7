@@ -1373,3 +1373,72 @@ def test_the_running_text_is_decoded_from_raw_audio():
     speak(session, 20, LOUD)
     assert session.stats.partials > 0
     assert resolver.seen == [], "the running text went through the resolver"
+
+
+# ---------------------------------------------------------------------------
+# Two languages in one utterance
+# ---------------------------------------------------------------------------
+class LidByLength:
+    """Answers by how much audio it is given.
+
+    That is the mechanism, not a convenience: the running text is decoded
+    from the last few seconds, the committed sentence from the whole
+    utterance, so the two see different audio and can land on different
+    languages.
+    """
+
+    #: The running text here spans four chunks; the committed sentence is
+    #: longer, because it also carries the pre-roll and the hangover.
+    BOUNDARY_BYTES = CHUNK_BYTES * 4
+
+    def __init__(self, short: str = "ja", long: str = "vi"):
+        self.short = short
+        self.long = long
+        self.seen: list[int] = []
+
+    def identify(self, pcm: bytes):
+        from server.pipeline.lid import LanguageDecision
+        self.seen.append(len(pcm))
+        answer = self.long if len(pcm) > self.BOUNDARY_BYTES else self.short
+        return LanguageDecision(lang_code=answer, confidence=0.9, margin=0.9,
+                                reason="scripted")
+
+    def reset(self) -> None:
+        self.seen.clear()
+
+
+def language_flip_session(identifier):
+    from server.pipeline.asr import Transcriber
+
+    vad = ScriptedVAD([0.9] * 14 + [0.02])
+    return ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        language_identifier=identifier,
+        transcriber=Transcriber(decoder=StubDecoder()),
+    )
+
+
+def test_a_language_that_changes_between_prediction_and_sentence_is_counted():
+    """Measured on a real meeting: the running text was Japanese twice over,
+    the committed sentence came out Vietnamese, and the Japanese content was
+    not mistranslated - it was gone. Two speakers, one utterance."""
+    session = language_flip_session(LidByLength(short="ja", long="vi"))
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak_then_pause(session)
+    assert session.stats.language_flips == 1
+
+
+def test_one_language_throughout_is_not_a_flip():
+    session = language_flip_session(LidByLength(short="vi", long="vi"))
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak_then_pause(session)
+    assert session.stats.language_flips == 0
+
+
+def test_an_utterance_with_no_prediction_before_it_is_not_a_flip():
+    """Nothing to disagree with is not a disagreement."""
+    session = language_flip_session(LidByLength(short="ja", long="vi"))
+    session.handle_text(Hello(session_id="abc").to_json())
+    session.handle_binary(chunk())
+    session.finish()
+    assert session.stats.language_flips == 0

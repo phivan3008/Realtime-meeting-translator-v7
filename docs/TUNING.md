@@ -215,9 +215,21 @@ Tầng chồng lấn **chỉ có một khách hàng là ASR**, nên tắt nó t�
 DISABLE_OVERLAP=1 python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
 ```
 
-Chạy cùng một đoạn ghi âm hai lần, có và không có biến này, rồi so hai file
-biên bản trong `recordings/`. Đó là phép đo duy nhất trả lời được, vì nó dùng
-đúng giọng và đúng phòng họp của bạn.
+> **Đã đo (cùng một đoạn 120 giây, chạy hai lần):** 22 câu so với 21 câu,
+> **14 câu giống hệt nhau**. Bản thường tốt hơn ở 3 câu, bản thô tốt hơn ở
+> 2 câu. Đó là nhiễu, không phải tín hiệu.
+>
+> Chênh 2.2 giây giữa hai lần là do bấm Bắt đầu lệch nhau — nó **không đổi**
+> suốt 120 giây, mà một khác biệt xử lý thì phải tích luỹ hoặc dao động. Tầng
+> này tốn 0.1 giây cho 175 giây họp.
+
+Kết luận: **không có bằng chứng để bỏ tầng chồng lấn**, và nó cũng không phải
+thủ phạm làm chữ mờ chính xác hơn câu chốt. Đoạn audio dùng để đo chủ yếu là
+nói luân phiên, nên phép đo này **không** bác bỏ lý do tầng này tồn tại (giọng
+chồng lấn) — nó chỉ nói rằng tầng này không hại.
+
+Muốn đo lại thì chạy cùng một đoạn ghi âm hai lần, có và không có biến này,
+rồi so hai file biên bản trong `recordings/`.
 
 ---
 
@@ -423,6 +435,37 @@ chỉ tại thời điểm đổi ngôn ngữ; Whisper đoán thì sai 100 %.
 
 **`ASR_CONDITION_ON_PREVIOUS = False`** — Bật lên là Whisper lấy câu trước làm
 prompt cho câu sau, đúng cơ chế biến **một câu bịa thành cả đoạn bịa**.
+
+### Hai ngôn ngữ trong một câu
+
+> **Đo được trên cùng đoạn 120 giây đó, cả hai lần chạy:**
+>
+> ```
+> partial [ja] それ3番目に入ってしまったんですね
+> partial [ja] 3番目帰ってしまったんですね
+> final   #4  [vi] Đó, cái chỗ không còn mục tiêu. Cái một là...
+> ```
+>
+> Chữ mờ là tiếng Nhật hai lần liền. Câu chốt ra tiếng Việt, và nội dung tiếng
+> Nhật **biến mất** — không phải dịch sai, nó không còn trong bản ghi.
+
+Hai người nói trong một utterance, LID phải chọn một, Whisper bị ép theo lựa
+chọn đó cho cả đoạn. Đây là cùng bài toán ở mục 5b, nhưng dữ liệu này cho một
+tín hiệu **rẻ hơn nhiều** so với voiceprint: **LID của chữ mờ và LID của câu
+chốt bất đồng**. Không cần ECAPA, không cần cửa sổ 1 giây — thứ đã đo và bác bỏ.
+
+Hiện chỉ **đếm và ghi log**, chưa dùng để cắt câu. Lần trước xây trên một tín
+hiệu chưa ai đo và nó xé nát bản ghi; lần này đo trước.
+
+Dòng tổng kết cuối phiên sẽ cảnh báo nếu có, và mỗi lần in một dòng:
+
+```
+utterance 4: running text was 'ja', sentence is 'vi' - two languages in one
+utterance, and one of them is lost
+```
+
+Con số cần thu thập trước khi làm gì tiếp: **tỉ lệ này trên một cuộc họp thật**,
+và liệu mỗi lần bất đồng có thật sự đi kèm mất nội dung hay không.
 
 **`ASR_MAX_COMPRESSION_RATIO`** — gzip của tiếng nói tự nhiên rơi vào 1.5–2.0.
 Nén tốt hơn hẳn nghĩa là đang lặp một cụm để lấp thời gian.
