@@ -180,3 +180,29 @@ def test_a_real_meeting_sentence_survives_the_shipped_lists(said):
     """The cost of a wrong entry is a sentence nobody ever hears, so the
     near misses are worth more tests than the hits."""
     assert not Hallucinations().is_invented(said), said
+
+
+# ---------------------------------------------------------------------------
+# The sign-off whose opening keeps changing
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("text", [
+    "Các bạn nhớ đăng ký kênh để ủng hộ kênh của mình nhé.",
+    "Các bạn nhớ đăng ký kênh để ủng hộ kênh mình nhé.",
+    "Các bạn hãy đăng ký kênh để ủng hộ kênh của mình nhé.",
+    "Hãy đăng ký kênh để ủng hộ kênh của mình nhé.",
+])
+def test_every_opening_of_the_subscribe_line_is_blocked(text):
+    """Three of these reached committed sentences in one meeting. The pattern
+    was anchored on "hãy" at the front and on "của mình" at the back, so any
+    other opening walked straight past it."""
+    assert Hallucinations().is_invented(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Mình đã đăng ký kênh Teams cho dự án này rồi",
+    "Bác đăng ký kênh Slack giúp em với",
+    "Bên mình đang ủng hộ kênh phân phối này của khách hàng",
+])
+def test_a_meeting_sentence_about_channels_is_kept(text):
+    """The pattern has to survive the words appearing in real work talk."""
+    assert not Hallucinations().is_invented(text)

@@ -1516,3 +1516,20 @@ def test_the_two_halves_share_no_audio():
     utterances = [p for p in payloads if p["type"] == "utterance"]
     for first, second in zip(utterances, utterances[1:]):
         assert second["start_ms"] >= first["end_ms"] - 1
+
+
+def test_neither_half_of_a_split_is_too_short_to_transcribe():
+    """Looking backwards for a quiet frame can undo the splitter's own floor,
+    and a fragment too short to transcribe is one Whisper fills in: a real
+    meeting produced two committed sentences 31 ms apart, the second an
+    invention over near-silence."""
+    session = two_language_session()
+    session.handle_text(Hello(session_id="abc").to_json())
+    payloads = speak(session, 20, LOUD) + speak(session, 20, QUIET)
+    payloads += [json.loads(m) for m in session.finish().messages]
+    from server.config import SAMPLE_RATE, SAMPLE_WIDTH
+    floor = (session.language_splitter.probe_bytes
+             / (SAMPLE_RATE * SAMPLE_WIDTH) * 1000.0)
+    short = [p for p in payloads
+             if p["type"] == "utterance" and p["duration_ms"] < floor]
+    assert not short, f"fragments of {[p['duration_ms'] for p in short]} ms"

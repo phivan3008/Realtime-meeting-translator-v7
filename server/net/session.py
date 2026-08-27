@@ -530,7 +530,11 @@ class ServerSession:
         # one step of the binary search, so it looks backwards for a dip.
         cut = quietest_split_point(utterance.pcm, ms_to_bytes(boundary.at_ms),
                                    ms_to_bytes(SPLIT_SEARCH_MS))
-        if cut <= 0 or cut >= len(utterance.pcm):
+        # Looking backwards can undo the splitter's own floor. Neither half
+        # may be shorter than a probe: a fragment too short to transcribe is
+        # a fragment Whisper fills in rather than leaves empty.
+        floor = self.language_splitter.probe_bytes
+        if cut < floor or len(utterance.pcm) - cut < floor:
             return [utterance]
 
         self.stats.language_splits += 1

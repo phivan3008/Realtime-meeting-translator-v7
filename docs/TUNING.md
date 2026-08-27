@@ -525,6 +525,29 @@ khi phải cắt. LID tốn khoảng 6 ms mỗi lần.
 - `LANGUAGE_SPLIT_PROBE_MS` giảm xuống dưới `LID_MIN_DURATION_MS`: chính tầng
   LID đã coi cửa sổ ngắn hơn thế là quá ngắn để tin.
 
+> **Chạy thật lần đầu (cùng đoạn 10 phút, hai lần):** bắn **31 trên 110**
+> utterance — 28%, cao hơn hẳn con số 8 bất đồng. Nhưng **số câu mất vì chồng
+> lấn giảm từ 4 xuống 1**, `slowest sentence` vẫn 0.4 s, và cả tầng tốn 2.0
+> giây cho cả cuộc họp.
+
+**Cả hai nửa phải dài ít nhất một lần thăm dò.** Lần chạy đầu lộ ra chỗ hổng:
+một probe nằm vắt qua chỗ đổi ngôn ngữ đọc ra ngôn ngữ thứ hai, nên phép tìm
+nhị phân đi quá cả ngôn ngữ nó xuất phát và trả về ranh giới cách đầu câu vài
+trăm mili-giây. Bước bắt khung im còn kéo lùi thêm 500 ms nữa.
+
+> **Gặp thật:** hai câu chốt cách nhau **31 mili-giây**, câu thứ hai là Whisper
+> bịa lên chỗ gần-im-lặng:
+>
+> ```
+> 16:12:51.928  final #50 [ja] と思うんだけどもうちょっと聞いた目線で一回整理
+> 16:12:51.959  final #51 [vi] Các bạn nhớ đăng ký kênh để ủng hộ kênh của mình nhé.
+> ```
+>
+> **Mảnh quá ngắn để phiên âm là mảnh Whisper lấp vào, không phải để trống.**
+
+Nay có hai lớp chặn: phép tìm nhị phân bắt đầu cách hai đầu đúng một lần thăm
+dò, và session từ chối nhát cắt nào làm một nửa ngắn hơn thế.
+
 Dòng tổng kết cuối phiên cho biết nó bắn bao nhiêu lần, để so với con số 8
 bất đồng ở trên.
 

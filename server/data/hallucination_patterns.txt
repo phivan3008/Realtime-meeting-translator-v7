@@ -32,6 +32,13 @@ h[ãa]y subscribe cho k[êe]nh .{1,40} [đd][ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[
 # Thấy một lần. Tên kênh là tuỳ chọn — bản gặp phải không có tên nào.
 h[ãa]y [đd][ăa]ng k[ýy] k[êe]nh( .{1,40})? [đd][ểe] [ủu]ng h[ộo] k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?
 
+# Ba biến thể nữa lọt qua mẫu trên trong một lần chạy: "Các bạn nhớ đăng ký...",
+# "Các bạn hãy đăng ký...", và "...ủng hộ kênh mình nhé" (không có "của").
+# Mẫu trên neo vào chữ "hãy" ở đầu câu và đòi đúng "của mình", nên phần mở đầu
+# thay đổi được là lọt. Phần bất biến nằm ở hai cụm giữa và cuối, nên neo vào
+# đó và cho phần đầu tự do trong giới hạn.
+.{0,30}[đd][ăa]ng k[ýy] k[êe]nh.{0,45}[ủu]ng h[ộo] k[êe]nh.{0,20}m[ìi]nh.{0,10}
+
 # Ba biến thể trong cùng một lần chạy mười phút. Khe nằm ở mệnh đề giữa
 # ("like, share và đăng ký kênh" / "like và share video này" / "đăng ký kênh").
 c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,30}

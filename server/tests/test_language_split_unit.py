@@ -169,3 +169,34 @@ def test_zero_steps_still_answers():
 
 def test_the_probe_is_measured_in_whole_samples():
     assert splitter().probe_bytes == PROBE_MS * SAMPLE_RATE // 1000 * SAMPLE_WIDTH
+
+
+# ---------------------------------------------------------------------------
+# No slivers
+# ---------------------------------------------------------------------------
+def duration_ms(pcm: bytes) -> float:
+    return len(pcm) / (SAMPLE_RATE * SAMPLE_WIDTH) * 1000.0
+
+
+def test_a_boundary_is_never_so_early_that_the_head_is_a_sliver():
+    """Seen on a real meeting: two finals 31 ms apart, the second of them a
+    Whisper invention over near-silence. A fragment too short to transcribe
+    is a fragment Whisper fills in.
+
+    A probe that straddles the change reads as the second language, which
+    walks the search's upper bound down past the first language entirely.
+    """
+    found = splitter(steps=5).find(tone(600, VI) + tone(3_000, JA))
+    assert found is None or found.at_ms >= PROBE_MS,         f"head is {found.at_ms:.0f} ms"
+
+
+def test_a_boundary_is_never_so_late_that_the_tail_is_a_sliver():
+    audio = tone(3_000, VI) + tone(600, JA)
+    found = splitter(steps=5).find(audio)
+    assert found is None or duration_ms(audio) - found.at_ms >= PROBE_MS,         f"tail is {duration_ms(audio) - found.at_ms:.0f} ms"
+
+
+def test_an_utterance_that_cannot_hold_two_probes_and_a_gap_is_left_whole():
+    """Both halves have to be long enough for the LID to have meant it."""
+    watcher = splitter()
+    assert watcher.find(tone(1_100, VI) + tone(100, JA)) is None

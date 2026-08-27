@@ -107,7 +107,17 @@ class LanguageSplitter:
 
         # Everything up to `low` sounds like the first language, everything
         # from `high` like the second. Narrow the gap between them.
-        low, high = 0, len(pcm) - probe
+        #
+        # Both bounds start a probe in from the ends. A probe straddling the
+        # change reads as one side or the other, so the search can walk past
+        # the language it started in and hand back a boundary a few hundred
+        # milliseconds from the start - leaving a fragment too short to
+        # transcribe, which Whisper does not leave empty. On a real meeting
+        # that produced two committed sentences 31 ms apart, the second of
+        # them an invention over near-silence.
+        low, high = probe, len(pcm) - probe
+        if high <= low:
+            return None
         for _ in range(self.steps):
             middle = (low + high) // 2
             if middle <= low or middle >= high:
