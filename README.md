@@ -96,12 +96,26 @@ Chờ `Application startup complete`, rồi kiểm tra:
 curl -s http://127.0.0.1:8000/health
 ```
 
-Tầng lọc nhiễu mặc định **tắt** — nó tốn 26% luồng đọc socket và bỏ được 0
-câu trên một cuộc họp thật. `ENABLE_NOISE_FILTER=1` để bật lại.
+Kiểm **đủ bảy cờ**, không phải sáu:
 
-**Các cờ `*_loaded` còn lại phải là `true`.** Cái nào `false` thì dòng `*_error`
-bên cạnh nói lý do. Server vẫn khởi động khi thiếu một tầng — thiếu một tầng
-còn hơn từ chối cuộc họp — nhưng lúc đó phụ đề không đáng tin.
+| Cờ | Phải là |
+| --- | --- |
+| `vad_loaded` | `true` |
+| `noise_filter_loaded` | `false` — tầng này mặc định tắt, `ENABLE_NOISE_FILTER=1` để bật |
+| `overlap_resolver_loaded` | `true` |
+| `speaker_model_loaded` | `true` |
+| `language_model_loaded` | `true` |
+| `asr_loaded` | `true` |
+| `translation_loaded` | `true` |
+
+Cái nào sai thì dòng `*_error` bên cạnh nói lý do. Server vẫn khởi động khi
+thiếu một tầng — thiếu một tầng còn hơn từ chối cuộc họp — nhưng lúc đó phụ đề
+không đáng tin, và **không có gì trong lúc chạy nói cho bạn biết**.
+
+> Đây không phải chuyện giả định. `overlap_resolver_loaded` từng `false` suốt
+> nhiều lần chạy vì thiếu `pedalboard`, và nó không nằm trong danh sách README
+> bảo phải kiểm. Một phép đo A/B về chính tầng đó đã chạy và cho kết quả vô
+> nghĩa, vì cả hai lần chạy đều không có tầng đó.
 
 **Client:**
 ```powershell

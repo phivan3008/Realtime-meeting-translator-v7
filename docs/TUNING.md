@@ -231,21 +231,21 @@ Tầng chồng lấn **chỉ có một khách hàng là ASR**, nên tắt nó t�
 DISABLE_OVERLAP=1 python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
 ```
 
-> **Đã đo (cùng một đoạn 120 giây, chạy hai lần):** 22 câu so với 21 câu,
-> **14 câu giống hệt nhau**. Bản thường tốt hơn ở 3 câu, bản thô tốt hơn ở
-> 2 câu. Đó là nhiễu, không phải tín hiệu.
+> **Đã thử đo và phép đo VÔ HIỆU.** Chạy cùng một đoạn 120 giây hai lần, một
+> lần có `DISABLE_OVERLAP=1`. Kết quả 22 câu so với 21, 14 câu giống hệt.
 >
-> Chênh 2.2 giây giữa hai lần là do bấm Bắt đầu lệch nhau — nó **không đổi**
-> suốt 120 giây, mà một khác biệt xử lý thì phải tích luỹ hoặc dao động. Tầng
-> này tốn 0.1 giây cho 175 giây họp.
+> Nhưng `/health` sau đó cho thấy `overlap_resolver_loaded: false` với lý do
+> `pedalboard is not installed` — **cả hai lần chạy đều không có tầng này**.
+> Phép đo so không-có-tầng với không-có-tầng. Khác biệt 3–2 đến từ hai lần
+> chạy lệch nhau 2.2 giây nên ranh giới câu khác nhau, không từ gate.
 
-Kết luận: **không có bằng chứng để bỏ tầng chồng lấn**, và nó cũng không phải
-thủ phạm làm chữ mờ chính xác hơn câu chốt. Đoạn audio dùng để đo chủ yếu là
-nói luân phiên, nên phép đo này **không** bác bỏ lý do tầng này tồn tại (giọng
-chồng lấn) — nó chỉ nói rằng tầng này không hại.
+**Tầng chồng lấn vẫn chưa được đo.** Trước khi đo lại, kiểm tra
+`overlap_resolver_loaded` trong `/health` phải là `true` — nếu không thì
+`pip install -r server/requirements.lock.txt`.
 
-Muốn đo lại thì chạy cùng một đoạn ghi âm hai lần, có và không có biến này,
-rồi so hai file biên bản trong `recordings/`.
+Rồi chạy cùng một đoạn ghi âm hai lần, có và không có `DISABLE_OVERLAP=1`, so
+hai file biên bản trong `recordings/`. Chọn đoạn có **cả hai tình huống**:
+giọng chồng lấn, và người nói một mình liền mạch.
 
 ---
 

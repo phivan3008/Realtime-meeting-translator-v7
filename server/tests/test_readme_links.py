@@ -49,10 +49,23 @@ def test_every_file_the_quickstart_names_exists(name):
 
 
 def test_the_health_flags_it_promises_are_the_ones_the_server_reports():
-    """The README tells the reader six ``*_loaded`` flags must be true. If
-    app.py reports a different set, that sends them looking for the wrong
-    thing at the worst moment."""
+    """Every flag the server reports has to be named in the README.
+
+    Counting them was not enough. The README said six, ``/health`` reported
+    seven, and the one left out was ``overlap_resolver_loaded`` - which then
+    sat at false for several meetings because pedalboard was not installed,
+    with nothing telling anybody to look. An A/B measurement of that very
+    stage was run and gave a meaningless answer, because neither run had it.
+    """
     app = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
     reported = set(re.findall(r'"(\w+_loaded)":', app))
-    # Six stages plus the VAD, which loads separately and cannot fail softly.
-    assert len(reported) == 7, sorted(reported)
+    assert reported, "no health flags found in app.py"
+
+    # Only the checklist counts. Mentioning a flag in the prose around it is
+    # how one stayed unchecked while being broken.
+    listed = set(re.findall(r"^\| `(\w+_loaded)`", readme, re.MULTILINE))
+    missing = sorted(reported - listed)
+    assert not missing, f"the checklist never tells anyone to check {missing}"
+    stale = sorted(listed - reported)
+    assert not stale, f"the checklist names flags the server does not report: {stale}"
