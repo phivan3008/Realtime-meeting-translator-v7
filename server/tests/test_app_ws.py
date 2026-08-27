@@ -337,3 +337,22 @@ def test_the_voice_scores_are_reported_as_deciles(caplog):
         _log_voice_scores(session)
     assert "11 checks, 3 cuts" in caplog.text
     assert "1.0]" in caplog.text, "the top of the range was not reported"
+
+
+def test_the_overlap_resolver_can_be_turned_off(monkeypatch):
+    """Its only consumer is the ASR, so this is the switch for feeding
+    Whisper raw audio - the A/B for whether shaping helps it at all."""
+    from server.app import AppState
+
+    state = AppState()
+    monkeypatch.setenv("DISABLE_OVERLAP", "1")
+    monkeypatch.setattr(app_module, "SileroVAD", lambda: object())
+    for name in ("NoiseFilter", "SpeakerIdentifier", "LanguageIdentifier",
+                 "Transcriber", "Translator"):
+        monkeypatch.setattr(app_module, name, lambda **kw: object())
+
+    state.load_models()
+
+    assert state.overlap_resolver is None
+    assert state.overlap_error == "disabled by DISABLE_OVERLAP"
+    assert state.transcriber is not None, "it took the ASR down with it"

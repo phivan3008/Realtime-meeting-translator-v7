@@ -56,6 +56,7 @@ class AppState:
         self.noise_filter: Optional[NoiseFilter] = None
         self.noise_error: str = ""
         self.overlap_resolver: Optional[OverlapResolver] = None
+        self.overlap_error: str = ""
         self.speaker_identifier: Optional[SpeakerIdentifier] = None
         self.speaker_error: str = ""
         self.language_identifier: Optional[LanguageIdentifier] = None
@@ -98,8 +99,17 @@ class AppState:
                        lambda: NoiseFilter(classifier=AstClassifier()),
                        NoiseFilterError)
 
-        self._load("overlap_resolver", "", "overlap resolver",
-                   OverlapResolver, OverlapError)
+        if os.environ.get("DISABLE_OVERLAP"):
+            # The resolver's only consumer is the ASR, so this is the switch
+            # for feeding Whisper raw audio. Whether shaping helps it has
+            # never been measured on transcription accuracy - only on
+            # voiceprints, where it costs 0.06 cosine.
+            self.overlap_error = "disabled by DISABLE_OVERLAP"
+            log.warning("Overlap resolver disabled by environment; the ASR "
+                        "will be given raw audio")
+        else:
+            self._load("overlap_resolver", "overlap_error", "overlap resolver",
+                       OverlapResolver, OverlapError)
         self._load("speaker_identifier", "speaker_error",
                    "speaker embedding model", SpeakerIdentifier,
                    DiarizationError)
@@ -170,6 +180,7 @@ def health() -> dict:
         "translation_loaded": state.translator is not None,
         "translation_error": state.translate_error,
         "noise_filter_error": state.noise_error,
+        "overlap_error": state.overlap_error,
         "session_active": state.active_session_id is not None,
     }
 

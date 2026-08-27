@@ -180,6 +180,45 @@ ngắn sẽ cắt cụt đuôi từ. 120 ms đủ dài để giữ nguyên phầ
 giọng; trên tiếng nói thật chúng chỉ nhô lên khoảng 3 dB, nên ngưỡng thấp
 hơn sẽ bóp bẹp chính giọng nói.
 
+### `DISABLE_OVERLAP` — chưa ai đo tầng này giúp gì cho ASR
+
+Người dùng thật phản ánh: **chữ mờ đôi khi chính xác hơn câu đã chốt**. Đúng
+một phần, và có ba khác biệt giữa hai lần giải mã:
+
+| | chữ mờ | câu đã chốt |
+| --- | --- | --- |
+| audio | **thô** | **đã qua gate + compressor** |
+| cửa sổ | 4 giây cuối | cả câu, tới 7 giây |
+| beam | 1 | 5 |
+
+Beam 5 chỉ tốt hơn. Hai cái còn lại đều có thể làm xấu đi.
+
+> **Thấy trong log thật:** final làm hỏng đúng đoạn mà partial đã nghe ra —
+> `cái X23 cái timet` thành `cái hay là ba cái tên biết`, `y2 x2.3` thành
+> `i2x23`. Đó là dấu hiệu của gate cắt mất âm tiết yếu.
+>
+> Nhưng chiều ngược lại cũng có: một câu tiếng Nhật mà partial trôi dần
+> (`YAM` → `山本` → `皆`) thì final lại chốt đúng `YAM`.
+
+Một phần cảm nhận là **hiệu ứng chọn lọc**: partial làm mới mỗi 600 ms, mắt
+người nhớ bản đúng nhất; final chỉ có một lần.
+
+Phần còn lại thì không. Chú thích trong `_analyse` viết *"Shaping helps the
+ASR and nothing else"*, nhưng điều đó **chưa từng được đo trên độ chính xác
+phiên âm**. Cái đã đo là gate làm mất 0.06 cosine của voiceprint — và đó chính
+là lý do tầng người nói đọc audio thô.
+
+Tầng chồng lấn **chỉ có một khách hàng là ASR**, nên tắt nó tức là cho Whisper
+ăn audio thô:
+
+```bash
+DISABLE_OVERLAP=1 python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+Chạy cùng một đoạn ghi âm hai lần, có và không có biến này, rồi so hai file
+biên bản trong `recordings/`. Đó là phép đo duy nhất trả lời được, vì nó dùng
+đúng giọng và đúng phòng họp của bạn.
+
 ---
 
 ## 5. Nhận dạng người nói

@@ -102,6 +102,9 @@ gọi Whisper. Câu bị bỏ vẫn báo về client kèm nhãn (`kept: false`).
 chỉ hạ những gì thấp hơn hẳn giọng đang át. Ngưỡng đặt theo **đỉnh** chứ không
 theo RMS — detector của pedalboard so theo đỉnh.
 
+Khách hàng duy nhất của tầng này là ASR, và **chưa ai đo nó giúp hay hại**.
+`DISABLE_OVERLAP=1` cho Whisper ăn audio thô để so. Xem `TUNING.md` mục 4.
+
 **5. Diarization.** Gọi `speechbrain` trực tiếp, không qua `pyannote.audio`:
 wrapper của pyannote truyền tham số mà speechbrain không nhận, lỗi trước cả khi
 nạp model. Voiceprint lấy từ **audio thô**, chưa qua tầng 4 — gate cắt cả âm

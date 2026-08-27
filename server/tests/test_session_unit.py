@@ -1322,3 +1322,54 @@ def test_an_ordinary_failure_still_gets_its_three_chances():
     session.handle_text(Hello(session_id="abc").to_json())
     speak(session, 40, LOUD)
     assert session.noise_filter is not None
+
+
+# ---------------------------------------------------------------------------
+# What the ASR is given
+# ---------------------------------------------------------------------------
+class RecordingResolver:
+    """Stands in for the overlap resolver and remembers what it was handed."""
+
+    def __init__(self) -> None:
+        self.seen: list[bytes] = []
+
+    def resolve(self, pcm: bytes):
+        self.seen.append(pcm)
+        from server.pipeline.overlap import Shaped
+        return Shaped(pcm=b"\x01\x02" * (len(pcm) // 2), shaped=True,
+                      level_dbfs=-20.0, gate_threshold_db=-30.0,
+                      compressor_threshold_db=-10.0)
+
+
+def test_the_committed_sentence_is_decoded_from_shaped_audio():
+    from server.pipeline.asr import Transcriber
+
+    decoder = StubDecoder()
+    vad = ScriptedVAD([0.9] * 14 + [0.02])
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        overlap_resolver=RecordingResolver(),
+        transcriber=Transcriber(decoder=decoder),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak_then_pause(session)
+    finals = [call for call in decoder.calls if call[2] == 5]
+    assert finals, "no committed sentence was decoded"
+
+
+def test_the_running_text_is_decoded_from_raw_audio():
+    """Not a detail: the gate removes quiet syllables, so the two decodes see
+    different audio and can disagree on words the reader already read."""
+    from server.pipeline.asr import Transcriber
+
+    resolver = RecordingResolver()
+    vad = ScriptedVAD((0.9,))
+    session = ServerSession(
+        segmenter_factory=lambda: VADSegmenter(vad=vad),
+        overlap_resolver=resolver,
+        transcriber=Transcriber(decoder=StubDecoder()),
+    )
+    session.handle_text(Hello(session_id="abc").to_json())
+    speak(session, 20, LOUD)
+    assert session.stats.partials > 0
+    assert resolver.seen == [], "the running text went through the resolver"
