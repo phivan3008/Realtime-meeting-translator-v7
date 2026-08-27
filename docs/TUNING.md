@@ -14,6 +14,40 @@ Nếu bạn chỉnh một số, hãy đo lại theo đúng cách đó rồi cậ
 
 Sau khi sửa `config.py` phải **khởi động lại uvicorn**.
 
+**Trước mọi phép đo, kiểm `"in_venv": true` trong `/health`.** Server chạy
+được bằng interpreter khác mà không kêu ca gì — nó nạp gần hết pipeline và
+phục vụ cuộc họp bình thường. Ba phép đo của dự án này đã phải vứt vì lý do đó.
+
+## Mốc so sánh
+
+Cuộc họp thật, 593.6 giây audio, pod H100, trong venv, mặc định hiện tại
+(tầng lọc nhiễu tắt). Mọi phép đo sau nên so với những con số này.
+
+```
+118 utterances (0 dropped as noise, 115 shaped, 118 identified,
+                109 with a language)
+682 transcripts, 87 translations, 711 partials
+slowest sentence 0.4 s, slowest running text 1.5 s
+stages {'partial_asr': 80.5, 'asr': 19.9, 'partial_language': 6.9,
+        'speaker': 1.5, 'language': 0.8, 'overlap': 0.2, 'recluster': 0.0}
+5 sentences came out in a different language than the running text predicted
+7 speakers after 6 reclustering runs, 13 labels corrected
+```
+
+Đọc ra được:
+
+| | |
+| --- | --- |
+| pipeline chiếm | **18.5%** luồng đọc socket (109.8 / 593.6 s) |
+| chữ mờ chiếm | **73%** của con số đó (80.5 s) — gấp 4 lần các câu đã chốt |
+| tầng chồng lấn | **0.2 s**, tức 0.03%. Nó động vào 115/118 câu |
+| bất đồng ngôn ngữ | 5 / 118 câu, **4%** |
+
+Chữ mờ là chỗ duy nhất còn dư địa đáng kể. Nó đã bị giới hạn 4 giây
+(`PARTIAL_WINDOW_SECONDS`); nới `PARTIAL_INTERVAL_MS` lên là cách rẻ tiếp
+theo, đổi lại chữ mờ giật hơn. **Chưa cần** — hiện không có cảnh báo
+`held the socket` nào.
+
 ## Quy tắc chung của cả pipeline
 
 **Bỏ sót đắt hơn báo nhầm.** Một câu bị xoá là câu không ai nghe được và
