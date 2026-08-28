@@ -36,6 +36,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import statistics
 import sys
 import time
@@ -49,6 +50,7 @@ from server.config import (  # noqa: E402
     SHORT_LINE_HINT_ENABLED,
     TRANSLATE_HISTORY,
 )
+from server.pipeline.profiles import profile_for
 from server.pipeline.translate import (  # noqa: E402
     TranslationContext,
     TranslationError,
@@ -499,11 +501,49 @@ def check_meeting_refusals(client, report: Report) -> None:
           "no such excuse.")
 
 
+def save_run(path: str, client, translator, attempts, report) -> None:
+    """One model's answers, for comparing against another model's.
+
+    Both cannot be served at once - a 12B and a 9B do not share one card with
+    Whisper - so the comparison is two runs and a diff rather than one run.
+    """
+    payload = {
+        "model": client.model,
+        "profile": client.profile.name,
+        "answers": [
+            {
+                "lang_code": item.lang_code,
+                "source": item.source,
+                "translation": item.result.text,
+                "reason": item.result.reason,
+                "seconds": round(item.seconds, 3),
+            }
+            for item in attempts
+        ],
+        "stats": {
+            "seen": translator.stats.seen,
+            "translated": translator.stats.translated,
+            "refused": translator.stats.refused,
+            "refused_reasons": dict(translator.stats.refused_reasons),
+        },
+        "checks_failed": [check.name for check in report.failed],
+    }
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="", help="vLLM base URL")
     parser.add_argument("--model", default="",
                         help="defaults to whatever the server is serving")
+    parser.add_argument("--profile", default="",
+                        help="translation model family: qwen or gemma "
+                             "(default: TRANSLATE_PROFILE, else qwen)")
+    parser.add_argument("--save", default="",
+                        help="write the run to JSON, so two models can be "
+                             "compared with compare_translate.py")
     args = parser.parse_args()
 
     print("=" * 72)
@@ -514,7 +554,8 @@ def main() -> int:
     try:
         print("\n  Connecting to the translation server ...")
         started = time.perf_counter()
-        client = VllmClient(base_url=args.url, model=args.model)
+        client = VllmClient(base_url=args.url, model=args.model,
+                            profile=profile_for(args.profile))
         print(f"  Connected in {time.perf_counter() - started:.1f} s: "
               f"{client.source}")
         report.add("The translation server is reachable", True, client.source)

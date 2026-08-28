@@ -35,6 +35,7 @@ from common.protocol import (
     make_error,
 )
 from server.config import overrides
+from server.pipeline.profiles import profile_for
 from server.net.session import Response, ServerSession, Stages
 from server.pipeline.asr import AsrError, Transcriber
 from server.pipeline.diarization import DiarizationError, SpeakerIdentifier
@@ -207,6 +208,7 @@ def health() -> dict:
         "python": sys.executable,
         "in_venv": in_venv(),
         "overrides": overrides(),
+        "translation_profile": profile_for().name,
         "protocol_version": PROTOCOL_VERSION,
         "sample_rate": SAMPLE_RATE,
         "chunk_bytes": CHUNK_BYTES,

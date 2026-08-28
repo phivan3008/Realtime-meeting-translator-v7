@@ -96,8 +96,12 @@ python3.11 -m vllm.entrypoints.openai.api_server \
 **Terminal 2 — server âm thanh:**
 ```bash
 source .venv/bin/activate
-python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
+python3.11 -m server.run
 ```
+
+`python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000` vẫn chạy
+được y hệt. `server.run` chỉ thêm `--profile` để nói cho server biết vLLM đang
+phục vụ họ model nào — xem [`docs/GEMMA.md`](docs/GEMMA.md).
 
 Chờ `Application startup complete`, rồi kiểm tra:
 
@@ -118,6 +122,8 @@ Rồi kiểm **đủ bảy cờ**, không phải sáu:
 
 | Cờ | Phải là |
 | --- | --- |
+| `in_venv` | `true` |
+| `translation_profile` | `qwen` mặc định — `gemma` nếu chạy nhánh Gemma |
 | `vad_loaded` | `true` |
 | `noise_filter_loaded` | `false` — mặc định tắt: 237 utterance, bỏ được 0 câu, tốn 22% luồng đọc socket |
 | `overlap_resolver_loaded` | `true` |
@@ -225,6 +231,7 @@ Test thật cần phần cứng thật và nằm riêng:
 | Ngưỡng VAD, cắt câu, nhận dạng người nói, dịch… | [`docs/TUNING.md`](docs/TUNING.md) |
 | Câu Whisper bịa cần chặn / giữ | [`server/data/README.md`](server/data/README.md) |
 | Tên người, tên dự án, thuật ngữ Whisper nghe sai | [`server/data/vocabulary.txt`](server/data/vocabulary.txt) |
+| Đổi model dịch sang họ Gemma | [`docs/GEMMA.md`](docs/GEMMA.md) |
 
 Mỗi thông số trong `TUNING.md` đi kèm **phép đo đã chọn ra nó** và điều gì
 hỏng nếu chỉnh sai hướng. Đọc trước khi đổi — phần lớn các số đó nằm giữa hai

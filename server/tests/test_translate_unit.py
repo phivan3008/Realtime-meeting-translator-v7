@@ -767,3 +767,110 @@ def test_a_refusal_that_is_not_an_echo_is_not_retried():
     backend = Rambles()
     with_history(backend).translate("Bác đang làm một cái tool.", "vi")
     assert backend.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# The request the backend actually sends
+# ---------------------------------------------------------------------------
+def sent_body(profile, monkeypatch) -> dict:
+    """Build a backend without a server and capture one request body."""
+    import json as _json
+    import urllib.request
+
+    from server.pipeline.translate import VllmClient
+
+    monkeypatch.setattr(VllmClient, "served_models",
+                        lambda self: [profile.model_id])
+    backend = VllmClient(base_url="http://stub/v1", profile=profile)
+
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return _json.dumps(
+                {"choices": [{"message": {"content": "こんにちは"}}]}
+            ).encode()
+
+    def fake_open(request, timeout=None):
+        captured["body"] = _json.loads(request.data)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_open)
+    backend.complete("SYSTEM TEXT", "USER TEXT")
+    return captured["body"]
+
+
+def test_qwen_is_sent_a_system_turn(monkeypatch):
+    from server.pipeline.profiles import QWEN
+
+    body = sent_body(QWEN, monkeypatch)
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_gemma_is_sent_one_folded_turn(monkeypatch):
+    """Gemma's template has no system role; sending one is a template error."""
+    from server.pipeline.profiles import GEMMA
+
+    body = sent_body(GEMMA, monkeypatch)
+    assert [m["role"] for m in body["messages"]] == ["user"]
+    assert "SYSTEM TEXT" in body["messages"][0]["content"]
+    assert "USER TEXT" in body["messages"][0]["content"]
+    assert "chat_template_kwargs" not in body
+
+
+def test_the_shared_settings_are_the_same_for_both(monkeypatch):
+    """Only the template quirks differ. Temperature, budget and streaming are
+    the pipeline's, not the model's - otherwise the two are not comparable."""
+    from server.pipeline.profiles import GEMMA, QWEN
+
+    qwen = sent_body(QWEN, monkeypatch)
+    gemma = sent_body(GEMMA, monkeypatch)
+    for key in ("temperature", "max_tokens", "stream"):
+        assert qwen[key] == gemma[key]
+
+
+def test_a_profile_aimed_at_another_family_is_warned_about(monkeypatch, caplog):
+    """vLLM answers a request built for the wrong template happily. The only
+    symptom is translations quietly worse than they should be."""
+    import logging as _logging
+
+    from server.pipeline.profiles import QWEN
+    from server.pipeline.translate import VllmClient
+
+    monkeypatch.setenv("TRANSLATE_MODEL", "google/gemma-4-12b-it")
+    monkeypatch.setattr(VllmClient, "served_models",
+                        lambda self: ["google/gemma-4-12b-it"])
+    with caplog.at_level(_logging.WARNING):
+        VllmClient(base_url="http://stub/v1", profile=QWEN)
+    assert "--profile gemma" in caplog.text
+
+
+def test_an_explicit_checkpoint_beats_the_profile_default(monkeypatch):
+    """So --model can point at a fine-tune of either family."""
+    from server.pipeline.profiles import GEMMA
+    from server.pipeline.translate import VllmClient
+
+    monkeypatch.delenv("TRANSLATE_MODEL", raising=False)
+    monkeypatch.setattr(VllmClient, "served_models",
+                        lambda self: ["shop/gemma-4-12b-it-vi-ja"])
+    backend = VllmClient(base_url="http://stub/v1",
+                         model="shop/gemma-4-12b-it-vi-ja", profile=GEMMA)
+    assert backend.model == "shop/gemma-4-12b-it-vi-ja"
+
+
+def test_without_a_checkpoint_the_profile_names_one(monkeypatch):
+    from server.pipeline.profiles import GEMMA
+    from server.pipeline.translate import VllmClient
+
+    monkeypatch.delenv("TRANSLATE_MODEL", raising=False)
+    monkeypatch.setattr(VllmClient, "served_models",
+                        lambda self: [GEMMA.model_id])
+    assert VllmClient(base_url="http://stub/v1",
+                      profile=GEMMA).model == GEMMA.model_id

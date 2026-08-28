@@ -26,6 +26,7 @@ Layering:
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 import unicodedata
@@ -50,6 +51,12 @@ from server.config import (
     TRANSLATE_PAIR,
     TRANSLATE_TEMPERATURE,
     TRANSLATE_TIMEOUT_S,
+)
+
+from server.pipeline.profiles import (
+    ModelProfile,
+    profile_for,
+    profile_for_model,
 )
 
 log = logging.getLogger(__name__)
@@ -500,14 +507,36 @@ class VllmClient:
     """
 
     def __init__(self, base_url: str = "", model: str = "",
-                 timeout: float = TRANSLATE_TIMEOUT_S) -> None:
+                 timeout: float = TRANSLATE_TIMEOUT_S,
+                 profile: Optional[ModelProfile] = None) -> None:
         self.base_url = (base_url or TRANSLATE_BASE_URL).rstrip("/")
         self.timeout = timeout
-        wanted = model or TRANSLATE_MODEL
+        self.profile = profile if profile is not None else profile_for()
+        # An explicit checkpoint wins over the profile's default, so
+        # --model can point at a fine-tune of either family. The environment
+        # is read directly: config.py gives TRANSLATE_MODEL a default, and a
+        # default must not outrank the profile.
+        wanted = model or os.environ.get("TRANSLATE_MODEL") or self.profile.model_id
         served = self.served_models()
         self.model = choose_model(wanted, served, self.base_url)
-        log.info("Translation backend ready: %s at %s", self.model,
-                 self.base_url)
+        self._warn_on_mismatch()
+        log.info("Translation backend ready: %s at %s, profile %r",
+                 self.model, self.base_url, self.profile.name)
+
+    def _warn_on_mismatch(self) -> None:
+        """A profile aimed at another family has no symptom worth noticing.
+
+        vLLM answers a request built for the wrong template happily enough.
+        The only sign is translations quietly worse than they should be, which
+        is the hardest kind of fault to find.
+        """
+        family = profile_for_model(self.model)
+        if family is not None and family.name != self.profile.name:
+            log.warning(
+                "Serving %r but using the %r profile. Start the server with "
+                "--profile %s, or vLLM with the %s checkpoint.",
+                self.model, self.profile.name, family.name,
+                self.profile.model_id)
 
     def served_models(self) -> list[str]:
         """What this server is actually serving."""
@@ -527,17 +556,16 @@ class VllmClient:
     def complete(self, system: str, user: str) -> str:
         body = json.dumps({
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            # How the two turns are assembled is the profile's business:
+            # Gemma's template has no system role and rejects the request.
+            "messages": self.profile.messages(system, user),
             "temperature": TRANSLATE_TEMPERATURE,
             "max_tokens": TRANSLATE_MAX_TOKENS,
             "stream": False,
-            # Qwen3 reasons before answering unless the chat template is told
-            # not to. A server whose template ignores this is caught by the
-            # <think> stripping instead.
-            "chat_template_kwargs": {"enable_thinking": TRANSLATE_ENABLE_THINKING},
+            # Qwen needs chat_template_kwargs to stop it reasoning aloud;
+            # Gemma's template does not declare one, and sending an
+            # undeclared kwarg is an error on some builds.
+            **self.profile.extra_body,
         }).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions", data=body,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -453,3 +454,35 @@ def test_the_startup_log_says_when_nothing_is_overridden(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         state.load_models()
     assert "No environment overrides" in caplog.text
+
+
+def test_health_names_the_translation_profile(monkeypatch):
+    """The client is never told which model translates for it, so this is the
+    only place a wrong profile shows before a meeting starts."""
+    from server.app import health
+
+    monkeypatch.setenv("TRANSLATE_PROFILE", "gemma")
+    assert health()["translation_profile"] == "gemma"
+
+
+def test_the_launcher_passes_the_profile_through(monkeypatch):
+    from server import run as launcher
+
+    started = {}
+    monkeypatch.setitem(sys.modules, "uvicorn", type("U", (), {
+        "run": staticmethod(lambda app, **kw: started.update(kw)),
+    }))
+    # setenv rather than delenv, so monkeypatch owns the key and puts it back:
+    # main() writes to os.environ for real, and a leak here changes the
+    # default profile for every test that runs after it.
+    monkeypatch.setenv("TRANSLATE_PROFILE", "qwen")
+    launcher.main(["--profile", "gemma", "--port", "9000"])
+    assert os.environ["TRANSLATE_PROFILE"] == "gemma"
+    assert started["port"] == 9000
+
+
+def test_the_launcher_refuses_a_profile_that_does_not_exist(capsys):
+    from server import run as launcher
+
+    with pytest.raises(SystemExit):
+        launcher.parse_args(["--profile", "llama"])
