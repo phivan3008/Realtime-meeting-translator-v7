@@ -64,6 +64,15 @@ class SplitStats:
     checked: int = 0
     split: int = 0
     probes: int = 0
+    #: Why it declined, counted. A guard that goes quiet when it says no is
+    #: how this project keeps losing days: the flagship case it was built for
+    #: went unsplit for a whole meeting with nothing in the log about it.
+    one_language: int = 0
+    undecided: int = 0
+    too_short: int = 0
+    #: What the last declined utterance looked like, for the log line that
+    #: reports a turn was probably lost.
+    last: str = ""
 
 
 class LanguageSplitter:
@@ -97,12 +106,23 @@ class LanguageSplitter:
             # One probe at each end, not overlapping. Anything shorter cannot
             # answer the question, and the LID does not trust windows this
             # short anyway.
+            self.stats.too_short += 1
+            self.stats.last = "too short to probe twice"
             return None
 
         self.stats.checked += 1
         first = self._language(pcm[:probe])
         last = self._language(pcm[-probe:])
-        if not first or not last or first == last:
+        if not first or not last:
+            # The LID needs LID_MIN_MARGIN between the two languages, and a
+            # probe this short rarely earns it - real margins run near 0.13.
+            self.stats.undecided += 1
+            self.stats.last = (f"undecided at an end "
+                               f"({first or '?'} … {last or '?'})")
+            return None
+        if first == last:
+            self.stats.one_language += 1
+            self.stats.last = f"both ends sound like {first!r}"
             return None
 
         # Everything up to `low` sounds like the first language, everything
@@ -129,6 +149,7 @@ class LanguageSplitter:
 
         at_ms = high / (self.sample_rate * SAMPLE_WIDTH) * 1000.0
         self.stats.split += 1
+        self.stats.last = f"{first!r} until {at_ms:.0f} ms, then {last!r}"
         log.info("two languages in one utterance: %r until %.0f ms, then %r",
                  first, at_ms, last)
         return Boundary(at_ms=at_ms, before=first, after=last)

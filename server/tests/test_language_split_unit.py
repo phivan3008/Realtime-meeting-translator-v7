@@ -200,3 +200,46 @@ def test_an_utterance_that_cannot_hold_two_probes_and_a_gap_is_left_whole():
     """Both halves have to be long enough for the LID to have meant it."""
     watcher = splitter()
     assert watcher.find(tone(1_100, VI) + tone(100, JA)) is None
+
+
+# ---------------------------------------------------------------------------
+# Saying why it declined
+# ---------------------------------------------------------------------------
+def test_it_says_when_both_ends_are_one_language():
+    """The case it was built for went unsplit for a whole meeting with
+    nothing in the log about it."""
+    watcher = splitter()
+    watcher.find(tone(4_000, VI))
+    assert watcher.stats.one_language == 1
+    assert "vi" in watcher.stats.last
+
+
+def test_it_says_when_an_end_was_undecided():
+    """A 600 ms probe rarely earns LID_MIN_MARGIN; real margins run near
+    0.13, and the LID answers with nothing at all."""
+    watcher = splitter()
+    watcher.find(tone(2_000, VI) + tone(2_000, 0))
+    assert watcher.stats.undecided == 1
+    assert "undecided" in watcher.stats.last
+
+
+def test_it_says_when_the_audio_was_too_short():
+    watcher = splitter()
+    watcher.find(tone(900, VI))
+    assert watcher.stats.too_short == 1
+
+
+def test_a_split_says_where_it_cut():
+    watcher = splitter()
+    watcher.find(tone(2_000, VI) + tone(2_000, JA))
+    assert "ms" in watcher.stats.last
+
+
+def test_the_reasons_add_up_to_what_was_seen():
+    watcher = splitter()
+    watcher.find(tone(4_000, VI))
+    watcher.find(tone(2_000, VI) + tone(2_000, JA))
+    watcher.find(tone(2_000, VI) + tone(2_000, 0))
+    assert watcher.stats.checked == 3
+    assert (watcher.stats.split + watcher.stats.one_language
+            + watcher.stats.undecided) == 3

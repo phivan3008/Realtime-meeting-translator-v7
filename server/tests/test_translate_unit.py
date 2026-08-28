@@ -681,3 +681,89 @@ def test_an_unknown_target_is_not_judged_on_length():
     """No measurements exist for it, and borrowing another pair's number
     would be a guess."""
     assert make("x").length_limit("x" * 10, "de") == float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Echoes, and the retry that diagnoses them
+# ---------------------------------------------------------------------------
+class EchoesWithHistory:
+    """Hands the sentence back when the prompt carries earlier lines.
+
+    The suspicion this tests: the history is three Vietnamese source lines
+    followed by a request to translate a fourth, which can read as "here are
+    some Vietnamese sentences, and here is another one".
+    """
+
+    def __init__(self, answer: str = "こんにちは") -> None:
+        self.answer = answer
+        self.prompts: list[str] = []
+
+    def complete(self, system: str, user: str) -> str:
+        self.prompts.append(user)
+        if "Earlier in the meeting" in user:
+            return user.rsplit(":\n", 1)[-1]
+        return self.answer
+
+
+class AlwaysEchoes:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, system: str, user: str) -> str:
+        self.calls += 1
+        return user.rsplit(":\n", 1)[-1]
+
+
+def with_history(backend) -> Translator:
+    made = Translator(backend=backend)
+    made.context.remember(Turn("Speaker_01", "vi", "Câu một.", ""))
+    made.context.remember(Turn("Speaker_01", "vi", "Câu hai.", ""))
+    return made
+
+
+def test_an_echo_is_retried_without_the_history():
+    """Seen on a real meeting: a perfectly ordinary Vietnamese sentence handed
+    straight back. The retry is a fix and a measurement at once - if dropping
+    the history rescues it, the history was the cause."""
+    backend = EchoesWithHistory()
+    result = with_history(backend).translate("Bác đang làm một cái tool.", "vi")
+    assert result.text == "こんにちは"
+    assert len(backend.prompts) == 2
+    assert "Earlier in the meeting" not in backend.prompts[1]
+
+
+def test_a_rescued_translation_is_counted():
+    made = with_history(EchoesWithHistory())
+    made.translate("Bác đang làm một cái tool.", "vi")
+    assert made.stats.retried == 1
+    assert made.stats.rescued == 1
+
+
+def test_a_sentence_the_model_will_not_translate_is_still_refused():
+    backend = AlwaysEchoes()
+    made = with_history(backend)
+    result = made.translate("Bác đang làm một cái tool.", "vi")
+    assert result.text == ""
+    assert backend.calls == 2, "it retried more than once"
+    assert made.stats.rescued == 0
+
+
+def test_nothing_is_retried_when_there_was_no_history_to_remove():
+    """A second identical call would cost a round trip and learn nothing."""
+    backend = AlwaysEchoes()
+    Translator(backend=backend).translate("Bác đang làm một cái tool.", "vi")
+    assert backend.calls == 1
+
+
+def test_a_refusal_that_is_not_an_echo_is_not_retried():
+    class Rambles:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, system, user):
+            self.calls += 1
+            return "Sure! " + "very long explanation " * 40
+
+    backend = Rambles()
+    with_history(backend).translate("Bác đang làm một cái tool.", "vi")
+    assert backend.calls == 1

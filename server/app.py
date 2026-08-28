@@ -332,9 +332,17 @@ def _log_summary(session: ServerSession) -> None:
     if session.language_splitter is not None:
         split = session.language_splitter.stats
         log.info("Session %s language splits: %d of %d utterances held two "
-                 "languages, %d probes",
+                 "languages (%d one language, %d undecided at an end, "
+                 "%d too short), %d probes",
                  session.session_id or "?", split.split, split.checked,
+                 split.one_language, split.undecided, split.too_short,
                  split.probes)
+    if session.worker is not None:
+        tr = session.worker.translator.stats
+        if tr.retried:
+            log.info("Session %s echoes: %d retried without the history, "
+                     "%d rescued", session.session_id or "?",
+                     tr.retried, tr.rescued)
     if stats.language_flips:
         log.warning("Session %s: %d sentence(s) came out in a different "
                     "language than the running text predicted - two languages "

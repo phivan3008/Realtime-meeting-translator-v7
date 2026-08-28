@@ -129,6 +129,10 @@ def choose_model(wanted: str, served: list[str], where: str = "") -> str:
 _IGNORABLE = re.compile(r"[\s\W_]+", re.UNICODE)
 
 
+#: The one refusal worth a second attempt: see :meth:`Translator.translate`.
+ECHOED = "the model returned the sentence untranslated"
+
+
 def looks_like_echo(source: str, text: str) -> bool:
     """Did the model hand the sentence back instead of translating it?
 
@@ -269,6 +273,11 @@ class TranslationStats:
     translated: int = 0
     refused: int = 0
     failed: int = 0
+    #: Sentences the model handed straight back, and how many a second try
+    #: without the history rescued. The ratio says whether the history is
+    #: what makes it echo.
+    retried: int = 0
+    rescued: int = 0
     refused_reasons: dict[str, int] = field(default_factory=dict)
     seconds: float = 0.0
 
@@ -334,10 +343,12 @@ class Translator:
         self.history_style = history_style
         self.short_line_hint = short_line_hint
         self.stats = TranslationStats()
+        self._last_error = ""
 
     def build_prompt(self, source: str, lang_code: str,
                      history_style: str = "",
-                     short_line_hint: Optional[bool] = None) -> tuple[str, str]:
+                     short_line_hint: Optional[bool] = None,
+                     with_history: bool = True) -> tuple[str, str]:
         """The system and user messages, so a test can read them.
 
         ``history_style`` overrides this translator's own, which is how
@@ -352,7 +363,7 @@ class Translator:
             source_name=LANGUAGE_NAMES.get(lang_code, "the source language"),
             target_name=target_name,
         )
-        history = self.context.as_prompt(style=style)
+        history = self.context.as_prompt(style=style) if with_history else ""
         if not history:
             return system, f"Translate this line into {target_name}:\n{source}"
         if style == "plain":
@@ -383,17 +394,30 @@ class Translator:
             return self._refuse(source, lang_code, target,
                                 "the language was undecided")
 
-        system, user = self.build_prompt(source, lang_code)
-        try:
-            answer = self.backend.complete(system, user)
-        except TranslationError as exc:
-            result = Translation("", source, lang_code, target, str(exc))
+        answer = self._ask(source, lang_code, target)
+        if answer is None:
+            result = Translation("", source, lang_code, target,
+                                 self._last_error)
             self.stats.record(result, failed=True)
-            log.warning("Translation failed: %s", exc)
             return result
 
         text = clean(answer)
         reason = self._refuse_reason(source, text, target)
+        if reason == ECHOED and self.context.as_prompt(style=self.history_style):
+            # The model handed the sentence back. The history is three source
+            # lines in one language followed by a request to translate a
+            # fourth, which can read as a list to continue rather than a
+            # sentence to translate. Asking again without it is a fix and a
+            # measurement at once.
+            self.stats.retried += 1
+            retry = self._ask(source, lang_code, target, with_history=False)
+            if retry is not None:
+                second = clean(retry)
+                if not self._refuse_reason(source, second, target):
+                    log.info("Retried without the history and it translated: "
+                             "%r", source[:60])
+                    self.stats.rescued += 1
+                    answer, text, reason = retry, second, ""
         if reason:
             return self._refuse(source, lang_code, target, reason, answer)
 
@@ -405,6 +429,18 @@ class Translator:
         )
         return result
 
+    def _ask(self, source: str, lang_code: str, target: str,
+             with_history: bool = True) -> Optional[str]:
+        """One round trip, or None when the backend failed."""
+        system, user = self.build_prompt(source, lang_code,
+                                         with_history=with_history)
+        try:
+            return self.backend.complete(system, user)
+        except TranslationError as exc:
+            self._last_error = str(exc)
+            log.warning("Translation failed: %s", exc)
+            return None
+
     def _refuse_reason(self, source: str, text: str,
                        target: str = "") -> str:
         if not text:
@@ -412,7 +448,7 @@ class Translator:
         if looks_like_echo(source, text):
             # Handed back untranslated. Showing it would put the same sentence
             # in both columns and read as though the translation succeeded.
-            return "the model returned the sentence untranslated"
+            return ECHOED
         if wrong_script(text, target):
             # Answered in the language it was asked to translate *out* of.
             # Showing it would put Japanese in the Vietnamese column, which

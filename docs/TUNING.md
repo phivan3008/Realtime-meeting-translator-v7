@@ -548,6 +548,40 @@ trăm mili-giây. Bước bắt khung im còn kéo lùi thêm 500 ms nữa.
 Nay có hai lớp chặn: phép tìm nhị phân bắt đầu cách hai đầu đúng một lần thăm
 dò, và session từ chối nhát cắt nào làm một nửa ngắn hơn thế.
 
+### Vì sao nó trượt — nghi phạm là biên của LID
+
+> **Log thật, đúng ca nó sinh ra để bắt:**
+>
+> ```
+> 01:26:06,501 lid: Language undecided: ja and vi are only 0.13 apart
+> 01:26:09,132 utterance 3: running text was 'ja', sentence is 'vi'
+> ```
+>
+> Không có dòng `language_split` nào. Splitter đã chạy và từ chối, **im lặng**.
+
+`LID_MIN_MARGIN = 0.30`, mà biên thật đo được chỉ **0.12–0.13**. Probe dài
+600 ms — đúng bằng `LID_MIN_DURATION_MS`, tức mức tối thiểu. LID trả về rỗng,
+và `find()` bỏ cuộc.
+
+Nay mọi lần từ chối đều được đếm và nêu lý do. Dòng tổng kết tách ba loại:
+
+```
+language splits: 30 of 110 utterances held two languages
+  (61 one language, 19 undecided at an end, 9 too short), 310 probes
+```
+
+Và mỗi lần mất lượt nói, log nói luôn splitter đã thấy gì:
+
+```
+utterance 3: running text was 'ja', sentence is 'vi' - ... The splitter
+said: undecided at an end (vi … ?)
+```
+
+**Đọc `undecided` trước.** Nếu nó lớn thì cách chữa là nới probe lên (ví dụ
+900 ms) hoặc hạ `LID_MIN_MARGIN` **chỉ cho phép thăm dò**, không đụng quyết
+định ngôn ngữ của cả câu. Nếu `one_language` lớn thì tín hiệu sai bản chất và
+phải nghĩ lại.
+
 Dòng tổng kết cuối phiên cho biết nó bắn bao nhiêu lần, để so với con số 8
 bất đồng ở trên.
 

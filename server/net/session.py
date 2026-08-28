@@ -639,9 +639,12 @@ class ServerSession:
         if not predicted or not lang_code or predicted == lang_code:
             return
         self.stats.language_flips += 1
+        why = (self.language_splitter.stats.last if self.language_splitter
+               else "no splitter")
         log.info("utterance %d: running text was %r, sentence is %r - two "
-                 "languages in one utterance, and one of them is lost",
-                 utterance.index, predicted, lang_code)
+                 "languages in one utterance, and one of them is lost. "
+                 "The splitter said: %s",
+                 utterance.index, predicted, lang_code, why or "nothing")
 
     def _utterance_message(self, utterance, found: "Analysis") -> str:
         """The verdict on one utterance, sent whether it was kept or not."""
