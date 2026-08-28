@@ -280,3 +280,32 @@ def test_keep_wins_over_the_block_list():
     touching code."""
     made = Hallucinations(exact=["Cảm ơn."], keep=["Cảm ơn."], patterns=())
     assert not made.is_invented("Cảm ơn.")
+
+
+def test_the_block_list_never_reaches_whisper():
+    """Asked directly, and worth pinning down: does a growing
+    hallucinations.txt make Whisper's output worse?
+
+    No. It is matched against text Whisper has already produced. Only
+    vocabulary.txt becomes initial_prompt, and only that file can change what
+    the model decodes.
+    """
+    from server.wordlists import vocabulary_prompt
+
+    blocked = read_lines("hallucinations.txt")
+    assert blocked, "nothing in the block list to check"
+    prompt = vocabulary_prompt()
+    for line in blocked:
+        assert line not in prompt
+
+
+def test_only_the_vocabulary_file_feeds_the_prompt():
+    """A grep, as a test: if a future edit routes the block list into the
+    prompt, this fails rather than the accuracy quietly dropping."""
+    from pathlib import Path as P
+
+    source = (P(__file__).resolve().parents[1] / "pipeline" / "asr.py"
+              ).read_text(encoding="utf-8")
+    line = next(row for row in source.splitlines() if "initial_prompt=" in row)
+    assert "self.prompt" in line
+    assert "hallucination" not in line.lower()

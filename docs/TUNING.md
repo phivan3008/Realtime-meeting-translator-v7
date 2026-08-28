@@ -382,6 +382,15 @@ hàng đổi. Client khoá hàng theo `sentence_id` nên sửa tại chỗ.
 - `SPEAKER_RECLUSTER_MAX` tăng: cụm chính xác hơn với họp dài, nhưng chi phí
   gom cụm tăng theo **bình phương**.
 
+> ⚠️ **Chưa sửa (đo trên họp thật 30 phút):** `22 speakers after 21
+> reclustering runs, 329 labels corrected` trên 313 câu — hơn một lần sửa mỗi
+> câu, tức tên người nhảy liên tục trên màn hình.
+>
+> Hai chỗ cần xem: gom cụm **không tuân** `SPEAKER_MAX_SPEAKERS` (12) trong
+> khi bộ khớp trực tiếp có tuân, nên nó tự đẻ ra 22 nhãn; và ngưỡng cắt
+> `SPEAKER_MATCH_THRESHOLD` được đo cho phép so **một cặp**, chưa chắc đúng
+> cho liên kết trung bình giữa hai **cụm**.
+
 **Voiceprint lấy từ audio thô**, chưa qua tầng chồng lấn.
 
 > **Đo được:** gate trước khi trích voiceprint làm mất **0.06** cosine
