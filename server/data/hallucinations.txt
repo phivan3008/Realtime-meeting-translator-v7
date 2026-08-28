@@ -37,6 +37,11 @@ Hẹn gặp lại.
 ご視聴ありがとうございました。
 ご視聴ありがとうございます。
 
+# Câu kết video, xác nhận không ai nói. Một cuộc họp kết thúc bằng đúng câu
+# này thì mất — nhưng không ai chào tạm biệt đồng nghiệp bằng "video sau".
+次の動画で会いましょう。
+また次の動画でお会いしましょう。
+
 # --- Tiếng Anh ----------------------------------------------------------
 # Câu kết video kinh điển của Whisper. Nó viết câu này với avg_logprob CAO,
 # nên không lớp thống kê nào chặn được — chỉ danh sách này chặn được.

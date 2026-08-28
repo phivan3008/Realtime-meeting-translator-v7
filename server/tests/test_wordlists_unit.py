@@ -206,3 +206,41 @@ def test_every_opening_of_the_subscribe_line_is_blocked(text):
 def test_a_meeting_sentence_about_channels_is_kept(text):
     """The pattern has to survive the words appearing in real work talk."""
     assert not Hallucinations().is_invented(text)
+
+
+# ---------------------------------------------------------------------------
+# The vocabulary prompt
+# ---------------------------------------------------------------------------
+def test_the_prompt_carries_the_words_from_the_file():
+    """Measured on a real meeting: the running text heard "Slack" and the
+    committed sentence turned it into "quạt nắp"."""
+    from server.wordlists import vocabulary_prompt
+
+    prompt = vocabulary_prompt()
+    assert "Slack" in prompt
+    assert "Excel" in prompt
+
+
+def test_the_prompt_is_capped():
+    """Whisper reads only the start of it, and a stuffed prompt makes the
+    model produce those very words over silence."""
+    from server.wordlists import vocabulary_prompt
+
+    assert len(vocabulary_prompt(limit=80)) <= 80
+
+
+def test_the_cap_does_not_cut_a_word_in_half():
+    from server.wordlists import vocabulary_prompt
+
+    prompt = vocabulary_prompt(limit=40)
+    assert not prompt.endswith(",")
+    for word in prompt.split(", "):
+        assert word
+
+
+def test_an_empty_vocabulary_means_no_prompt_at_all(monkeypatch):
+    """An empty string is itself a prompt as far as Whisper is concerned."""
+    import server.wordlists as module
+
+    monkeypatch.setattr(module, "read_lines", lambda name: [])
+    assert module.vocabulary_prompt() == ""

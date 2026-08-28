@@ -224,6 +224,7 @@ Test thật cần phần cứng thật và nằm riêng:
 | --- | --- |
 | Ngưỡng VAD, cắt câu, nhận dạng người nói, dịch… | [`docs/TUNING.md`](docs/TUNING.md) |
 | Câu Whisper bịa cần chặn / giữ | [`server/data/README.md`](server/data/README.md) |
+| Tên người, tên dự án, thuật ngữ Whisper nghe sai | [`server/data/vocabulary.txt`](server/data/vocabulary.txt) |
 
 Mỗi thông số trong `TUNING.md` đi kèm **phép đo đã chọn ra nó** và điều gì
 hỏng nếu chỉnh sai hướng. Đọc trước khi đổi — phần lớn các số đó nằm giữa hai

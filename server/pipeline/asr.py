@@ -32,7 +32,7 @@ from typing import Optional, Protocol
 
 import numpy as np
 
-from server.wordlists import Hallucinations
+from server.wordlists import Hallucinations, vocabulary_prompt
 from server.config import (
     ASR_BEAM_SIZE_FINAL,
     ASR_BEAM_SIZE_PARTIAL,
@@ -242,6 +242,10 @@ class WhisperDecoder:
                 "`python3.11 -m pip install -r server/requirements.txt`."
             ) from exc
 
+        self.prompt = vocabulary_prompt()
+        if self.prompt:
+            log.info("Whisper vocabulary prompt (%d chars): %s",
+                     len(self.prompt), self.prompt)
         self.model_id = model_id or ASR_MODEL
         chosen = device or ASR_DEVICE
         if not chosen:
@@ -279,6 +283,9 @@ class WhisperDecoder:
             language=lang_code or None,
             beam_size=beam_size,
             condition_on_previous_text=ASR_CONDITION_ON_PREVIOUS,
+            # Names and English terms a meeting keeps using and Whisper keeps
+            # mishearing. Empty means no prompt: "" is itself a prompt.
+            initial_prompt=self.prompt or None,
             no_speech_threshold=ASR_NO_SPEECH_THRESHOLD,
             log_prob_threshold=ASR_LOG_PROB_THRESHOLD,
             without_timestamps=True,

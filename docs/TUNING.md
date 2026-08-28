@@ -563,6 +563,7 @@ bất đồng ở trên.
 | `ASR_NO_SPEECH_THRESHOLD` | `0.6` | Coi là im lặng — **cần thêm điều kiện logprob** |
 | `ASR_LOG_PROB_THRESHOLD` | `-1.0` | Dưới ngưỡng này là đoán mò |
 | `ASR_SHORT_UTTERANCE_MS` | `600` | Ngắn hơn thì `no_speech_prob` **một mình** đủ để loại |
+| `ASR_PROMPT_MAX_CHARS` | `400` | Giới hạn `initial_prompt` dựng từ `vocabulary.txt` |
 | `ASR_MAX_COMPRESSION_RATIO` | `2.4` | Trên ngưỡng này là đang lặp |
 | `ASR_CONDITION_ON_PREVIOUS` | `False` | **Đừng bật** |
 
@@ -646,6 +647,24 @@ ASR kept a segment scored as silence: no_speech 0.86, logprob -0.35, '...'
 
 **Ba ngưỡng trên đều là thống kê, và chúng không bắt được câu bịa tự tin.**
 Xem [`server/data/README.md`](../server/data/README.md).
+
+### Từ vựng mồi
+
+> **Đo được:** chữ mờ nghe đúng `Slack`, câu chốt biến thành **`quạt nắp`**.
+> Cũng gặp `tab` thành `tắt`, `Claude Code` thành `cloud code`. Tầng dịch sau
+> đó dịch trung thành cái vô nghĩa đó.
+
+Whisper nhận `initial_prompt` — chỗ nói trước những từ sắp xuất hiện. Nó
+**không ép**, chỉ nghiêng cán cân khi model đang lưỡng lự. Danh sách nằm ở
+[`server/data/vocabulary.txt`](../server/data/vocabulary.txt), sửa được không
+cần code.
+
+`ASR_PROMPT_MAX_CHARS` giới hạn nó vì hai lý do: Whisper chỉ đọc phần đầu, và
+một prompt nhồi nhét làm model **bịa ra chính những từ trong đó** khi gặp im
+lặng. Chỉ thêm từ bạn đã thấy bị nghe sai trong transcript.
+
+Phần đáng giá nhất là **tên người và tên dự án** — Whisper không có cách nào
+đoán được chúng, và đó là phần chỉ bạn điền được.
 
 `vad_filter` của faster-whisper bị **tắt** cứng trong code: Silero đã chạy ở
 đầu pipeline, chạy VAD lần hai sẽ cắt mất pre-roll giữ phụ âm đầu.

@@ -23,6 +23,8 @@ import os
 import re
 from pathlib import Path
 
+from server.config import ASR_PROMPT_MAX_CHARS
+
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.environ.get(
@@ -101,3 +103,28 @@ class Hallucinations:
 
     def __len__(self) -> int:
         return len(self.exact) + len(self.patterns)
+
+
+def vocabulary_prompt(limit: int = ASR_PROMPT_MAX_CHARS) -> str:
+    """Whisper's ``initial_prompt``, built from ``vocabulary.txt``.
+
+    Words a meeting keeps using that Whisper keeps mishearing: on a real run
+    the running text heard ``Slack`` and the committed sentence turned it into
+    ``quạt nắp``. The prompt does not force anything - it tilts the model when
+    it is undecided.
+
+    Capped, because Whisper reads only the start of it and a stuffed prompt
+    makes the model produce those very words over silence. An empty file means
+    no prompt at all rather than an empty string, which Whisper treats as a
+    prompt of its own.
+    """
+    words = read_lines("vocabulary.txt")
+    if not words:
+        return ""
+    prompt = ""
+    for word in words:
+        candidate = f"{prompt}{word}, " if prompt else f"{word}, "
+        if len(candidate) > limit:
+            break
+        prompt = candidate
+    return prompt.rstrip(", ")

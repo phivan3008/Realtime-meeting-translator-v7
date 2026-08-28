@@ -157,6 +157,10 @@ ASR_NO_SPEECH_THRESHOLD = 0.6
 # confirmed invention on a real meeting was under 2 s. The number is the
 # floor the speaker model and the LID already refuse to answer below.
 ASR_SHORT_UTTERANCE_MS = SPEAKER_MIN_DURATION_MS
+
+# Whisper reads only the start of initial_prompt, and a stuffed one makes it
+# produce those very words over silence. See server/data/vocabulary.txt.
+ASR_PROMPT_MAX_CHARS = 400
 ASR_LOG_PROB_THRESHOLD = -1.0
 ASR_MAX_COMPRESSION_RATIO = 2.4
 

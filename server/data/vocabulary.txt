@@ -1,0 +1,60 @@
+# Từ vựng mồi cho Whisper — DANH SÁCH GỢI Ý (initial_prompt)
+#
+# Whisper nghe một cuộc họp tiếng Việt và phiên âm từ tiếng Anh thành từ
+# tiếng Việt gần âm. Đo được trên họp thật: chữ mờ nghe đúng `Slack`, câu
+# chốt biến nó thành `quạt nắp`; `tab` thành `tắt`; `Claude Code` thành
+# `cloud code`. Bản dịch sau đó dịch trung thành cái vô nghĩa đó.
+#
+# `initial_prompt` là chỗ nói trước cho Whisper biết những từ nào sắp xuất
+# hiện. Nó KHÔNG ép — chỉ nghiêng cán cân khi model đang lưỡng lự.
+#
+# CÁCH THÊM: mỗi dòng một từ hoặc cụm. Dòng bắt đầu bằng # là ghi chú, dòng
+# trống bị bỏ qua. Sau khi sửa phải khởi động lại uvicorn.
+#
+# CẢNH BÁO: danh sách càng dài càng loãng. Whisper chỉ đọc khoảng 200 token
+# đầu, và một prompt nhồi nhét làm model bịa ra chính những từ trong đó khi
+# gặp im lặng. Chỉ thêm từ bạn đã THẤY bị nghe sai trong transcript.
+#
+# Tên riêng người Nhật và tên dự án là thứ đáng thêm nhất — Whisper không có
+# cách nào đoán được chúng.
+
+# --- Công cụ ---------------------------------------------------------------
+Slack
+Excel
+Markdown
+Zoom
+Teams
+GitHub
+Jira
+Redmine
+
+# --- Từ kỹ thuật hay dùng xen tiếng Việt -----------------------------------
+import
+export
+template
+format
+review
+comment
+confirm
+input
+output
+plan
+task
+step
+test
+tool
+report
+version
+context
+prompt
+dataset
+fine-tuning
+
+# --- Tên dự án và mã hiệu --------------------------------------------------
+# Thêm mã hiệu của dự án bạn vào đây. Whisper thường nghe số thành chữ.
+X203
+GLM5.2
+
+# --- Tên người -------------------------------------------------------------
+# Thêm tên các thành viên hay được nhắc. Đây là phần có giá trị nhất, và là
+# phần duy nhất chỉ bạn mới điền được.
