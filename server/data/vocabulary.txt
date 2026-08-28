@@ -18,43 +18,28 @@
 # Tên riêng người Nhật và tên dự án là thứ đáng thêm nhất — Whisper không có
 # cách nào đoán được chúng.
 
-# --- Công cụ ---------------------------------------------------------------
+# --- Đã xác nhận nghe sai trong transcript thật ----------------------------
+# Không thêm từ nào chưa có bằng chứng. Danh sách này ban đầu có 30 từ đoán
+# mò, và tần suất câu bịa lọt lên màn hình tăng vọt ngay sau đó.
+#
+# Chú thích phải nằm trên dòng riêng: chú thích cuối dòng KHÔNG được cắt bỏ,
+# nó sẽ đi thẳng vào prompt.
+
+# nghe thành: quạt nắp, quạt lắc, thét quà xắt
 Slack
-Excel
-Markdown
-Zoom
-Teams
-GitHub
-Jira
-Redmine
-
-# --- Từ kỹ thuật hay dùng xen tiếng Việt -----------------------------------
-import
-export
-template
-format
-review
-comment
-confirm
-input
-output
-plan
-task
-step
-test
+# nghe thành: tôn ("cái tool" -> "cái tôn")
 tool
-report
-version
-context
-prompt
-dataset
-fine-tuning
-
-# --- Tên dự án và mã hiệu --------------------------------------------------
-# Thêm mã hiệu của dự án bạn vào đây. Whisper thường nghe số thành chữ.
+# nghe thành: tem lắc, đem lắc
+template
+# nghe thành: hít, hình
+edit
+# nghe thành: マグナム, マグダ
+Markdown
+# nghe thành: x2x23, i2x23, Y2X2.3
 X203
+# nghe thành: M5.2
 GLM5.2
 
 # --- Tên người -------------------------------------------------------------
-# Thêm tên các thành viên hay được nhắc. Đây là phần có giá trị nhất, và là
-# phần duy nhất chỉ bạn mới điền được.
+# Phần có giá trị nhất, và phần duy nhất chỉ bạn điền được. Whisper không có
+# cách nào đoán tên riêng tiếng Nhật. Thêm tên các thành viên hay được nhắc.

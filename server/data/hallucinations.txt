@@ -33,6 +33,16 @@ Chào tạm biệt.
 # các bạn tuần sau" hay "Thôi hẹn gặp lại nhé" vẫn được giữ.
 Hẹn gặp lại.
 
+# Lời cảm ơn trơ trọi, một câu đúng một cụm. Đây là đánh đổi ĐẮT NHẤT trong
+# file này: người thật cũng nói đúng những chữ đó. Chặn vì trên bốn lần chạy
+# thật, mọi lần chúng lên tới câu chốt đều được xác nhận là Whisper bịa lên
+# một mẩu audio ngắn.
+#
+# ĐƯỜNG LÙI: thấy mất lời cảm ơn thật thì thêm đúng dòng đó vào keep.txt —
+# keep.txt thắng file này — rồi xoá nó ở đây.
+Cảm ơn.
+Cảm ơn mọi người.
+
 # --- Tiếng Nhật ---------------------------------------------------------
 ご視聴ありがとうございました。
 ご視聴ありがとうございます。
@@ -41,6 +51,11 @@ Hẹn gặp lại.
 # này thì mất — nhưng không ai chào tạm biệt đồng nghiệp bằng "video sau".
 次の動画で会いましょう。
 また次の動画でお会いしましょう。
+
+# Cùng đánh đổi như "Cảm ơn." ở trên, và cùng đường lùi qua keep.txt.
+ありがとうございました。
+ありがとうございました
+最後までご視聴ありがとうございました。
 
 # --- Tiếng Anh ----------------------------------------------------------
 # Câu kết video kinh điển của Whisper. Nó viết câu này với avg_logprob CAO,

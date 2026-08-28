@@ -42,3 +42,9 @@ h[ãa]y [đd][ăa]ng k[ýy] k[êe]nh( .{1,40})? [đd][ểe] [ủu]ng h[ộo] k[�
 # Ba biến thể trong cùng một lần chạy mười phút. Khe nằm ở mệnh đề giữa
 # ("like, share và đăng ký kênh" / "like và share video này" / "đăng ký kênh").
 c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,30}
+
+# Cùng một câu kết video với đủ kiểu đuôi, gặp trong một lần chạy:
+# "...đã xem.", "...đã xem video.", "...đã xem video này.". Đuôi bị giới hạn
+# vào đúng những kiểu đã gặp, nên "Cảm ơn các bạn đã xem bản demo này" —
+# một câu họp hợp lệ — vẫn được giữ.
+c[ảa]m [ơo]n c[áa]c b[ạa]n [đd][ãa] (xem|theo d[õo]i)( video( n[àa]y)?| v[àa] h[ẹe]n g[ặa]p l[ạa]i)?

@@ -218,7 +218,7 @@ def test_the_prompt_carries_the_words_from_the_file():
 
     prompt = vocabulary_prompt()
     assert "Slack" in prompt
-    assert "Excel" in prompt
+    assert "template" in prompt
 
 
 def test_the_prompt_is_capped():
@@ -244,3 +244,39 @@ def test_an_empty_vocabulary_means_no_prompt_at_all(monkeypatch):
 
     monkeypatch.setattr(module, "read_lines", lambda name: [])
     assert module.vocabulary_prompt() == ""
+
+
+def test_a_note_at_the_end_of_a_line_does_not_reach_the_prompt():
+    """Trailing comments are not stripped, so a word annotated in place goes
+    into Whisper's prompt with its annotation attached."""
+    from server.wordlists import vocabulary_prompt
+
+    for word in vocabulary_prompt().split(", "):
+        assert "#" not in word, f"a note leaked into the prompt: {word!r}"
+
+
+def test_the_prompt_holds_only_the_confirmed_words():
+    """It was seeded with thirty guesses, and inventions reaching committed
+    sentences rose sharply. A non-empty initial_prompt makes Whisper fill
+    near-silence rather than leave it."""
+    from server.wordlists import vocabulary_prompt
+
+    words = vocabulary_prompt().split(", ")
+    assert "Slack" in words
+    assert len(words) < 15, f"{len(words)} words is a stuffed prompt"
+
+
+@pytest.mark.parametrize("text", ["Cảm ơn.", "ありがとうございました。",
+                                  "Cảm ơn mọi người."])
+def test_the_bare_thanks_are_blocked(text):
+    """The most expensive trade in the file: people do say exactly these. On
+    four real runs, every one that reached a committed sentence was invented
+    over a scrap of audio. keep.txt is the way back."""
+    assert Hallucinations().is_invented(text)
+
+
+def test_keep_wins_over_the_block_list():
+    """So a meeting that really loses a genuine thanks has a way out without
+    touching code."""
+    made = Hallucinations(exact=["Cảm ơn."], keep=["Cảm ơn."], patterns=())
+    assert not made.is_invented("Cảm ơn.")
