@@ -35,6 +35,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from server.analysis.drift import edit_distance
+from server.config import ASR_HALLUCINATIONS
 from server.pipeline.asr import (
     Piece,
     Transcriber,
@@ -142,6 +144,52 @@ def simulate(run: dict, variant: str, rule: str,
             "kept": len(verdict["kept"]),
         }
     return out
+
+
+#: A line this close to one already on the block list is the same invention
+#: with words changed. Measured against the run that motivated it: "Cảm ơn
+#: các bạn." sits at 0.35 from "Cảm ơn các bạn đã theo dõi.", and the nearest
+#: real sentence in that meeting was past 0.7.
+NEAR_MISS_DISTANCE = 0.5
+
+#: Shared opening words that make two lines the same shape. Two is enough for
+#: "Hẹn gặp lại ..." and short enough to stay cheap; it is a candidate list
+#: for a person to read, not a verdict.
+NEAR_MISS_PREFIX_WORDS = 2
+
+
+def near_miss(text: str, phrases=ASR_HALLUCINATIONS) -> Optional[dict]:
+    """The blocked line this one most resembles, if it resembles one.
+
+    The block list matches whole segments, so an invention with a couple of
+    words changed walks straight through it - the list itself says so, in the
+    comment above ``ASR_HALLUCINATION_PATTERNS``. This does not block
+    anything. It says which lines are worth a person's attention, and against
+    what, so the list can be grown from evidence rather than from guesses.
+    """
+    spoken = normalise_for_pattern(text)
+    if not spoken:
+        return None
+    words = spoken.split()
+    # The raw phrases, not ``Transcriber.hallucinations`` - that set has had
+    # its spacing stripped for exact matching, and the shape of a line is in
+    # its words.
+    best = None
+    for phrase in phrases:
+        listed = normalise_for_pattern(phrase)
+        if not listed:
+            continue
+        longest = max(len(spoken), len(listed))
+        score = edit_distance(spoken, listed) / longest
+        listed_words = listed.split()
+        shared = min(len(words), len(listed_words), NEAR_MISS_PREFIX_WORDS)
+        prefix = (shared >= NEAR_MISS_PREFIX_WORDS
+                  and words[:shared] == listed_words[:shared])
+        if score > NEAR_MISS_DISTANCE and not prefix:
+            continue
+        if best is None or score < best["distance"]:
+            best = {"listed": phrase, "distance": score, "shared_prefix": prefix}
+    return best
 
 
 def has_scores(run: dict, variant: str) -> bool:

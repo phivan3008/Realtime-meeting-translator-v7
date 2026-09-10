@@ -184,3 +184,37 @@ class TestSimulate:
         assert result["text"] == ""
         assert result["reasons"] == ["known hallucination"]
         assert result["kept"] == 0
+
+
+class TestNearMiss:
+    """The block list matches whole segments, so a trimmed invention walks
+    through it. This does not block anything - it says what to read."""
+
+    def test_a_trimmed_sign_off_resembles_the_listed_one(self):
+        found = guards.near_miss("Cảm ơn các bạn.")
+        assert found is not None
+        assert found["listed"] == "Cảm ơn các bạn đã theo dõi."
+        assert found["shared_prefix"]
+
+    def test_a_reworded_sign_off_is_caught_by_its_opening(self):
+        found = guards.near_miss("Hẹn gặp lại mọi người")
+        assert found is not None
+        assert found["listed"].startswith("Hẹn gặp lại")
+
+    def test_a_real_meeting_sentence_resembles_nothing(self):
+        assert guards.near_miss(
+            "Về tác 08 thì hiện tại mình đang thực hiện test 1") is None
+        assert guards.near_miss(
+            "2011 thì mình đang lên bởi vì là cái cả AMD mà bắt cung cấp") is None
+
+    def test_empty_text_resembles_nothing(self):
+        assert guards.near_miss("") is None
+        assert guards.near_miss("   ...  ") is None
+
+    def test_an_exact_listed_line_is_its_own_nearest(self):
+        found = guards.near_miss("Cảm ơn các bạn đã theo dõi.")
+        assert found["distance"] == 0.0
+
+    def test_the_list_it_compares_against_can_be_given(self):
+        assert guards.near_miss("hello there", phrases=("hello world",))
+        assert guards.near_miss("hello there", phrases=("完全に違う",)) is None

@@ -183,6 +183,12 @@ def guard_effect(run: dict, variant: str, rule: str) -> dict:
             "partial": case["partial_text"],
             "before": before,
             "after": after,
+            # Two independent readings of the same audio. The running text was
+            # decoded on its own, four seconds at a time; if it said nothing
+            # there, a sentence appearing out of the same audio deserves a
+            # second look.
+            "had_partial": bool(case["partial_text"].strip()),
+            "near_miss": guards.near_miss(after) if after else None,
         }
         if not before and after:
             recovered.append(entry)
@@ -358,13 +364,36 @@ def print_guard_rules(run: dict, variant: str, examples: int) -> None:
               + ", ".join(f"{reason} {count}"
                           for reason, count in by_reason.items()))
 
-    print(f"\nRecovered sentences - read these, the counters cannot tell real "
-          f"speech from an invention the word lists do not know:")
-    for entry in effect["recovered"][:examples]:
+    backed = [entry for entry in effect["recovered"] if entry["had_partial"]]
+    alone = [entry for entry in effect["recovered"] if not entry["had_partial"]]
+    suspect = [entry for entry in effect["recovered"] if entry["near_miss"]]
+    print(f"\n  {len(backed)} of them had a running text saying something over "
+          f"the same audio; {len(alone)} appeared where the running text said "
+          f"nothing")
+    print(f"  {len(suspect)} resemble a line already on the block list, with "
+          f"words changed")
+
+    print(f"\nRecovered where the running text agreed something was said "
+          f"({len(backed)}):")
+    for entry in backed:
         print(f"  #{entry['index']} at {entry['start_s']:.1f}s "
               f"({entry['seconds']:.1f} s, {entry['reason']})")
-        print(f"      partial {entry['partial']!r}")
+        print(f"      partial    {entry['partial']!r}")
         print(f"      would show {entry['after']!r}")
+        if entry["near_miss"]:
+            print(f"      RESEMBLES  {entry['near_miss']['listed']!r} "
+                  f"(distance {entry['near_miss']['distance']:.2f})")
+
+    print(f"\nRecovered where the running text said nothing - read these "
+          f"first ({len(alone)}):")
+    for entry in alone:
+        print(f"  #{entry['index']} at {entry['start_s']:.1f}s "
+              f"({entry['seconds']:.1f} s, {entry['reason']})")
+        print(f"      would show {entry['after']!r}")
+        if entry["near_miss"]:
+            print(f"      RESEMBLES  {entry['near_miss']['listed']!r} "
+                  f"(distance {entry['near_miss']['distance']:.2f})")
+
     for entry in effect["lost"][:examples]:
         print(f"  LOST #{entry['index']} at {entry['start_s']:.1f}s "
               f"was {entry['before']!r}")

@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from server.analysis.drift import (
     Drift,
     compare,
+    edit_distance,
     immediate_repeats,
     latin_words,
     substring_distance,
@@ -176,3 +177,21 @@ class TestCompare:
     def test_it_returns_a_drift(self):
         assert isinstance(
             compare("x", "x", 0.0, 1000.0), Drift)
+
+
+class TestEditDistance:
+    """Both ends anchored, unlike substring_distance - a different question."""
+
+    def test_identical_strings_cost_nothing(self):
+        assert edit_distance("cảm ơn", "cảm ơn") == 0
+
+    def test_an_empty_side_costs_the_other(self):
+        assert edit_distance("", "abc") == 3
+        assert edit_distance("abc", "") == 3
+
+    def test_a_trailing_clause_is_charged(self):
+        # substring_distance would call this free; here it is the whole point.
+        assert edit_distance("cam on", "cam on cac ban") == 8
+
+    def test_one_substitution_costs_one(self):
+        assert edit_distance("cat", "cot") == 1

@@ -90,6 +90,30 @@ def substring_distance(needle: str, haystack: str) -> tuple[int, int, int]:
     return prev[end], prev_start[end], end
 
 
+def edit_distance(left: str, right: str) -> int:
+    """Plain Levenshtein, both ends anchored.
+
+    :func:`substring_distance` is for finding a tail inside a sentence. This
+    is for asking whether two whole lines are the same line with words
+    changed, which is a different question and needs both ends charged.
+    """
+    if left == right:
+        return 0
+    if not left or not right:
+        return len(left) or len(right)
+    previous = list(range(len(right) + 1))
+    for index, character in enumerate(left, start=1):
+        current = [index]
+        for position, other in enumerate(right, start=1):
+            current.append(min(
+                previous[position] + 1,
+                current[position - 1] + 1,
+                previous[position - 1] + (character != other),
+            ))
+        previous = current
+    return previous[-1]
+
+
 def latin_words(text: str) -> tuple[str, ...]:
     """The Latin-script words in a Vietnamese or Japanese line.
 
