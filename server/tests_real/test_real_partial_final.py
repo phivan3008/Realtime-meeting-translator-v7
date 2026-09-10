@@ -17,17 +17,26 @@ trailing audio   stops while speech continues    carries the VAD hangover
 
 So the sentence can lose what the running text had. This script replays one
 recorded meeting through the real VAD and buffer manager, decodes the running
-text once, then decodes every sentence under four variants of the *sentence*
-path only, and counts the four ways they drift apart.
+text once, then decodes every sentence under the variants asked for, counts
+the four ways they drift apart, and records the score of every segment the
+decoder returned.
 
     baseline    what the server does today
     beam1       beam search off for the sentence as well
     trim        the VAD's trailing hangover cut before the ASR sees it
     beam1+trim  both
 
+Only ``baseline`` runs unless ``--variants`` says otherwise, because the
+other three have been measured on thirty minutes of real meeting and none of
+them was the fault. What was the fault is which segments the guards refuse,
+and that is not a variant here: the scores are recorded, so
+``server/analysis/report.py`` replays any guard rule over them exactly,
+without a GPU and without decoding anything twice.
+
 Decoding the running text once rather than per variant is what makes this
-affordable: the variants change only the sentence path, and on thirty minutes
-of meeting the running text is roughly four fifths of the decoding.
+affordable, and ``--reuse-partials`` skips even that: the running text is
+roughly four fifths of the decoding and it does not change when the sentence
+path does.
 
 What it cannot do is say which text is *correct*. It counts, ranks, and
 prints the worst cases with every variant side by side for you to read.
@@ -39,8 +48,14 @@ Usage
         --limit-seconds 120 \
         --out /tmp/drift_smoke.json
 
-Run it with ``--limit-seconds 120`` first. The full pass on thirty minutes is
-roughly ten minutes of H100 time.
+    python3.11 server/tests_real/test_real_partial_final.py \
+        --wav recordings/meeting_30min.wav \
+        --reuse-partials /tmp/drift_full.json \
+        --out /tmp/drift_scored.json
+
+Run it with ``--limit-seconds 120`` first. A full pass on thirty minutes is
+roughly five minutes of H100 time for the baseline alone, or one minute with
+``--reuse-partials``.
 
 The WAV must be 16 kHz mono 16-bit - the format the client streams. Convert
 a meeting recording with::
@@ -111,12 +126,20 @@ class Variant:
 
 @dataclass
 class Decoded:
-    """One sentence under one variant."""
+    """One sentence under one variant.
+
+    ``pieces`` is every segment the decoder returned, in order, with the three
+    numbers the guards judge it by and the verdict it got. Recording them is
+    what lets a different threshold or a different rule be answered later
+    without a GPU - see ``server/analysis/guards.py``. It is a few hundred
+    bytes a sentence and it has already saved one full re-run.
+    """
 
     text: str
     seconds: float
     audio_ms: float
     dropped: tuple = ()
+    pieces: list = field(default_factory=list)
 
 
 @dataclass
@@ -187,6 +210,44 @@ def replay(pcm: bytes, vad: SileroVAD) -> list:
     for utterance in buffer.flush(FinalizeReason.END_OF_STREAM).finals:
         events.append(("final", utterance))
     return events
+
+
+class RecordingDecoder:
+    """Keeps the segments the model returned, in the order it returned them.
+
+    ``Transcript`` reports what was kept and what was refused, but not the
+    sequence they arrived in, and the sentence's text depends on that order.
+    Wrapping the decoder is the way to have both without changing the ASR
+    stage to serve a measurement.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.last: list = []
+
+    @property
+    def source(self) -> str:
+        return getattr(self.inner, "source", "unknown decoder")
+
+    def decode(self, samples, lang_code, beam_size):
+        pieces, detected = self.inner.decode(samples, lang_code, beam_size)
+        self.last = list(pieces)
+        return pieces, detected
+
+
+def record_pieces(recorder: RecordingDecoder,
+                  transcriber: Transcriber) -> list:
+    """The segments of the sentence just decoded, with scores and verdicts."""
+    return [
+        {
+            "text": piece.text,
+            "avg_logprob": piece.avg_logprob,
+            "no_speech_prob": piece.no_speech_prob,
+            "compression_ratio": piece.compression_ratio,
+            "verdict": transcriber._refuse(piece) or "kept",
+        }
+        for piece in recorder.last
+    ]
 
 
 def trim_tail(pcm: bytes, trim_ms: float) -> bytes:
@@ -266,8 +327,8 @@ def decode_partials(events: list, transcriber: Transcriber,
 
 
 def decode_finals(events: list, transcriber: Transcriber, forced: dict,
-                  variant: Variant,
-                  resolver: Optional[OverlapResolver]) -> tuple:
+                  variant: Variant, resolver: Optional[OverlapResolver],
+                  recorder: Optional[RecordingDecoder] = None) -> tuple:
     """Every sentence, under one variant.
 
     ``ASR_BEAM_SIZE_FINAL`` is read from the module at call time, so the beam
@@ -295,10 +356,32 @@ def decode_finals(events: list, transcriber: Transcriber, forced: dict,
                 seconds=elapsed,
                 audio_ms=bytes_to_ms(len(audio)),
                 dropped=tuple(reason for _piece, reason in transcript.dropped),
+                pieces=(record_pieces(recorder, transcriber)
+                        if recorder is not None else []),
             )
     finally:
         asr_module.ASR_BEAM_SIZE_FINAL = original
     return decoded, spent
+
+
+def reuse_partials(path: Path) -> dict:
+    """The running texts from an earlier run over the same recording.
+
+    They cost four fifths of the decoding and they do not change between
+    variants of the sentence path, so re-deciding a threshold should not have
+    to pay for them again. The utterance boundaries come from the VAD and the
+    buffer manager, which are deterministic, so the indexes line up as long as
+    it is the same recording - and if it is not, the mismatch shows up as
+    sentences with no running text rather than as a silently wrong pairing.
+    """
+    earlier = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        case["index"]: (case["partial_text"], case["partial_end_ms"]
+                        if "partial_end_ms" in case
+                        else case["end_ms"] - case["extra_audio_ms"],
+                        case["partial_count"])
+        for case in earlier["cases"] if case["partial_text"]
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -405,8 +488,15 @@ def main() -> int:
                         help="how many worst sentences to print")
     parser.add_argument("--out", type=Path, default=None,
                         help="write every sentence and its variants as JSON")
-    parser.add_argument("--variants", default="",
-                        help="comma-separated subset, e.g. baseline,beam1")
+    parser.add_argument("--variants", default="baseline",
+                        help="comma-separated subset of baseline, beam1, "
+                             "trim, beam1+trim, or 'all'. Guard rules are not "
+                             "variants - they are replayed offline from the "
+                             "recorded scores by server.analysis.report")
+    parser.add_argument("--reuse-partials", type=Path, default=None,
+                        help="take the running texts from an earlier run's "
+                             "JSON over the same recording instead of "
+                             "decoding them again")
     parser.add_argument("--no-lid", action="store_true",
                         help="skip language ID and let Whisper detect")
     parser.add_argument("--no-overlap", action="store_true",
@@ -416,7 +506,7 @@ def main() -> int:
     args = parser.parse_args()
 
     variants = build_variants(args.trim_ms)
-    if args.variants:
+    if args.variants and args.variants != "all":
         wanted = {name.strip() for name in args.variants.split(",")}
         variants = [variant for variant in variants if variant.name in wanted]
         if not variants:
@@ -463,9 +553,9 @@ def main() -> int:
             print(f"  overlap resolver unavailable, carrying on without: {exc}")
 
     try:
-        transcriber = Transcriber(
-            decoder=asr_module.WhisperDecoder(model_id=args.model,
-                                              device=args.device))
+        recorder = RecordingDecoder(
+            asr_module.WhisperDecoder(model_id=args.model, device=args.device))
+        transcriber = Transcriber(decoder=recorder)
     except AsrError as exc:
         print(f"  Whisper unavailable: {exc}")
         return 2
@@ -475,10 +565,22 @@ def main() -> int:
     forced = language_pass(events, identifier)
     print(f"  {len(forced)} decisions in {time.perf_counter() - started:.1f} s")
 
-    print("\nDecoding the running text, once ...")
-    partial_state, partial_seconds, partial_count = decode_partials(
-        events, transcriber, forced)
-    print(f"  {partial_count} decodes in {partial_seconds:.1f} s")
+    earlier: dict = {}
+    partial_seconds = 0.0
+    partial_state = {"last": {}, "counts": {}}
+    if args.reuse_partials:
+        try:
+            earlier = reuse_partials(args.reuse_partials)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"  cannot reuse {args.reuse_partials}: {exc}")
+            return 2
+        print(f"\nReusing {len(earlier)} running texts from "
+              f"{args.reuse_partials}")
+    else:
+        print("\nDecoding the running text, once ...")
+        partial_state, partial_seconds, partial_count = decode_partials(
+            events, transcriber, forced)
+        print(f"  {partial_count} decodes in {partial_seconds:.1f} s")
 
     cases: list = []
     by_index: dict = {}
@@ -498,6 +600,11 @@ def main() -> int:
             window, text = window_and_text
             case.partial_text = text
             case.partial_end_ms = window.end_ms
+        elif utterance.index in earlier:
+            text, end_ms, count = earlier[utterance.index]
+            case.partial_text = text
+            case.partial_end_ms = end_ms
+            case.partial_count = count
         cases.append(case)
         by_index[utterance.index] = case
 
@@ -505,7 +612,7 @@ def main() -> int:
     for variant in variants:
         print(f"\nDecoding the sentences: {variant.label} ...")
         decoded, spent = decode_finals(events, transcriber, forced, variant,
-                                       resolver)
+                                       resolver, recorder)
         final_seconds[variant.name] = spent
         print(f"  {len(decoded)} decodes in {spent:.1f} s")
         for index, result in decoded.items():
@@ -552,6 +659,7 @@ def main() -> int:
                     "continues_previous": case.continues_previous,
                     "lang_code": case.lang_code,
                     "partial_text": case.partial_text,
+                    "partial_end_ms": case.partial_end_ms,
                     "partial_count": case.partial_count,
                     "extra_audio_ms": case.extra_audio_ms,
                     "finals": {name: asdict(value)

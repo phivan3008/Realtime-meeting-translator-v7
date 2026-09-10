@@ -29,8 +29,13 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 from pathlib import Path
 from typing import Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from server.analysis import guards  # noqa: E402
 
 FLAGS = ("rewrite", "tail_invention", "latin_lost", "repetition", "final_empty")
 
@@ -127,7 +132,7 @@ def reslice(run: dict, variant: str, exclude_empty: bool) -> dict:
     }
 
 
-def trim_effect(run: dict, baseline: str, variant: str) -> dict:
+def variant_effect(run: dict, baseline: str, variant: str) -> dict:
     """What a variant recovered and what it destroyed, by commit reason.
 
     One number for both directions hides the trade. A trim that recovers ten
@@ -149,6 +154,99 @@ def trim_effect(run: dict, baseline: str, variant: str) -> dict:
             same += 1
         table[case["reason"]] = (recovered, lost, same)
     return dict(sorted(table.items(), key=lambda item: -sum(item[1])))
+
+
+# ---------------------------------------------------------------------------
+# Replaying the guards
+# ---------------------------------------------------------------------------
+def guard_effect(run: dict, variant: str, rule: str) -> dict:
+    """What a different guard rule would have kept, and at what cost.
+
+    Exact rather than estimated: the decoder's output is recorded, and the
+    guards are a function of it. ``recovered`` is a sentence that was empty
+    and is not any more - the text is carried along, because whether it is
+    real speech or an invention the word lists do not know about is a
+    question only a person can answer.
+    """
+    simulated = guards.simulate(run, variant, rule)
+    recovered, lost, changed = [], [], []
+    for case in run["cases"]:
+        if case["index"] not in simulated:
+            continue
+        before = case["finals"][variant]["text"].strip()
+        after = simulated[case["index"]]["text"].strip()
+        entry = {
+            "index": case["index"],
+            "start_s": case["start_ms"] / 1000.0,
+            "seconds": (case["end_ms"] - case["start_ms"]) / 1000.0,
+            "reason": case["reason"],
+            "partial": case["partial_text"],
+            "before": before,
+            "after": after,
+        }
+        if not before and after:
+            recovered.append(entry)
+        elif before and not after:
+            lost.append(entry)
+        elif before != after:
+            changed.append(entry)
+    return {
+        "rule": rule,
+        "empty_before": sum(1 for case in run["cases"]
+                            if case["index"] in simulated
+                            and not case["finals"][variant]["text"].strip()),
+        "empty_after": sum(1 for index, result in simulated.items()
+                           if not result["text"].strip()),
+        "recovered": recovered,
+        "lost": lost,
+        "changed": changed,
+    }
+
+
+def recovered_by_reason(effect: dict) -> dict:
+    """Recovered sentences split by why they were committed."""
+    table: dict = {}
+    for entry in effect["recovered"]:
+        table[entry["reason"]] = table.get(entry["reason"], 0) + 1
+    return dict(sorted(table.items(), key=lambda item: -item[1]))
+
+
+def recovered_seconds(effect: dict) -> float:
+    """How much meeting the rule puts back on the screen."""
+    return sum(entry["seconds"] for entry in effect["recovered"])
+
+
+def no_speech_scores(run: dict, variant: str) -> dict:
+    """How confident the decoder was about the segments it called silence.
+
+    The whole argument for the Whisper rule is that these two numbers
+    disagree: a segment can score badly on ``no_speech_prob`` and well on
+    ``avg_logprob``, and today the first one wins alone. If the refused
+    segments were also decoded badly, there is nothing here to recover and
+    the rule change is not the fix.
+    """
+    confident, unsure = [], []
+    threshold = guards.make_transcriber().log_prob_threshold
+    for case in run["cases"]:
+        for record in case["finals"].get(variant, {}).get("pieces", []):
+            if record["verdict"] != "no speech":
+                continue
+            if record["avg_logprob"] > threshold:
+                confident.append(record)
+            else:
+                unsure.append(record)
+    return {
+        "threshold": threshold,
+        "refused": len(confident) + len(unsure),
+        "confident": len(confident),
+        "unsure": len(unsure),
+        "median_confident_logprob": (
+            statistics.median([r["avg_logprob"] for r in confident])
+            if confident else 0.0),
+        "median_unsure_logprob": (
+            statistics.median([r["avg_logprob"] for r in unsure])
+            if unsure else 0.0),
+    }
 
 
 def tail_inventions(run: dict, variant: str) -> list:
@@ -227,6 +325,51 @@ def print_table(rows: list, title: str) -> None:
               + " ".join(f"{row['counts'][flag]:>10}" for flag in FLAGS))
 
 
+def print_guard_rules(run: dict, variant: str, examples: int) -> None:
+    """The guard rules, replayed over the segments this run already recorded."""
+    if not guards.has_scores(run, variant):
+        print("\nGuard rules cannot be replayed: this run recorded no segment "
+              "scores. Re-run test_real_partial_final.py - with "
+              "--reuse-partials it costs about a minute.")
+        return
+
+    scores = no_speech_scores(run, variant)
+    print(f"\nSegments refused as 'no speech' under {variant}: "
+          f"{scores['refused']}")
+    print(f"  {scores['confident']:>4} were decoded confidently anyway "
+          f"(avg_logprob above {scores['threshold']}, median "
+          f"{scores['median_confident_logprob']:.2f}) - these are the ones "
+          f"Whisper's own rule would keep")
+    print(f"  {scores['unsure']:>4} were also decoded badly (median "
+          f"{scores['median_unsure_logprob']:.2f}) - the low-confidence guard "
+          f"refuses these either way")
+
+    effect = guard_effect(run, variant, "whisper")
+    print(f"\nWhisper's own rule against the current one, on the same "
+          f"decodes:")
+    print(f"  empty sentences {effect['empty_before']} -> "
+          f"{effect['empty_after']}")
+    print(f"  {len(effect['recovered'])} recovered "
+          f"({recovered_seconds(effect):.0f} s of meeting), "
+          f"{len(effect['lost'])} lost, {len(effect['changed'])} reworded")
+    by_reason = recovered_by_reason(effect)
+    if by_reason:
+        print("  recovered by commit reason: "
+              + ", ".join(f"{reason} {count}"
+                          for reason, count in by_reason.items()))
+
+    print(f"\nRecovered sentences - read these, the counters cannot tell real "
+          f"speech from an invention the word lists do not know:")
+    for entry in effect["recovered"][:examples]:
+        print(f"  #{entry['index']} at {entry['start_s']:.1f}s "
+              f"({entry['seconds']:.1f} s, {entry['reason']})")
+        print(f"      partial {entry['partial']!r}")
+        print(f"      would show {entry['after']!r}")
+    for entry in effect["lost"][:examples]:
+        print(f"  LOST #{entry['index']} at {entry['start_s']:.1f}s "
+              f"was {entry['before']!r}")
+
+
 def report(run: dict, examples: int = 6) -> None:
     names = variant_names(run)
     baseline = names[0]
@@ -271,9 +414,11 @@ def report(run: dict, examples: int = 6) -> None:
     for name in names[1:]:
         print(f"\nWhat {name} changed against {baseline}, by commit reason "
               f"(recovered / emptied / unchanged):")
-        for reason, (recovered, lost, same) in trim_effect(
+        for reason, (recovered, lost, same) in variant_effect(
                 run, baseline, name).items():
             print(f"  {reason:<15} +{recovered:<4} -{lost:<4} ={same}")
+
+    print_guard_rules(run, baseline, examples)
 
     print(f"\nInvented tails under {baseline}: "
           f"{len(tail_inventions(run, baseline))}")

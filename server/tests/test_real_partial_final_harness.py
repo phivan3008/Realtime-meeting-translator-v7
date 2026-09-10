@@ -375,7 +375,7 @@ def test_main_runs_every_variant_and_writes_the_json(tmp_path, offline,
     out = tmp_path / "drift.json"
     monkeypatch.setattr(sys, "argv", [
         "test_real_partial_final.py", "--wav", str(wav),
-        "--out", str(out), "--top", "3",
+        "--out", str(out), "--top", "3", "--variants", "all",
     ])
 
     assert harness.main() == 0
@@ -392,6 +392,109 @@ def test_main_runs_every_variant_and_writes_the_json(tmp_path, offline,
     # baseline that drops "Solution" and doubles "cái".
     summary = {row["variant"]: row for row in payload["summary"]}
     assert summary["beam1"]["flagged"] < summary["baseline"]["flagged"]
+
+
+def test_only_the_baseline_runs_unless_asked(tmp_path, offline, monkeypatch):
+    """The other three were measured and none of them was the fault.
+
+    Paying for them on every run is four times the GPU time for a question
+    that already has an answer.
+    """
+    wav = write_wav(tmp_path / "meeting.wav", 20.0)
+    out = tmp_path / "drift.json"
+    monkeypatch.setattr(sys, "argv", [
+        "test_real_partial_final.py", "--wav", str(wav), "--out", str(out)])
+    assert harness.main() == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert [variant["name"] for variant in payload["variants"]] == ["baseline"]
+
+
+def test_every_segment_is_recorded_with_its_scores_and_verdict(
+        tmp_path, offline, monkeypatch):
+    """What makes a guard rule answerable later without a GPU."""
+    wav = write_wav(tmp_path / "meeting.wav", 20.0)
+    out = tmp_path / "drift.json"
+    monkeypatch.setattr(sys, "argv", [
+        "test_real_partial_final.py", "--wav", str(wav), "--out", str(out)])
+    assert harness.main() == 0
+
+    pieces = json.loads(out.read_text(encoding="utf-8")
+                        )["cases"][0]["finals"]["baseline"]["pieces"]
+    assert pieces
+    assert set(pieces[0]) == {"text", "avg_logprob", "no_speech_prob",
+                              "compression_ratio", "verdict"}
+    assert pieces[0]["verdict"] == "kept"
+
+
+def test_a_refused_segment_records_the_reason_it_was_refused(tmp_path,
+                                                             monkeypatch):
+    class Silent:
+        """Whisper over near-silence: fluent, confident, and never said."""
+
+        source = "stub"
+
+        def decode(self, samples, lang_code, beam_size):
+            return [Piece(" Thank you for watching!", -0.3, 0.95, 1.3)], "en"
+
+    recorder = harness.RecordingDecoder(Silent())
+    transcriber = Transcriber(decoder=recorder)
+    transcriber.transcribe(bytes(SAMPLE_RATE * SAMPLE_WIDTH), "vi",
+                           is_final=True)
+    pieces = harness.record_pieces(recorder, transcriber)
+    assert [piece["verdict"] for piece in pieces] == ["no speech"]
+    assert pieces[0]["no_speech_prob"] == pytest.approx(0.95)
+
+
+def test_the_recording_decoder_keeps_the_order_the_model_returned():
+    """The sentence's text depends on it, and ``Transcript`` does not keep it."""
+    class TwoPieces:
+        source = "stub"
+
+        def decode(self, samples, lang_code, beam_size):
+            return ([Piece(" một", -0.2, 0.05, 1.6),
+                     Piece(" hai", -0.2, 0.05, 1.6)], "vi")
+
+    recorder = harness.RecordingDecoder(TwoPieces())
+    transcriber = Transcriber(decoder=recorder)
+    transcriber.transcribe(bytes(SAMPLE_RATE * SAMPLE_WIDTH), "vi")
+    assert [piece["text"].strip()
+            for piece in harness.record_pieces(recorder, transcriber)] == [
+        "một", "hai"]
+
+
+def test_running_texts_can_be_reused_from_an_earlier_run(tmp_path, offline,
+                                                         monkeypatch, capsys):
+    """Four fifths of the decoding, for a question about the sentence path."""
+    wav = write_wav(tmp_path / "meeting.wav", 20.0)
+    first = tmp_path / "first.json"
+    monkeypatch.setattr(sys, "argv", [
+        "test_real_partial_final.py", "--wav", str(wav), "--out", str(first)])
+    assert harness.main() == 0
+    original = json.loads(first.read_text(encoding="utf-8"))
+
+    second = tmp_path / "second.json"
+    monkeypatch.setattr(sys, "argv", [
+        "test_real_partial_final.py", "--wav", str(wav), "--out", str(second),
+        "--reuse-partials", str(first)])
+    assert harness.main() == 0
+
+    printed = capsys.readouterr().out
+    assert "Reusing" in printed
+    again = json.loads(second.read_text(encoding="utf-8"))
+    assert again["partial_seconds"] == 0.0
+    assert ([case["partial_text"] for case in again["cases"]]
+            == [case["partial_text"] for case in original["cases"]])
+    assert ([case["partial_end_ms"] for case in again["cases"]]
+            == [case["partial_end_ms"] for case in original["cases"]])
+
+
+def test_a_reuse_file_that_cannot_be_read_is_refused(tmp_path, offline,
+                                                     monkeypatch):
+    wav = write_wav(tmp_path / "meeting.wav", 12.0)
+    monkeypatch.setattr(sys, "argv", [
+        "test_real_partial_final.py", "--wav", str(wav),
+        "--reuse-partials", str(tmp_path / "nope.json")])
+    assert harness.main() == 2
 
 
 def test_main_refuses_a_recording_it_cannot_read(tmp_path, offline, monkeypatch):

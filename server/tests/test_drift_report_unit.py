@@ -169,7 +169,7 @@ class TestTradeOffs:
     def test_a_variant_is_scored_in_both_directions_at_once(self, run):
         """A trim that recovers one pause and empties one max_duration cut is
         two findings, not a wash."""
-        effect = report.trim_effect(run, "baseline", "trim")
+        effect = report.variant_effect(run, "baseline", "trim")
         assert effect["pause"] == (1, 0, 2)
         assert effect["max_duration"] == (0, 1, 0)
 
@@ -205,6 +205,82 @@ class TestUncompared:
         missing = report.without_running_text(run)
         assert missing["partials_all_refused"] == 1
         assert missing["no_partial_at_all"] == 0
+
+
+def scored_run() -> dict:
+    """A run that recorded segment scores, so the guards can be replayed."""
+    def piece(text, no_speech_prob, avg_logprob, verdict):
+        return {"text": text, "avg_logprob": avg_logprob,
+                "no_speech_prob": no_speech_prob, "compression_ratio": 1.6,
+                "verdict": verdict}
+
+    def case(index, reason, seconds, partial, text, pieces):
+        return {
+            "index": index, "start_ms": index * 10_000.0,
+            "end_ms": index * 10_000.0 + seconds * 1000.0, "reason": reason,
+            "continues_previous": False, "lang_code": "vi",
+            "partial_text": partial, "partial_count": 5,
+            "extra_audio_ms": 300.0, "drift": {},
+            "finals": {"baseline": {"text": text, "seconds": 0.2,
+                                    "audio_ms": seconds * 1000.0,
+                                    "dropped": [], "pieces": pieces}},
+        }
+
+    return {
+        "wav": "x.wav", "audio_seconds": 60.0,
+        "variants": [{"name": "baseline", "beam": 5, "trim_ms": 0.0}],
+        "cases": [
+            # Refused as silence, but decoded confidently: the whole question.
+            case(0, "pause", 6.5, "bác cũng đã nắm", "",
+                 [piece(" bác cũng đã nắm rồi", 0.95, -0.2, "no speech")]),
+            # Refused as silence and decoded badly too - nothing to recover.
+            case(1, "max_duration", 7.0, "ừm", "",
+                 [piece(" ừm à", 0.95, -1.4, "no speech")]),
+            # Ordinary, untouched by either rule.
+            case(2, "pause", 3.0, "cái này hơi detail", "cái này hơi detail",
+                 [piece(" cái này hơi detail", 0.05, -0.2, "kept")]),
+        ],
+    }
+
+
+class TestGuardRules:
+    def test_confident_refusals_are_separated_from_hopeless_ones(self):
+        """If every refused segment was also decoded badly, there is nothing
+        for the rule change to recover and it is not the fix."""
+        scores = report.no_speech_scores(scored_run(), "baseline")
+        assert scores["refused"] == 2
+        assert scores["confident"] == 1
+        assert scores["unsure"] == 1
+
+    def test_the_whisper_rule_is_scored_in_both_directions(self):
+        effect = report.guard_effect(scored_run(), "baseline", "whisper")
+        assert effect["empty_before"] == 2
+        assert effect["empty_after"] == 1
+        assert [entry["index"] for entry in effect["recovered"]] == [0]
+        assert effect["lost"] == []
+        assert effect["recovered"][0]["after"] == "bác cũng đã nắm rồi"
+
+    def test_recovered_sentences_are_split_by_commit_reason(self):
+        effect = report.guard_effect(scored_run(), "baseline", "whisper")
+        assert report.recovered_by_reason(effect) == {"pause": 1}
+        assert report.recovered_seconds(effect) == pytest.approx(6.5)
+
+    def test_the_current_rule_changes_nothing(self):
+        effect = report.guard_effect(scored_run(), "baseline", "current")
+        assert effect["recovered"] == []
+        assert effect["lost"] == []
+        assert effect["changed"] == []
+
+    def test_a_run_without_scores_says_so_instead_of_guessing(self, run,
+                                                              capsys):
+        report.print_guard_rules(run, "baseline", examples=3)
+        assert "recorded no segment scores" in capsys.readouterr().out
+
+    def test_the_recovered_text_is_printed_for_a_person_to_read(self, capsys):
+        report.print_guard_rules(scored_run(), "baseline", examples=3)
+        printed = capsys.readouterr().out
+        assert "would show 'bác cũng đã nắm rồi'" in printed
+        assert "empty sentences 2 -> 1" in printed
 
 
 class TestMain:
