@@ -1,0 +1,324 @@
+"""Re-read a drift run without decoding it again.
+
+``server/tests_real/test_real_partial_final.py`` writes every sentence, every
+variant and every guard verdict to JSON. The summary it prints on the way
+past is the first cut; this is the second, and it exists because the first
+one was misleading in two specific ways.
+
+**Empty sentences poison every other column.** A sentence the guards emptied
+scores ``rewrite`` 1.00 and loses every Latin word the running text had, so a
+run where a fifth of the sentences come back empty reports a Latin-word
+problem and a rewriting problem that are both really the same problem. Every
+comparison here is offered twice: over all sentences, and over the sentences
+that actually produced text.
+
+**A fixed trim is only a hangover for some sentences.** The VAD's silence
+hangover is on the end of a sentence that finished on a *pause*. One cut
+short at ``max_duration`` was interrupted mid-word, and trimming it removes
+speech. Splitting the trim's effect by the reason the sentence was committed
+is the difference between a result and an artefact.
+
+Usage::
+
+    python3.11 -m server.analysis.report /tmp/drift_full.json
+    python3.11 -m server.analysis.report /tmp/drift_full.json --examples 8
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+from pathlib import Path
+from typing import Optional
+
+FLAGS = ("rewrite", "tail_invention", "latin_lost", "repetition", "final_empty")
+
+
+def load(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def variant_names(run: dict) -> list:
+    return [variant["name"] for variant in run["variants"]]
+
+
+def comparable(run: dict, variant: str) -> list:
+    """Sentences that had a running text to be compared against."""
+    return [case for case in run["cases"] if variant in case.get("drift", {})]
+
+
+def is_empty(case: dict, variant: str) -> bool:
+    return not case["finals"].get(variant, {}).get("text", "").strip()
+
+
+# ---------------------------------------------------------------------------
+# Why a sentence came back empty
+# ---------------------------------------------------------------------------
+def dropped_histogram(run: dict, variant: str,
+                      empty_only: bool = False) -> dict:
+    """How often each guard refused a segment, by the reason it gave.
+
+    ``_refuse`` returns one of: empty, no speech, low confidence, repetition,
+    known hallucination. Which of them is doing the emptying decides what
+    there is to fix - a threshold, a word list, or the rule itself.
+    """
+    counts: dict = {}
+    for case in run["cases"]:
+        if empty_only and not is_empty(case, variant):
+            continue
+        for reason in case["finals"].get(variant, {}).get("dropped", []):
+            counts[reason] = counts.get(reason, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: -item[1]))
+
+
+def empties_by_reason(run: dict, variant: str) -> dict:
+    """Empty sentences against total, split by why the sentence was committed.
+
+    A sentence cut at ``max_duration`` is a fragment by construction, so it is
+    the one most likely to be refused for honest reasons. If the empties are
+    spread evenly instead, the refusal is not about fragments.
+    """
+    table: dict = {}
+    for case in comparable(run, variant):
+        empty, total = table.get(case["reason"], (0, 0))
+        table[case["reason"]] = (empty + int(is_empty(case, variant)),
+                                 total + 1)
+    return dict(sorted(table.items(), key=lambda item: -item[1][1]))
+
+
+def empties_by_duration(run: dict, variant: str,
+                        edges=(1.0, 2.0, 4.0, 6.0)) -> dict:
+    """The same count, bucketed by how long the sentence was."""
+    labels = ([f"<{edges[0]:.0f}s"]
+              + [f"{low:.0f}-{high:.0f}s"
+                 for low, high in zip(edges, edges[1:])]
+              + [f"{edges[-1]:.0f}s+"])
+    table = {label: (0, 0) for label in labels}
+    for case in comparable(run, variant):
+        seconds = (case["end_ms"] - case["start_ms"]) / 1000.0
+        index = sum(1 for edge in edges if seconds >= edge)
+        empty, total = table[labels[index]]
+        table[labels[index]] = (empty + int(is_empty(case, variant)),
+                                total + 1)
+    return table
+
+
+# ---------------------------------------------------------------------------
+# The comparison, with the empties held apart
+# ---------------------------------------------------------------------------
+def reslice(run: dict, variant: str, exclude_empty: bool) -> dict:
+    """Flag counts and mean rewrite, optionally over non-empty sentences only."""
+    cases = comparable(run, variant)
+    if exclude_empty:
+        cases = [case for case in cases if not is_empty(case, variant)]
+    drifts = [case["drift"][variant] for case in cases]
+    rewrites = [drift["rewrite"] for drift in drifts]
+    return {
+        "variant": variant,
+        "compared": len(drifts),
+        "clean": sum(1 for drift in drifts if not drift["flags"]),
+        "flagged": sum(1 for drift in drifts if drift["flags"]),
+        "mean_rewrite": statistics.fmean(rewrites) if rewrites else 0.0,
+        "counts": {flag: sum(1 for drift in drifts if flag in drift["flags"])
+                   for flag in FLAGS},
+        "lost_words": sorted({word for drift in drifts
+                              for word in drift["lost_latin"]}),
+    }
+
+
+def trim_effect(run: dict, baseline: str, variant: str) -> dict:
+    """What a variant recovered and what it destroyed, by commit reason.
+
+    One number for both directions hides the trade. A trim that recovers ten
+    sentences finished on a pause and empties twelve cut at max_duration is
+    not a wash - it is two findings.
+    """
+    table: dict = {}
+    for case in comparable(run, baseline):
+        if variant not in case["finals"]:
+            continue
+        was_empty = is_empty(case, baseline)
+        now_empty = is_empty(case, variant)
+        recovered, lost, same = table.get(case["reason"], (0, 0, 0))
+        if was_empty and not now_empty:
+            recovered += 1
+        elif now_empty and not was_empty:
+            lost += 1
+        else:
+            same += 1
+        table[case["reason"]] = (recovered, lost, same)
+    return dict(sorted(table.items(), key=lambda item: -sum(item[1])))
+
+
+def tail_inventions(run: dict, variant: str) -> list:
+    """Every sentence that grew a tail with too little audio behind it."""
+    found = []
+    for case in comparable(run, variant):
+        drift = case["drift"][variant]
+        if "tail_invention" in drift["flags"]:
+            found.append({
+                "index": case["index"],
+                "start_s": case["start_ms"] / 1000.0,
+                "extra_audio_ms": case["extra_audio_ms"],
+                "tail": drift["tail_text"],
+                "partial": case["partial_text"],
+                "final": drift["final"],
+            })
+    return found
+
+
+def lost_latin_cases(run: dict, variant: str) -> list:
+    """Latin words the running text had and the sentence dropped.
+
+    Only over sentences that produced text: an empty sentence loses every
+    word there was, and counting those says nothing about code-switching.
+    """
+    found = []
+    for case in comparable(run, variant):
+        if is_empty(case, variant):
+            continue
+        drift = case["drift"][variant]
+        if drift["lost_latin"]:
+            found.append({
+                "index": case["index"],
+                "start_s": case["start_ms"] / 1000.0,
+                "words": list(drift["lost_latin"]),
+                "partial": case["partial_text"],
+                "final": drift["final"],
+            })
+    return found
+
+
+def without_running_text(run: dict) -> dict:
+    """Sentences never compared, and whether they were simply too short.
+
+    A sentence shorter than a partial interval never gets a running text, and
+    those are uninteresting. One that had several running texts and still
+    could not be compared means every one of them was refused, which is the
+    same fault at the other end of the pipeline.
+    """
+    compared = {case["index"] for case in run["cases"] if case.get("drift")}
+    missing = [case for case in run["cases"] if case["index"] not in compared]
+    return {
+        "total": len(missing),
+        "no_partial_at_all": sum(1 for case in missing
+                                 if case["partial_count"] == 0),
+        "partials_all_refused": sum(1 for case in missing
+                                    if case["partial_count"] > 0),
+        "median_seconds": (statistics.median(
+            [(case["end_ms"] - case["start_ms"]) / 1000.0
+             for case in missing]) if missing else 0.0),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Printing
+# ---------------------------------------------------------------------------
+def print_table(rows: list, title: str) -> None:
+    print(f"\n{title}")
+    header = (f"  {'variant':<12} {'cmp':>5} {'clean':>6} {'flag':>5} "
+              f"{'rewrite':>8} " + " ".join(f"{flag[:9]:>10}" for flag in FLAGS))
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for row in rows:
+        print(f"  {row['variant']:<12} {row['compared']:>5} {row['clean']:>6} "
+              f"{row['flagged']:>5} {row['mean_rewrite']:>8.3f} "
+              + " ".join(f"{row['counts'][flag]:>10}" for flag in FLAGS))
+
+
+def report(run: dict, examples: int = 6) -> None:
+    names = variant_names(run)
+    baseline = names[0]
+
+    print(f"{Path(run['wav']).name}: {run['audio_seconds'] / 60:.1f} minutes, "
+          f"{len(run['cases'])} sentences")
+
+    missing = without_running_text(run)
+    print(f"\n{missing['total']} sentences had no running text to compare "
+          f"against (median {missing['median_seconds']:.1f} s):")
+    print(f"  {missing['no_partial_at_all']:>4} never produced one - shorter "
+          f"than the partial interval")
+    print(f"  {missing['partials_all_refused']:>4} produced one and every one "
+          f"was refused")
+
+    print_table([reslice(run, name, exclude_empty=False) for name in names],
+                "All comparable sentences:")
+    print_table([reslice(run, name, exclude_empty=True) for name in names],
+                "Sentences that produced text - the empties held apart:")
+
+    print("\nWhy the sentences that came back empty came back empty:")
+    for name in names:
+        counts = dropped_histogram(run, name, empty_only=True)
+        empties = sum(1 for case in comparable(run, name)
+                      if is_empty(case, name))
+        total = ", ".join(f"{reason}={count}"
+                          for reason, count in counts.items()) or "nothing"
+        print(f"  {name:<12} {empties:>4} empty; guards refused: {total}")
+
+    print("\nEmpty sentences by why the sentence was committed:")
+    for name in names:
+        table = empties_by_reason(run, name)
+        parts = ", ".join(f"{reason} {empty}/{total}"
+                          for reason, (empty, total) in table.items())
+        print(f"  {name:<12} {parts}")
+
+    print(f"\nEmpty sentences by length ({baseline}):")
+    for label, (empty, total) in empties_by_duration(run, baseline).items():
+        share = 100.0 * empty / total if total else 0.0
+        print(f"  {label:<8} {empty:>4} / {total:<4} ({share:.0f}%)")
+
+    for name in names[1:]:
+        print(f"\nWhat {name} changed against {baseline}, by commit reason "
+              f"(recovered / emptied / unchanged):")
+        for reason, (recovered, lost, same) in trim_effect(
+                run, baseline, name).items():
+            print(f"  {reason:<15} +{recovered:<4} -{lost:<4} ={same}")
+
+    print(f"\nInvented tails under {baseline}: "
+          f"{len(tail_inventions(run, baseline))}")
+    for case in tail_inventions(run, baseline)[:examples]:
+        print(f"  #{case['index']} at {case['start_s']:.1f}s, only "
+              f"{case['extra_audio_ms']:.0f} ms of new audio")
+        print(f"      partial {case['partial']!r}")
+        print(f"      final   {case['final']!r}")
+        print(f"      tail    {case['tail']!r}")
+
+    for name in names:
+        cases = lost_latin_cases(run, name)
+        words = sorted({word for case in cases for word in case["words"]})
+        print(f"\nLatin words lost by {name}, over sentences that produced "
+              f"text: {len(cases)} sentences, {len(words)} distinct words")
+        print(f"  {', '.join(words) if words else '(none)'}")
+
+    print(f"\nExamples under {baseline}:")
+    for case in lost_latin_cases(run, baseline)[:examples]:
+        print(f"  #{case['index']} at {case['start_s']:.1f}s "
+              f"lost {', '.join(case['words'])}")
+        print(f"      partial {case['partial']!r}")
+        print(f"      final   {case['final']!r}")
+
+
+def main(argv: Optional[list] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Re-read a drift run without decoding it again.")
+    parser.add_argument("json", type=Path,
+                        help="the --out file from test_real_partial_final.py")
+    parser.add_argument("--examples", type=int, default=6,
+                        help="how many worked examples to print per section")
+    args = parser.parse_args(argv)
+
+    try:
+        run = load(args.json)
+    except (OSError, ValueError) as exc:
+        print(f"cannot read {args.json}: {exc}")
+        return 2
+    if not run.get("cases"):
+        print(f"{args.json} holds no sentences")
+        return 1
+    report(run, args.examples)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
