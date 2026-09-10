@@ -304,6 +304,40 @@ ASR_HALLUCINATIONS = (
     # of a video, not of a meeting.
     "H\u1eb9n g\u1eb7p l\u1ea1i c\u00e1c b\u1ea1n trong "
     "nh\u1eefng video ti\u1ebfp theo.",
+    # The five below come from one thirty-minute meeting, replayed offline
+    # after `_refuse` stopped refusing a segment on no_speech_prob alone.
+    # Every one of them was being caught by that clause rather than by
+    # policy - which is exactly the luck this list exists to replace.
+    #
+    # Twice each, over 1.3-4.9 s where the running text, decoded separately
+    # on the same audio, said nothing at all.
+    "C\u1ea3m \u01a1n c\u00e1c b\u1ea1n.",
+    "H\u1eb9n g\u1eb7p l\u1ea1i.",
+    "H\u1eb9n g\u1eb7p l\u1ea1i m\u1ecdi ng\u01b0\u1eddi",
+    # Whisper's answer to silence in English, and the most documented one
+    # there is. It has been coming out of this project's own module 9 test
+    # over a quiet recording since the beginning, refused there by
+    # no_speech_prob - the comment on "C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i." above
+    # already called that refusal luck rather than policy, and now it is
+    # neither. A Vietnamese-Japanese meeting saying exactly these four words
+    # and nothing else is not a case worth protecting.
+    "Thank you for watching!",
+    # "H\u1eb9n g\u1eb7p l\u1ea1i." is the same trade as "Ch\u00e0o t\u1ea1m bi\u1ec7t." above, and worse:
+    # a meeting really can end with those three words. Whole-segment matching
+    # is what keeps it narrow - "H\u1eb9n g\u1eb7p l\u1ea1i anh nh\u00e9", "Ok h\u1eb9n g\u1eb7p l\u1ea1i" and
+    # anything with a word attached survive. Two inventions against one real
+    # goodbye said in exactly these words and no others.
+    #
+    # NOT listed: "C\u1ea3m \u01a1n." on its own. It appeared five times in that
+    # meeting, and at least once the running text agreed somebody said it.
+    # A thank-you is ordinary meeting speech in a way a video sign-off is
+    # not, and one second of stray text on screen costs less than deleting
+    # real thanks.
+    #
+    # The Japanese sign-off below reached the screen under the old rule too -
+    # it is not a cost of the change, it is a hole the change made visible.
+    "\u6b21\u306e\u30d3\u30c7\u30aa\u3067\u304a\u4f1a\u3044"
+    "\u3057\u307e\u3057\u3087\u3046\u3002",
 )
 
 # What the list above cannot do: it matches whole sentences, so the same
@@ -322,15 +356,30 @@ ASR_HALLUCINATIONS = (
 # này" has no "để không bỏ lỡ những video hấp dẫn" after it, and is kept.
 #
 # Only shapes seen twice, or seen once and obviously templated, are here.
+# A vocative in front of the pitch. Twice in one meeting Whisper wrote "Các
+# bạn hãy đăng ký kênh ..." where the pattern below expected the line to open
+# on "hãy", and a whole-segment match is anchored, so two words at the front
+# were enough to walk through it. Listed forms only - this is a hole with a
+# handful of shapes in it, not an open one.
+_VOCATIVE = r"(c[áa]c b[ạa]n |m[ọo]i ng[ưu][ờo]i )?"
+
 ASR_HALLUCINATION_PATTERNS = (
     # Seen twice, with two different channel names.
-    r"h[ãa]y subscribe cho k[êe]nh .{1,40} "
+    _VOCATIVE
+    + r"h[ãa]y subscribe cho k[êe]nh .{1,40} "
     r"đ[ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[ữu]ng video h[ấa]p d[ẫa]n",
-    # Seen once. The channel name is optional in this one - the run that
-    # produced it had none - which is why it is a pattern rather than the
-    # exact line it also appears as above.
-    r"h[ãa]y đ[ăa]ng k[ýy] k[êe]nh( .{1,40})? đ[ểe] [ủu]ng h[ộo] "
-    r"k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?",
+    # The channel name is optional in this one - the run that produced it had
+    # none - which is why it is a pattern rather than the exact line it also
+    # appears as above.
+    #
+    # The reason to subscribe is a hole too. Two have been seen: "để ủng hộ
+    # kênh của mình" and "để nhận thêm nhiều video". Both are spelled out
+    # rather than left as a wildcard, because "Hãy đăng ký kênh Teams để nhận
+    # báo cáo" is a sentence a meeting could actually produce.
+    _VOCATIVE
+    + r"h[ãa]y đ[ăa]ng k[ýy] k[êe]nh( .{1,40})? đ[ểe] "
+    r"([ủu]ng h[ộo] k[êe]nh c[ủu]a m[ìi]nh"
+    r"|nh[ậa]n th[êe]m nhi[ềe]u video)( nh[ée])?",
     # Three variants of one shape in a single ten-minute run, all caught by
     # no_speech_prob rather than by policy:
     #

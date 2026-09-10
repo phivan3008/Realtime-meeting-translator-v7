@@ -267,10 +267,29 @@ def test_agreement_reports_what_whisper_thought_by_itself(capsys):
     assert "same text for 2/2" in out
 
 
+class UnlistedInvention:
+    """A fluent sentence over silence that no list has seen yet.
+
+    The listed ones cannot be used here any more: "Thank you for watching!"
+    is now caught by the word list, which is the point of the list. What this
+    check has to catch is the next invention, before anybody has written it
+    down - so the stub says something nobody has listed.
+    """
+
+    source = "stub decoder"
+
+    def decode(self, samples, lang_code, beam_size):
+        loud = float(np.max(np.abs(samples))) if samples.size else 0.0
+        if loud < 0.01:
+            return [Piece(" Buổi họp hôm nay xin được kết thúc tại đây.",
+                          -0.3, 0.95, 1.3)], "vi"
+        return [Piece(" xin chao", -0.2, 0.05, 1.6)], lang_code or "vi"
+
+
 def test_invented_text_over_silence_is_caught():
     """The reason the guards exist, with the real symptom."""
     report = harness.Report()
-    transcriber = Transcriber(decoder=StubDecoder(),
+    transcriber = Transcriber(decoder=UnlistedInvention(),
                               no_speech_threshold=0.99)
     harness.check_silence(bytes(SAMPLE_RATE * SAMPLE_WIDTH), transcriber, report)
     assert [c.name for c in report.failed] == ["Silence produces no transcript"]

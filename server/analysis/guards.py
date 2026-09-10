@@ -10,21 +10,17 @@ because its output has not changed.
 Two rules:
 
 ``current``
-    What ``Transcriber._refuse`` does today. ``no_speech_prob`` above the
-    threshold refuses the segment on its own.
+    Whatever ``Transcriber._refuse`` does now, by deferring to it. Replaying
+    this over a run recorded under an older policy is how a policy change is
+    checked: the recorded text is what the meeting showed, and this is what
+    it would show today.
 
-``whisper``
-    What faster-whisper itself does::
-
-        should_skip = result.no_speech_prob > no_speech_threshold
-        if logprob_threshold is not None and result.avg_logprob > logprob_threshold:
-            # don't skip if the logprob is high enough, despite the no_speech_prob
-            should_skip = False
-
-    A confident decode survives an uncertain ``no_speech_prob``. Note what
-    this implies: a segment whose ``avg_logprob`` is *not* high enough is
-    refused by the low-confidence guard anyway, so under this rule
-    ``no_speech_prob`` never refuses anything on its own.
+``no_speech_alone``
+    The rule this project used until a thirty-minute meeting was measured:
+    ``no_speech_prob`` over the threshold refused a segment by itself,
+    without asking how the decode had gone. It is kept so the measurement
+    that removed it can be re-derived from any run, and so a future change
+    has something to be compared against.
 
 Everything else - the order of the checks, the thresholds, the word lists -
 comes from the live ``Transcriber``, so a change to the policy cannot drift
@@ -44,7 +40,7 @@ from server.pipeline.asr import (
     normalise_for_pattern,
 )
 
-RULES = ("current", "whisper")
+RULES = ("current", "no_speech_alone")
 
 
 class _NoDecoder:
@@ -75,19 +71,19 @@ def refuse(transcriber: Transcriber, piece: Piece,
     """Why this segment should not be shown, under the named rule.
 
     ``current`` defers to the live ``Transcriber`` so the two can never
-    disagree. ``whisper`` repeats the same checks in the same order with one
-    clause changed, and ``test_guards_unit`` pins the two together on every
-    case but the one that is meant to differ.
+    disagree. ``no_speech_alone`` repeats the same checks in the same order
+    with one clause widened back to what it used to be, and
+    ``test_guards_unit`` pins the two together on every case but the one that
+    is meant to differ.
     """
     if rule == "current":
         return transcriber._refuse(piece)
-    if rule != "whisper":
+    if rule != "no_speech_alone":
         raise ValueError(f"unknown guard rule {rule!r}")
 
     if not piece.text.strip():
         return "empty"
-    if (piece.no_speech_prob > transcriber.no_speech_threshold
-            and piece.avg_logprob <= transcriber.log_prob_threshold):
+    if piece.no_speech_prob > transcriber.no_speech_threshold:
         return "no speech"
     if piece.avg_logprob < transcriber.log_prob_threshold:
         return "low confidence"

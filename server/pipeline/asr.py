@@ -15,11 +15,15 @@ into a loop and repeats one phrase to fill the time.
 
 Three guards, and all three matter:
 
-``no_speech_prob``
-    Whisper's own estimate that a segment holds no speech.
+``no_speech_prob`` **with** ``avg_logprob``
+    Whisper's own estimate that a segment holds no speech, refusing only when
+    the decode was also poor. Read alone it is not a silence detector: over
+    thirty minutes of real meeting it refused 68 segments, all 68 of them
+    decoded confidently, three minutes of speech deleted for nothing.
 
 ``avg_logprob``
-    How confident the decoder was. Invented text scores badly.
+    How confident the decoder was. Invented text scores badly - except for
+    the sign-offs, which is what the word lists below are for.
 
 ``compression_ratio``
     A repetition detector. Natural speech gzips to around 1.5-2.0; a segment
@@ -238,7 +242,23 @@ class Transcriber:
         """Why this segment should not be shown, or None to keep it."""
         if not piece.text.strip():
             return "empty"
-        if piece.no_speech_prob > self.no_speech_threshold:
+        if (piece.no_speech_prob > self.no_speech_threshold
+                and piece.avg_logprob <= self.log_prob_threshold):
+            # Both signals, which is faster-whisper's own rule::
+            #
+            #     should_skip = result.no_speech_prob > no_speech_threshold
+            #     if logprob_threshold is not None and result.avg_logprob > logprob_threshold:
+            #         # don't skip if the logprob is high enough, despite the
+            #         # no_speech_prob
+            #         should_skip = False
+            #
+            # This clause was missing, and it cost three minutes of a
+            # thirty-minute meeting: 68 segments refused as silence, every
+            # one of them decoded confidently (median avg_logprob -0.37
+            # against a threshold of -1.0), 21 of them from sentences longer
+            # than six seconds. Not one would have been refused by the
+            # low-confidence guard below - the clause was deleting and never
+            # catching.
             return "no speech"
         if piece.avg_logprob < self.log_prob_threshold:
             return "low confidence"

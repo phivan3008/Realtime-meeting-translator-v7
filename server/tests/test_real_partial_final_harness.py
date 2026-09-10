@@ -429,12 +429,12 @@ def test_every_segment_is_recorded_with_its_scores_and_verdict(
 def test_a_refused_segment_records_the_reason_it_was_refused(tmp_path,
                                                              monkeypatch):
     class Silent:
-        """Whisper over near-silence: fluent, confident, and never said."""
+        """Whisper over near-silence: fluent, badly decoded, never said."""
 
         source = "stub"
 
         def decode(self, samples, lang_code, beam_size):
-            return [Piece(" Thank you for watching!", -0.3, 0.95, 1.3)], "en"
+            return [Piece(" mumble over a quiet room", -1.4, 0.95, 1.3)], "vi"
 
     recorder = harness.RecordingDecoder(Silent())
     transcriber = Transcriber(decoder=recorder)
@@ -443,6 +443,7 @@ def test_a_refused_segment_records_the_reason_it_was_refused(tmp_path,
     pieces = harness.record_pieces(recorder, transcriber)
     assert [piece["verdict"] for piece in pieces] == ["no speech"]
     assert pieces[0]["no_speech_prob"] == pytest.approx(0.95)
+    assert pieces[0]["avg_logprob"] == pytest.approx(-1.4)
 
 
 def test_the_recording_decoder_keeps_the_order_the_model_returned():

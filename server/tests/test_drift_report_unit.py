@@ -252,8 +252,9 @@ class TestGuardRules:
         assert scores["confident"] == 1
         assert scores["unsure"] == 1
 
-    def test_the_whisper_rule_is_scored_in_both_directions(self):
-        effect = report.guard_effect(scored_run(), "baseline", "whisper")
+    def test_todays_policy_is_scored_in_both_directions(self):
+        """The run was recorded under the old rule, so this is the recovery."""
+        effect = report.guard_effect(scored_run(), "baseline", "current")
         assert effect["empty_before"] == 2
         assert effect["empty_after"] == 1
         assert [entry["index"] for entry in effect["recovered"]] == [0]
@@ -261,12 +262,19 @@ class TestGuardRules:
         assert effect["recovered"][0]["after"] == "bác cũng đã nắm rồi"
 
     def test_recovered_sentences_are_split_by_commit_reason(self):
-        effect = report.guard_effect(scored_run(), "baseline", "whisper")
+        effect = report.guard_effect(scored_run(), "baseline", "current")
         assert report.recovered_by_reason(effect) == {"pause": 1}
         assert report.recovered_seconds(effect) == pytest.approx(6.5)
 
-    def test_the_current_rule_changes_nothing(self):
-        effect = report.guard_effect(scored_run(), "baseline", "current")
+    def test_replaying_the_rule_the_run_used_changes_nothing(self):
+        """The sanity check on the whole simulation.
+
+        The recorded text came out of ``no_speech_alone``. Replaying that
+        same rule over the same scores has to reproduce it exactly, or the
+        arithmetic is not the arithmetic the meeting ran on.
+        """
+        effect = report.guard_effect(scored_run(), "baseline",
+                                     "no_speech_alone")
         assert effect["recovered"] == []
         assert effect["lost"] == []
         assert effect["changed"] == []

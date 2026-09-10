@@ -350,8 +350,8 @@ def print_guard_rules(run: dict, variant: str, examples: int) -> None:
           f"{scores['median_unsure_logprob']:.2f}) - the low-confidence guard "
           f"refuses these either way")
 
-    effect = guard_effect(run, variant, "whisper")
-    print(f"\nWhisper's own rule against the current one, on the same "
+    effect = guard_effect(run, variant, "current")
+    print(f"\nToday's policy against what this run recorded, on the same "
           f"decodes:")
     print(f"  empty sentences {effect['empty_before']} -> "
           f"{effect['empty_after']}")

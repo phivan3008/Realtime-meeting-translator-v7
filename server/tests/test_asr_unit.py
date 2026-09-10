@@ -139,12 +139,36 @@ def test_clean_speech_is_kept():
     assert len(transcript.kept) == 1
 
 
-def test_a_segment_whisper_thinks_is_silence_is_dropped():
-    """This is the "Thank you for watching" that appears over quiet audio."""
-    invented = Piece(" Thank you for watching!", -0.3, 0.95, 1.4)
+def test_a_segment_whisper_thinks_is_silence_and_decoded_badly_is_dropped():
+    """Both signals, which is faster-whisper's own rule."""
+    invented = Piece(" mumble over a quiet room", -1.4, 0.95, 1.4)
     transcript = make([invented]).transcribe(audio())
     assert transcript.text == ""
     assert transcript.dropped[0][1] == "no speech"
+
+
+def test_a_confident_segment_survives_a_high_no_speech_prob():
+    """The clause that was missing, and what it cost.
+
+    Over thirty minutes of real meeting, no_speech_prob refused 68 segments
+    on its own. All 68 were decoded confidently - median avg_logprob -0.37
+    against a threshold of -1.0 - and 21 of them came from sentences longer
+    than six seconds. Three minutes of speech, deleted, and not one of them
+    would have been refused by the low-confidence guard.
+    """
+    real = Piece(" Về tác 07 thì cũng đang chờ bác Kiryu review.",
+                 -0.37, 0.95, 1.6)
+    transcript = make([real]).transcribe(audio())
+    assert transcript.text == "Về tác 07 thì cũng đang chờ bác Kiryu review."
+    assert transcript.dropped == ()
+
+
+def test_the_english_sign_off_is_refused_by_the_list_now_not_by_luck():
+    """It used to be caught by no_speech_prob. That was never policy."""
+    invented = Piece(" Thank you for watching!", -0.3, 0.95, 1.4)
+    transcript = make([invented]).transcribe(audio())
+    assert transcript.text == ""
+    assert transcript.dropped[0][1] == "known hallucination"
 
 
 def test_a_low_confidence_segment_is_dropped():
@@ -168,7 +192,7 @@ def test_the_good_segments_survive_a_bad_neighbour():
     """One invented segment must not take the real sentence down with it."""
     transcript = make([
         good(" the real sentence "),
-        Piece(" Subscribe to my channel", -0.3, 0.99, 1.3),
+        Piece(" Subscribe to my channel", -1.3, 0.99, 1.3),
     ]).transcribe(audio())
     assert transcript.text == "the real sentence"
     assert len(transcript.kept) == 1
@@ -201,7 +225,7 @@ def test_stats_separate_partials_from_finals():
 
 def test_stats_count_why_segments_were_dropped():
     transcriber = make(
-        [Piece(" a", -0.2, 0.99, 1.5)],
+        [Piece(" a", -1.5, 0.99, 1.5)],
         [Piece(" b", -3.0, 0.1, 1.5)],
     )
     transcriber.transcribe(audio())
@@ -212,7 +236,7 @@ def test_stats_count_why_segments_were_dropped():
 
 
 def test_stats_count_transcripts_that_came_back_empty():
-    transcriber = make([Piece(" x", -0.2, 0.99, 1.5)])
+    transcriber = make([Piece(" x", -1.5, 0.99, 1.5)])
     transcriber.transcribe(audio())
     assert transcriber.stats.empty == 1
 
