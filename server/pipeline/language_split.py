@@ -14,22 +14,36 @@ The Vietnamese that was really said is gone, and so is the Japanese.  Nothing
 downstream can recover either, because the audio only gets decoded once.
 
 So the question is asked of the audio directly, and it is a question the LID
-is good at: probe the start, probe the end, and only a *confident*
-disagreement is worth acting on.  Same language, or either end undecided, and
-the utterance is left alone - two probes, about 6 ms each, on the ordinary
-case.
+is good at: probe near the start, probe near the end, and only a *confident*
+disagreement is worth acting on.  Same language, either end undecided, or
+either end decided without much margin, and the utterance is left alone - two
+probes, about 6 ms each, on the ordinary case.
+
+**Near** the start and the end, not at them.  The first ``VAD_SPEECH_PAD_MS``
+of an utterance is pre-roll kept for the word onset and the last
+``VAD_MIN_SILENCE_MS`` is hangover, so the outermost second is the least
+representative audio there is.  A first version probed exactly that, and over
+one real meeting 26 of the 41 splits a viewer could see gave both halves the
+same language afterwards - the probes had been wrong about audio the whole
+halves agree on.
+
+Which is why a cut is reviewed before it is taken.  The two halves that would
+actually be emitted are probed in full, and unless *they* confidently
+disagree the utterance is left whole.  Two more probes, and they are the ones
+that decide.
 
 Where the cut lands matters as much as whether to cut.  Whisper turns half a
-word into a different word, so the boundary the search returns is snapped to
-the quietest 32 ms frame near it.
+word into a different word, so the boundary is placed on the quietest 32 ms
+frame inside the range the search narrowed it to.
 
 And a fragment too short to transcribe is not left empty - Whisper fills it
-in.  That is not a hypothetical: an earlier version of this search reported a
-boundary a few hundred milliseconds from the start, the quiet-frame snap took
-another 500 ms off it, and the second half came back as a YouTube subscribe
-line 31 ms after the first half was committed.  Two floors guard it now: the
-search never starts closer than one probe to either end, and a boundary the
-snap pulls under the floor is refused rather than used.
+in.  That is not a hypothetical.  An earlier version reported a boundary a few
+hundred milliseconds from the start and the half that was left came back as a
+YouTube subscribe line 31 ms after the first was committed; a later one, with
+its floor at 800 ms, produced "All right, they will." where the audio said
+"bending the material".  So: the search never starts closer than one probe
+plus the edge inset to either end, no half under
+``LANGUAGE_SPLIT_MIN_PART_MS`` is returned, and the review has the last word.
 """
 
 from __future__ import annotations
@@ -39,7 +53,9 @@ from dataclasses import dataclass
 from typing import Optional, Protocol
 
 from server.config import (
+    LANGUAGE_SPLIT_EDGE_MS,
     LANGUAGE_SPLIT_MAX_STEPS,
+    LANGUAGE_SPLIT_MIN_MARGIN,
     LANGUAGE_SPLIT_MIN_PART_MS,
     LANGUAGE_SPLIT_PROBE_MS,
     LANGUAGE_SPLIT_SNAP_MS,
@@ -72,6 +88,17 @@ class Split:
         return bytes_to_ms(self.at)
 
 
+def _confident(decision, margin: float) -> bool:
+    """Whether a probe is sure enough to be worth cutting on.
+
+    ``known`` alone is the bar for forcing a language on the ASR, which is a
+    reversible sort of wrong - the words come out in the wrong script and a
+    person can see it. Cutting is not reversible: it manufactures a second
+    utterance, and a fragment does not come back empty from Whisper.
+    """
+    return decision.known and decision.margin >= margin
+
+
 def find_split(
     pcm: bytes,
     prober: Prober,
@@ -79,6 +106,8 @@ def find_split(
     min_part_ms: float = LANGUAGE_SPLIT_MIN_PART_MS,
     snap_ms: float = LANGUAGE_SPLIT_SNAP_MS,
     max_steps: int = LANGUAGE_SPLIT_MAX_STEPS,
+    edge_ms: float = LANGUAGE_SPLIT_EDGE_MS,
+    min_margin: float = LANGUAGE_SPLIT_MIN_MARGIN,
 ) -> Optional[Split]:
     """Where this utterance changes language, or None to leave it whole.
 
@@ -87,18 +116,23 @@ def find_split(
     """
     probe = ms_to_bytes(probe_ms)
     floor = ms_to_bytes(min_part_ms)
-    if len(pcm) < 2 * max(probe, floor):
+    edge = ms_to_bytes(edge_ms)
+    if len(pcm) < 2 * (probe + edge) or len(pcm) < 2 * floor:
         # Too short to hold two turns, and too short to probe both ends
         # without the windows overlapping - which would compare a span with
         # itself.
         return None
 
+    # Inset from both ends. The first VAD_SPEECH_PAD_MS is pre-roll and the
+    # last VAD_MIN_SILENCE_MS is hangover, so the outermost second is the
+    # least representative audio in the utterance - and it was what the first
+    # version of this probed.
     probes = 2
-    first = prober.identify(pcm[:probe])
-    second = prober.identify(pcm[-probe:])
-    if not first.known or not second.known:
-        # The LID says it cannot tell. That is not evidence of one language
-        # and it is certainly not evidence of two.
+    first = prober.identify(pcm[edge:edge + probe])
+    second = prober.identify(pcm[len(pcm) - edge - probe:len(pcm) - edge])
+    if not _confident(first, min_margin) or not _confident(second, min_margin):
+        # The LID says it cannot tell, or cannot tell firmly enough. Neither
+        # is evidence of two languages.
         return None
     if first.lang_code == second.lang_code:
         return None
@@ -107,7 +141,7 @@ def find_split(
     # language the audio just before the midpoint is in, which is the
     # question a boundary search can actually answer: a window straddling the
     # change reads as the language it ends in.
-    low, high = probe, len(pcm) - probe
+    low, high = edge + probe, len(pcm) - edge - probe
     for _step in range(max_steps):
         if high - low <= probe:
             break
@@ -123,8 +157,13 @@ def find_split(
         else:
             break                       # a third language; stop guessing
 
-    boundary = _on_sample(low + (high - low) // 2)
-    at = quietest_split_point(pcm, boundary, ms_to_bytes(snap_ms))
+    # Cut on the quietest frame inside what the search narrowed it to, not
+    # within a fixed window of the midpoint. Three halvings of a five-second
+    # utterance leave about 600 ms of uncertainty, and looking back only
+    # 200 ms from the middle of that cannot reach the pause between the two
+    # turns - it lands inside the second one, through a word.
+    search = max(high - low, ms_to_bytes(snap_ms))
+    at = quietest_split_point(pcm, high, search)
 
     if at < floor or len(pcm) - at < floor:
         # The snap pulled the cut under the floor, or the search landed there
@@ -135,7 +174,24 @@ def find_split(
                   first.lang_code, second.lang_code)
         return None
 
-    return Split(at=at, first=first.lang_code, second=second.lang_code,
+    # Verify on the halves that would actually be emitted, rather than on two
+    # one-second windows that may have been the only parts in disagreement.
+    # This is the check that was missing: over a real meeting, 26 of 41
+    # visible splits gave both halves the same language afterwards, which is
+    # the screening probes having been wrong about audio the whole halves
+    # agree on.
+    probes += 2
+    head = prober.identify(pcm[:at])
+    tail = prober.identify(pcm[at:])
+    if (not _confident(head, min_margin) or not _confident(tail, min_margin)
+            or head.lang_code == tail.lang_code):
+        log.debug("Language split refused on review: %s/%s across the probes "
+                  "but %s/%s across the halves",
+                  first.lang_code, second.lang_code,
+                  head.lang_code or "?", tail.lang_code or "?")
+        return None
+
+    return Split(at=at, first=head.lang_code, second=tail.lang_code,
                  probes=probes)
 
 

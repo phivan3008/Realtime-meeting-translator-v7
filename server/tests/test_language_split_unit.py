@@ -22,7 +22,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from server.config import SAMPLE_RATE, SAMPLE_WIDTH  # noqa: E402
+from server.config import (  # noqa: E402
+    LANGUAGE_SPLIT_MIN_PART_MS,
+    SAMPLE_RATE,
+    SAMPLE_WIDTH,
+)
 from server.pipeline.buffer import bytes_to_ms, ms_to_bytes  # noqa: E402
 from server.pipeline.language_split import find_split  # noqa: E402
 from server.pipeline.lid import LanguageDecision  # noqa: E402
@@ -167,24 +171,55 @@ class TestTheSliverGuard:
             split = find_split(pcm, TimedProber("vi", "ja"))
             if split is None:
                 continue
-            assert bytes_to_ms(split.at) >= 800.0
-            assert bytes_to_ms(len(pcm) - split.at) >= 800.0
+            assert bytes_to_ms(split.at) >= LANGUAGE_SPLIT_MIN_PART_MS
+            assert bytes_to_ms(len(pcm) - split.at) >= LANGUAGE_SPLIT_MIN_PART_MS
+
+
+class TestReview:
+    """The check that was missing, and what it cost to leave out.
+
+    Over one real meeting the screening probes disagreed and the two halves
+    then came back in the same language 26 times out of 41 - the probes had
+    been wrong about audio the whole halves agree on, and every one of those
+    cuts manufactured a fragment for nothing.
+    """
+
+    def test_a_cut_whose_halves_agree_is_refused(self):
+        prober = FixedProber(decided("vi"), decided("ja"), decided("ja"),
+                             decided("vi"), decided("vi"))
+        assert find_split(audio(8.0), prober) is None
+
+    def test_a_cut_whose_halves_are_not_confident_is_refused(self):
+        prober = FixedProber(decided("vi"), decided("ja"), decided("ja"),
+                             UNDECIDED, UNDECIDED)
+        assert find_split(audio(8.0), prober) is None
+
+    def test_the_languages_reported_are_the_halves_own(self):
+        """Not the screening probes'. The halves are what gets decoded."""
+        split = find_split(two_turns(3.0, 3.0), TimedProber("vi", "ja"))
+        assert (split.first, split.second) == ("vi", "ja")
+
+    def test_a_low_margin_is_not_enough_to_cut_on(self):
+        """`known` is the bar for forcing a language, which a person can see
+        is wrong. Cutting is not reversible."""
+        weak = LanguageDecision("vi", 0.6, 0.31, "close")
+        other = LanguageDecision("ja", 0.6, 0.31, "close")
+        assert find_split(audio(6.0), FixedProber(weak, other)) is None
 
 
 class TestOddAnswers:
     def test_a_third_language_stops_the_search_rather_than_guessing(self):
         prober = FixedProber(decided("vi"), decided("ja"), decided("ko"))
         split = find_split(audio(6.0), prober)
-        # It may still cut on the head/tail disagreement, but it must not
-        # have kept probing after an answer it cannot place.
-        assert prober.calls <= 3
-        if split is not None:
-            assert (split.first, split.second) == ("vi", "ja")
+        # Two screening probes, one search probe that cannot be placed, then
+        # the two review probes - and the review settles it.
+        assert prober.calls == 5
+        assert split is None
 
     def test_an_undecided_probe_mid_search_stops_it(self):
         prober = FixedProber(decided("vi"), decided("ja"), UNDECIDED)
         find_split(audio(6.0), prober)
-        assert prober.calls == 3
+        assert prober.calls == 5
 
     def test_a_custom_floor_is_honoured(self):
         pcm = two_turns(3.0, 3.0)
