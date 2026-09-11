@@ -54,6 +54,7 @@ import numpy as np
 
 from server.config import (
     ASR_BEAM_SIZE_FINAL,
+    ASR_PROMPT_ON_PARTIALS,
     ASR_BEAM_SIZE_PARTIAL,
     ASR_CACHE_DIR,
     ASR_COMPUTE_TYPE,
@@ -68,6 +69,7 @@ from server.config import (
     SAMPLE_RATE,
     SAMPLE_WIDTH,
 )
+from server.pipeline.vocabulary import load_prompt
 
 log = logging.getLogger(__name__)
 
@@ -167,8 +169,8 @@ def normalise_for_match(text: str) -> str:
 class Decoder(Protocol):
     """What :class:`Transcriber` needs; a stub satisfies it in the tests."""
 
-    def decode(self, samples: np.ndarray, lang_code: str,
-               beam_size: int) -> tuple[list[Piece], str]:
+    def decode(self, samples: np.ndarray, lang_code: str, beam_size: int,
+               prompt: Optional[str] = None) -> tuple[list[Piece], str]:
         ...                                         # pragma: no cover
 
 
@@ -186,8 +188,16 @@ class Transcriber:
         max_compression_ratio: float = ASR_MAX_COMPRESSION_RATIO,
         hallucinations: Iterable[str] = ASR_HALLUCINATIONS,
         hallucination_patterns: Iterable[str] = ASR_HALLUCINATION_PATTERNS,
+        prompt: Optional[str] = None,
     ) -> None:
         self.decoder = decoder if decoder is not None else WhisperDecoder()
+        # The meeting's own words. See server/data/vocabulary.txt: it tilts
+        # the model where it is undecided, and it is not free - a non-empty
+        # prompt makes Whisper fill near-silence rather than leave it, which
+        # is why the running text does not get one.
+        # `or None` is the invariant, not tidiness: an empty prompt is not
+        # the absence of one. Whisper treats "" as a prompt it was given.
+        self.prompt = (prompt if prompt is not None else load_prompt()) or None
         self.no_speech_threshold = no_speech_threshold
         self.log_prob_threshold = log_prob_threshold
         self.max_compression_ratio = max_compression_ratio
@@ -210,7 +220,8 @@ class Transcriber:
 
         samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
         beam = ASR_BEAM_SIZE_FINAL if is_final else ASR_BEAM_SIZE_PARTIAL
-        pieces, detected = self.decoder.decode(samples, lang_code, beam)
+        prompt = self.prompt if (is_final or ASR_PROMPT_ON_PARTIALS) else None
+        pieces, detected = self.decoder.decode(samples, lang_code, beam, prompt)
 
         kept, dropped = [], []
         for piece in pieces:
@@ -329,12 +340,16 @@ class WhisperDecoder:
         self.decode(np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32),
                     "", ASR_BEAM_SIZE_PARTIAL)
 
-    def decode(self, samples: np.ndarray, lang_code: str,
-               beam_size: int) -> tuple[list[Piece], str]:
+    def decode(self, samples: np.ndarray, lang_code: str, beam_size: int,
+               prompt: Optional[str] = None) -> tuple[list[Piece], str]:
         segments, info = self._model.transcribe(
             samples,
             language=lang_code or None,
             beam_size=beam_size,
+            # None, not "". An empty string is itself a prompt as far as
+            # Whisper is concerned, and passing one is not the same as
+            # passing nothing.
+            initial_prompt=prompt or None,
             condition_on_previous_text=ASR_CONDITION_ON_PREVIOUS,
             no_speech_threshold=ASR_NO_SPEECH_THRESHOLD,
             log_prob_threshold=ASR_LOG_PROB_THRESHOLD,

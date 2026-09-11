@@ -490,7 +490,8 @@ class StubDecoder:
         self.lang = lang
         self.calls: list[tuple[int, str, bool]] = []
 
-    def decode(self, samples, lang_code: str = "", beam_size: int = 1):
+    def decode(self, samples, lang_code: str = "", beam_size: int = 1,
+               prompt=None):
         self.calls.append((len(samples), lang_code, beam_size))
         from server.pipeline.asr import Piece
         piece = Piece(text=self.text, no_speech_prob=0.01,
@@ -784,7 +785,8 @@ class SlowDecoder(StubDecoder):
         super().__init__(**kwargs)
         self.seconds = seconds
 
-    def decode(self, samples, lang_code: str = "", beam_size: int = 1):
+    def decode(self, samples, lang_code: str = "", beam_size: int = 1,
+               prompt=None):
         time.sleep(self.seconds)
         return super().decode(samples, lang_code, beam_size)
 

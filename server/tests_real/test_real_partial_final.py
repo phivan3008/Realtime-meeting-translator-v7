@@ -229,8 +229,9 @@ class RecordingDecoder:
     def source(self) -> str:
         return getattr(self.inner, "source", "unknown decoder")
 
-    def decode(self, samples, lang_code, beam_size):
-        pieces, detected = self.inner.decode(samples, lang_code, beam_size)
+    def decode(self, samples, lang_code, beam_size, prompt=None):
+        pieces, detected = self.inner.decode(samples, lang_code, beam_size,
+                                             prompt)
         self.last = list(pieces)
         return pieces, detected
 

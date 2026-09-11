@@ -48,7 +48,7 @@ class _NoDecoder:
 
     source = "no decoder - guards only"
 
-    def decode(self, samples, lang_code, beam_size):    # pragma: no cover
+    def decode(self, samples, lang_code, beam_size, prompt=None):    # pragma: no cover
         raise RuntimeError("the guard simulation never decodes")
 
 

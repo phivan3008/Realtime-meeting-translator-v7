@@ -1,0 +1,58 @@
+# Words this meeting uses that Whisper gets wrong.
+#
+# This becomes Whisper's initial_prompt. It does not force anything - it tilts
+# the model where it is already undecided between two readings of the same
+# sound. Which is exactly the case being fixed here: the running text hears
+# "solution" and the committed sentence, decoding the same audio again over a
+# longer window, writes "sau lưu sinh".
+#
+# TWO RULES, AND BOTH HAVE BEEN PAID FOR.
+#
+# 1. Add a word only after seeing it come out wrong in a transcript, and write
+#    what it came out as. A list seeded with thirty plausible guesses - Zoom,
+#    Teams, GitHub, Jira, Redmine - made inventions rise sharply on the run
+#    that tried it. None of those thirty had ever appeared wrong.
+#
+# 2. Keep it short. A non-empty prompt makes Whisper fill near-silence rather
+#    than leave it, which is the failure this project has spent the most time
+#    on. The list is capped at ASR_PROMPT_MAX_CHARS and Whisper only reads the
+#    start of it anyway, so a long list is not a thorough list - it is a list
+#    whose end is ignored and whose presence costs something.
+#
+# An empty file means no prompt at all. That is not the same as an empty
+# prompt: "" is itself a prompt as far as Whisper is concerned.
+#
+# Annotations go on their own line, above the term. A comment after a term on
+# the same line is stripped, but the habit is worth keeping: it is how a term
+# ends up reaching Whisper with its own annotation attached.
+
+# --- Terms seen going wrong, with what they were heard as -------------------
+
+# sau lưu sinh, sau lưu tình
+solution
+# vốn lượng
+dung lượng
+# kiếm kiếm, đi kiếm tiếp
+kiểm chứng
+# quen
+review
+# bờ lên
+plan
+# M5.2, VLM5.2
+GLM5.2
+# quạt nắp, quạt lắc
+Slack
+# tem lắc, đem lắc
+template
+# x2x23, i2x23
+X203
+
+# --- Names and project codes ------------------------------------------------
+# Whisper cannot guess these, and they are the part only the people in the
+# meeting can fill in. Add them as they come up.
+
+Miyake
+Miyachi
+Yamaguchi
+Kiryu
+Takahashi

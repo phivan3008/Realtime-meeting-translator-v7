@@ -526,6 +526,34 @@ ASR_HALLUCINATION_PATTERNS = (
 # so it is decoded alone.
 ASR_CONDITION_ON_PREVIOUS = False
 
+# --- 7b. The meeting's own vocabulary ---------------------------------------
+# server/data/vocabulary.txt becomes Whisper's initial_prompt. It tilts the
+# model where it is undecided between two readings of one sound, which is the
+# case that needs fixing: the running text hears "solution" and the committed
+# sentence, decoding the same audio again, writes "sau lưu sinh". Measured on
+# the same meeting, a version carrying this list read "solution" and "dung
+# lượng" correctly where the version without it did not.
+
+#: Where the list lives. Editable without touching code, which is the point -
+#: the most valuable part of it is people's names, and only the people in the
+#: meeting can fill those in.
+VOCABULARY_PATH = os.path.join(os.path.dirname(__file__), "data",
+                               "vocabulary.txt")
+
+#: How much of it reaches Whisper. A non-empty prompt makes Whisper fill
+#: near-silence rather than leave it, so the list costs something merely by
+#: existing, and Whisper reads only the start of it in any case. Two hundred
+#: characters is about thirty terms - enough for the names and the handful of
+#: words a transcript has actually shown going wrong.
+ASR_PROMPT_MAX_CHARS = 200
+
+#: The running text does not get the prompt. It is decoded six times more
+#: often than a committed sentence, so it would multiply the one cost the
+#: prompt has - and it is not where the fault is: the running text already
+#: reads "solution" correctly on the audio the sentence gets wrong. Turn it
+#: on to measure the other arrangement.
+ASR_PROMPT_ON_PARTIALS = False
+
 # --- 8. Translation (DESIGN.md section 3.8) ---------------------------------
 # vLLM runs as its own process behind its OpenAI-compatible API, and this
 # talks to it over HTTP rather than importing it.

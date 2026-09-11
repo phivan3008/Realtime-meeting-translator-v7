@@ -41,7 +41,7 @@ class StubDecoder:
         self.rounds = list(rounds) or [[]]
         self.calls: list[dict] = []
 
-    def decode(self, samples, lang_code, beam_size):
+    def decode(self, samples, lang_code, beam_size, prompt=None):
         self.calls.append({"samples": samples, "lang_code": lang_code,
                            "beam_size": beam_size})
         pieces = self.rounds[min(len(self.calls) - 1, len(self.rounds) - 1)]
@@ -510,3 +510,42 @@ def test_these_were_only_caught_by_luck_before():
             "c\u1ee7a m\u00ecnh nh\u00e9.")
     kept = make([confident(line)], hallucination_patterns=())
     assert kept.transcribe(audio()).text == line
+
+
+class TestTheVocabularyPrompt:
+    """The meeting's own words reach the committed sentence, and only it.
+
+    The running text is decoded six times more often, so giving it the prompt
+    would multiply the one cost a prompt has - Whisper fills near-silence
+    rather than leaving it when a prompt is present. And it is not where the
+    fault is: the running text already reads "solution" on the audio the
+    sentence turns into "sau lưu sinh".
+    """
+
+    class Recorder:
+        source = "stub decoder"
+
+        def __init__(self):
+            self.prompts: list = []
+
+        def decode(self, samples, lang_code="", beam_size=1, prompt=None):
+            self.prompts.append(prompt)
+            return [Piece(" xin chào", -0.2, 0.05, 1.5)], "vi"
+
+    def test_a_committed_sentence_carries_the_prompt(self):
+        decoder = self.Recorder()
+        Transcriber(decoder=decoder, prompt="solution, Slack").transcribe(
+            audio(), is_final=True)
+        assert decoder.prompts == ["solution, Slack"]
+
+    def test_the_running_text_does_not(self):
+        decoder = self.Recorder()
+        Transcriber(decoder=decoder, prompt="solution, Slack").transcribe(
+            audio(), is_final=False)
+        assert decoder.prompts == [None]
+
+    def test_no_vocabulary_means_no_prompt_rather_than_an_empty_one(self):
+        decoder = self.Recorder()
+        Transcriber(decoder=decoder, prompt="").transcribe(audio(),
+                                                           is_final=True)
+        assert decoder.prompts == [None]

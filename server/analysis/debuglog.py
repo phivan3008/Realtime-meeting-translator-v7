@@ -25,6 +25,7 @@ from typing import Optional
 from collections import Counter
 
 from server.analysis.drift import compare, immediate_repeats
+from server.analysis.guards import near_miss
 from server.pipeline.asr import normalise_for_pattern
 
 #: ``10:44:01.360     13.1s  final       #1 Speaker_01 [vi] Các thông tin ...``
@@ -186,6 +187,12 @@ def measure(run: Run) -> dict:
               for final in finals if final.last_partial]
     rewrites = sorted(drift.rewrite for drift in drifts)
 
+    # The cost side of the vocabulary prompt, and of anything else that
+    # makes Whisper readier to write. A committed sentence that reads like a
+    # line already on the block list, with words changed, is what a prompt
+    # produces over near-silence.
+    sign_offs = [final for final in finals if near_miss(final.text)]
+
     disagreed = [final for final in finals if final.language_disagrees]
     far_and_disagreed = [
         final for final in disagreed
@@ -203,6 +210,7 @@ def measure(run: Run) -> dict:
         "with_repeats": len(repeated),
         "repeat_total": sum(immediate_repeats(final.text) for final in finals),
         "refused_translations": sum(1 for final in finals if final.refused),
+        "near_block_list": len(sign_offs),
         "compared": len(drifts),
         "mean_rewrite": (sum(rewrites) / len(rewrites)) if rewrites else 0.0,
         "identical_to_partial": sum(1 for value in rewrites if value == 0.0),

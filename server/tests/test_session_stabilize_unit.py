@@ -63,7 +63,8 @@ class ScriptedDecoder:
         self.retry, self.retry_lang = retry, retry_lang
         self.calls: list = []
 
-    def decode(self, samples, lang_code: str = "", beam_size: int = 1):
+    def decode(self, samples, lang_code: str = "", beam_size: int = 1,
+               prompt=None):
         self.calls.append({"lang_code": lang_code, "beam": beam_size})
         if beam_size == 1:
             text, lang = self.partial, self.partial_lang

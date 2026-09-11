@@ -80,7 +80,7 @@ class StubDecoder:
     def __init__(self):
         self.calls: list[dict] = []
 
-    def decode(self, samples, lang_code, beam_size):
+    def decode(self, samples, lang_code, beam_size, prompt=None):
         self.calls.append({"lang_code": lang_code, "beam_size": beam_size,
                            "samples": int(samples.size)})
         if beam_size == 1:
@@ -433,7 +433,7 @@ def test_a_refused_segment_records_the_reason_it_was_refused(tmp_path,
 
         source = "stub"
 
-        def decode(self, samples, lang_code, beam_size):
+        def decode(self, samples, lang_code, beam_size, prompt=None):
             return [Piece(" mumble over a quiet room", -1.4, 0.95, 1.3)], "vi"
 
     recorder = harness.RecordingDecoder(Silent())
@@ -451,7 +451,7 @@ def test_the_recording_decoder_keeps_the_order_the_model_returned():
     class TwoPieces:
         source = "stub"
 
-        def decode(self, samples, lang_code, beam_size):
+        def decode(self, samples, lang_code, beam_size, prompt=None):
             return ([Piece(" một", -0.2, 0.05, 1.6),
                      Piece(" hai", -0.2, 0.05, 1.6)], "vi")
 

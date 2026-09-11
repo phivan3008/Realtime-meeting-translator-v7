@@ -65,7 +65,7 @@ class StubDecoder:
         self.invent_on_silence = invent_on_silence
         self.calls: list[dict] = []
 
-    def decode(self, samples, lang_code, beam_size):
+    def decode(self, samples, lang_code, beam_size, prompt=None):
         self.calls.append({"lang_code": lang_code, "beam_size": beam_size})
         loud = float(np.max(np.abs(samples))) if samples.size else 0.0
         if loud < 0.01:
@@ -278,7 +278,7 @@ class UnlistedInvention:
 
     source = "stub decoder"
 
-    def decode(self, samples, lang_code, beam_size):
+    def decode(self, samples, lang_code, beam_size, prompt=None):
         loud = float(np.max(np.abs(samples))) if samples.size else 0.0
         if loud < 0.01:
             return [Piece(" Buổi họp hôm nay xin được kết thúc tại đây.",
