@@ -213,27 +213,80 @@ def measure(run: Run) -> dict:
     }
 
 
-def same_meeting(left: Run, right: Run, window: float = 8.0,
-                 sample: int = 12) -> dict:
-    """Whether two runs are even comparable, and how well they line up.
+def rare_words(run: Run, shortest: int = 4, most: int = 1) -> dict:
+    """Words a run said exactly once, and when it said them.
+
+    Common words are useless for lining two runs up - "this" happens
+    everywhere - and so is a word that appears thirty times. What locates a
+    moment is a term used once, and *once* is the point: a word said twice
+    offers two timestamps and votes for two offsets, which lets one word
+    support several answers at the same time. Restricted to one occurrence, a
+    shared word casts exactly one vote and the histogram means what it looks
+    like it means.
+
+    Japanese has no spaces, so there the unit is a four-character run, which
+    survives being resegmented.
+    """
+    when: dict = {}
+    for final in run.finals:
+        spoken = normalise_for_pattern(final.text)
+        tokens = [word for word in spoken.split() if len(word) >= shortest]
+        dense = spoken.replace(" ", "")
+        if is_cjk(dense):
+            tokens += [dense[index:index + shortest]
+                       for index in range(max(len(dense) - shortest + 1, 0))]
+        for token in set(tokens):
+            when.setdefault(token, []).append(final.at)
+    return {word: times for word, times in when.items() if len(times) <= most}
+
+
+def align(left: Run, right: Run, tolerance: float = 4.0,
+          share: float = 0.30, votes: int = 15) -> dict:
+    """Line two runs up in time, and say how well they line up.
+
+    Two runs of the same recording say the same things in the same order,
+    offset by however long after the start the capture began. Two runs of
+    different meetings by the same team share most of their vocabulary - the
+    jargon, the names, the function words - and line up at no offset at all.
+    So the test is agreement on *when*, not on *what*: each rare word both
+    runs said votes for the offset that would put its two timestamps
+    together, and a real pairing puts most of the votes in one bin.
+
+    An earlier version matched sentences inside a fixed time window, which
+    fell apart the first time a change moved the sentence boundaries - the
+    language split dropped it to three matches of eleven and it called two
+    runs of one meeting different recordings. The version after that compared
+    vocabularies as sets, and called two genuinely different meetings the
+    same because both were this team talking about this project.
+    """
+    mine, theirs = rare_words(left), rare_words(right)
+    shared = set(mine) & set(theirs)
+    if not shared:
+        return {"offset": 0.0, "votes": 0, "shared": 0, "share": 0.0,
+                "same": False}
+
+    ballot: dict = {}
+    for word in shared:
+        offset = theirs[word][0] - mine[word][0]
+        ballot.setdefault(round(offset / tolerance), set()).add(word)
+
+    best = max(ballot, key=lambda box: len(ballot[box]))
+    agreed = len(ballot[best])
+    found = agreed / len(shared)
+    return {
+        "offset": best * tolerance,
+        "votes": agreed,
+        "shared": len(shared),
+        "share": found,
+        "same": found >= share and agreed >= votes,
+    }
+
+
+def same_meeting(left: Run, right: Run, **options) -> dict:
+    """Whether two runs are even comparable.
 
     Comparing two different recordings sentence by sentence produces a page
     of differences that mean nothing at all, so this is checked before
-    anything else is measured. The test is content, not timing: sentences
-    near the same moment should share words if they are the same meeting.
+    anything else is measured.
     """
-    hits, checked = 0, 0
-    for final in left.finals[:sample]:
-        words = {word for word in normalise_for_pattern(final.text).split()
-                 if len(word) > 2}
-        if not words:
-            continue
-        checked += 1
-        near = [other for other in right.finals
-                if abs(other.at - final.at) <= window]
-        if any(words & set(normalise_for_pattern(other.text).split())
-               for other in near):
-            hits += 1
-    share = hits / checked if checked else 0.0
-    return {"checked": checked, "matched": hits, "share": share,
-            "same": share >= 0.4}
+    return align(left, right, **options)

@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from server.analysis import debuglog  # noqa: E402
 
+NEWLINE = chr(10)
+
 LOG = """\
 00:37:57.390      0.0s  start       session=?
 00:37:59.027      1.6s  status      Đã kết nối · phiên 42206da278b7
@@ -158,49 +160,94 @@ class TestMeasure:
         assert measured["repeat_total"] == 1
 
 
-class TestSameMeeting:
-    """The check that has to come before every other number.
+class TestAlign:
+    """Lining two runs up, and the two ways the earlier versions got it wrong.
 
-    Two runs of different recordings produce a page of differences that mean
-    nothing, and the mistake is easy to make when the files are named by the
-    day they were captured.
+    The first matched sentences inside a time window, and fell apart the
+    first time a change moved the sentence boundaries. The second compared
+    vocabularies as sets, and called two meetings the same because both were
+    one team talking about one project. This votes on the offset: each word
+    both runs said exactly once puts its two timestamps together and names
+    the offset that would do it, and a real pairing puts the votes in one
+    bin.
     """
 
     def write(self, tmp_path, name, sentences):
         path = tmp_path / name
-        lines = []
-        for index, (at, text) in enumerate(sentences, start=1):
-            lines.append(f"00:00:00.000 {at:9.1f}s  final       "
-                         f"#{index} Speaker_01 [vi] {text}")
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        lines = [f"00:00:00.000 {at:9.1f}s  final       "
+                 f"#{index} Speaker_01 [vi] {text}"
+                 for index, (at, text) in enumerate(sentences, start=1)]
+        path.write_text(NEWLINE.join(lines) + NEWLINE,
+                        encoding="utf-8")
         return debuglog.parse(path)
 
-    def test_the_same_meeting_is_recognised_through_different_wording(
-            self, tmp_path):
-        left = self.write(tmp_path, "a.txt", [
-            (10.0, "cung cấp thông tin về các training"),
-            (20.0, "mình đang thực hiện test số 5"),
-        ])
-        right = self.write(tmp_path, "b.txt", [
-            (11.0, "cung cấp thông tin về các trang trình"),
-            (21.0, "hiện tại mình đang thực hiện test 05"),
-        ])
-        verdict = debuglog.same_meeting(left, right)
-        assert verdict["same"]
+    def meeting(self, count: int = 60, start: float = 10.0):
+        """A meeting of distinct sentences, one distinctive word each."""
+        return [(start + index * 7.0, f"phần việc soantu{index:03d} đã xong")
+                for index in range(count)]
 
-    def test_two_different_meetings_are_refused(self, tmp_path):
-        left = self.write(tmp_path, "a.txt", [
-            (10.0, "cung cấp thông tin về các training"),
-            (20.0, "mình đang thực hiện test số 5"),
-        ])
+    def test_the_same_meeting_captured_later_is_recognised(self, tmp_path):
+        """What a second capture of one recording looks like: the same words
+        in the same order, every timestamp shifted by the same amount."""
+        left = self.write(tmp_path, "a.txt", self.meeting())
+        right = self.write(tmp_path, "b.txt",
+                           [(at + 44.0, text) for at, text in self.meeting()])
+        verdict = debuglog.align(left, right)
+        assert verdict["same"]
+        assert verdict["offset"] == pytest.approx(44.0, abs=4.0)
+
+    def test_wording_that_changed_does_not_break_the_alignment(self, tmp_path):
+        """Two decodes of one recording disagree about plenty of words. What
+        they agree on is when the rest of them were said."""
+        left = self.write(tmp_path, "a.txt", self.meeting())
+        scrambled = [(at, text if index % 3 else "hoàn toàn khác biệt hẳn")
+                     for index, (at, text) in enumerate(self.meeting())]
+        right = self.write(tmp_path, "b.txt", scrambled)
+        assert debuglog.align(left, right)["same"]
+
+    def test_two_meetings_sharing_a_vocabulary_are_not_the_same_meeting(
+            self, tmp_path):
+        """The failure of comparing vocabularies as sets. Same team, same
+        project, same jargon - said at unrelated moments."""
+        import random
+        words = self.meeting()
+        left = self.write(tmp_path, "a.txt", words)
+        shuffled = [text for _at, text in words]
+        random.Random(7).shuffle(shuffled)
+        right = self.write(tmp_path, "b.txt",
+                           [(at, text) for (at, _), text
+                            in zip(words, shuffled)])
+        assert not debuglog.align(left, right)["same"]
+
+    def test_two_runs_with_nothing_in_common_are_not_the_same(self, tmp_path):
+        left = self.write(tmp_path, "a.txt", self.meeting())
         right = self.write(tmp_path, "b.txt", [
-            (10.0, "vẫn đang bending cho Valkyrie"),
-            (20.0, "nguyên nhân là biết rồi bác cũng nắm"),
-        ])
-        verdict = debuglog.same_meeting(left, right)
-        assert not verdict["same"]
+            (10.0 + index * 7.0, f"chuyện khác nusotu{index:03d} rồi đấy")
+            for index in range(60)])
+        assert not debuglog.align(left, right)["same"]
 
     def test_an_empty_run_is_not_claimed_to_match(self, tmp_path):
-        left = self.write(tmp_path, "a.txt", [(10.0, "cung cấp thông tin")])
+        left = self.write(tmp_path, "a.txt", self.meeting())
         right = self.write(tmp_path, "b.txt", [])
-        assert not debuglog.same_meeting(left, right)["same"]
+        verdict = debuglog.align(left, right)
+        assert not verdict["same"]
+        assert verdict["shared"] == 0
+
+    def test_a_word_said_twice_casts_no_vote(self, tmp_path):
+        """It offers two timestamps, so it can support two answers at once -
+        which is how an earlier version reported 0.9 agreement between two
+        unrelated meetings."""
+        run = self.write(tmp_path, "a.txt", [
+            (10.0, "chỉ nói soantu001 một lần"),
+            (20.0, "nhắc lại soantu002 lần nữa"),
+            (30.0, "nhắc lại soantu002 lần nữa"),
+        ])
+        rare = debuglog.rare_words(run)
+        assert "soantu001" in rare
+        assert "soantu002" not in rare
+
+    def test_same_meeting_is_the_same_check(self, tmp_path):
+        left = self.write(tmp_path, "a.txt", self.meeting())
+        right = self.write(tmp_path, "b.txt",
+                           [(at + 44.0, text) for at, text in self.meeting()])
+        assert debuglog.same_meeting(left, right) == debuglog.align(left, right)
