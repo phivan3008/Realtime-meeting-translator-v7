@@ -225,3 +225,50 @@ class TestOddAnswers:
         pcm = two_turns(3.0, 3.0)
         assert find_split(pcm, TimedProber("vi", "ja"),
                           min_part_ms=4_000.0) is None
+
+
+class TestTheHangover:
+    """The last half second of every utterance is silence by construction.
+
+    The VAD keeps forwarding audio through its whole hangover, so a tail of
+    N milliseconds holds N minus VAD_MIN_SILENCE_MS of speech at most. Three
+    of the nine splits left after the review was added put "ありがとうございました"
+    or "Alright, they will" in that tail - Whisper filling a fragment that was
+    mostly quiet.
+    """
+
+    def test_the_floor_on_the_right_is_the_larger_one(self):
+        from server.config import VAD_MIN_SILENCE_MS
+        pcm = two_turns(6.0, 1.4, gap_ms=60.0)
+        assert find_split(pcm, TimedProber("vi", "ja")) is None
+        # The same tail, long enough once the hangover is paid for.
+        longer = two_turns(6.0, (LANGUAGE_SPLIT_MIN_PART_MS
+                                 + VAD_MIN_SILENCE_MS) / 1000.0 + 0.5,
+                           gap_ms=60.0)
+        split = find_split(longer, TimedProber("vi", "ja"))
+        if split is not None:
+            assert bytes_to_ms(len(longer) - split.at) >= (
+                LANGUAGE_SPLIT_MIN_PART_MS + VAD_MIN_SILENCE_MS)
+
+    def test_a_review_probe_reads_the_middle_of_its_half(self):
+        """Not the edges - they are the pre-roll and the hangover."""
+        from server.pipeline.language_split import middle_of
+        # A ramp, so the window can be located by its content rather than
+        # matching the first identical run of a constant buffer.
+        ramp = np.arange(10 * SAMPLE_RATE, dtype="<i2").tobytes()
+        window = middle_of(ramp, ms_to_bytes(2_500.0))
+        assert len(window) == ms_to_bytes(2_500.0)
+        assert ramp.index(window) == pytest.approx(
+            (len(ramp) - len(window)) // 2, abs=2)
+
+    def test_a_short_half_is_read_whole(self):
+        from server.pipeline.language_split import middle_of
+        pcm = audio(1.0)
+        assert middle_of(pcm, ms_to_bytes(2_500.0)) == pcm
+
+    def test_the_review_probe_length_is_capped(self):
+        """Without the cap the review grows with the utterance, and the
+        slowest sentence went from 0.7 s to 1.2 s when it was added."""
+        prober = TimedProber("vi", "ja")
+        find_split(two_turns(6.0, 6.0), prober)
+        assert max(prober.calls) <= ms_to_bytes(2_500.0)

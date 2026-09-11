@@ -168,7 +168,21 @@ LANGUAGE_SPLIT_MIN_MARGIN = 0.50
 #: Raised from 800 ms after a real run: 34 of 41 visible splits left a second
 #: half of twenty-five characters or less, and the short ones are where the
 #: inventions were.
+#:
+#: The floor on the *right* adds VAD_MIN_SILENCE_MS on top, because the last
+#: half second of every utterance is the VAD's hangover by construction - so
+#: a 1200 ms tail holds 700 ms of speech at most. Three of the nine splits
+#: left in a later run put "ありがとうございました" or "Alright, they will"
+#: there, which is Whisper filling a fragment that was mostly silence.
 LANGUAGE_SPLIT_MIN_PART_MS = 1_200.0
+
+#: Longest window a review probe reads, taken from the middle of its half.
+#: The middle, because the ends are exactly the pre-roll and the hangover -
+#: the tail review probe was reading the hangover and answering confidently
+#: about silence. Capping it also keeps the cost of a candidate cut flat:
+#: without this the review probes grow with the utterance, and the slowest
+#: sentence went from 0.7 s to 1.2 s when they were added.
+LANGUAGE_SPLIT_REVIEW_MS = 2_500.0
 
 #: Narrowest window the quiet-frame search will use. The search normally
 #: looks across whatever range the binary search left - that is where the

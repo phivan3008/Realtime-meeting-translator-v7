@@ -58,8 +58,10 @@ from server.config import (
     LANGUAGE_SPLIT_MIN_MARGIN,
     LANGUAGE_SPLIT_MIN_PART_MS,
     LANGUAGE_SPLIT_PROBE_MS,
+    LANGUAGE_SPLIT_REVIEW_MS,
     LANGUAGE_SPLIT_SNAP_MS,
 )
+from server.config import VAD_MIN_SILENCE_MS
 from server.pipeline.buffer import bytes_to_ms, ms_to_bytes, quietest_split_point
 
 log = logging.getLogger(__name__)
@@ -88,6 +90,21 @@ class Split:
         return bytes_to_ms(self.at)
 
 
+def middle_of(pcm: bytes, most: int) -> bytes:
+    """The middle ``most`` bytes of a span, for a probe that must not read
+    the edges.
+
+    The first VAD_SPEECH_PAD_MS of an utterance is pre-roll and the last
+    VAD_MIN_SILENCE_MS is hangover. A probe over a whole half reads both, and
+    a probe over a *tail* half reads the hangover as a large share of what it
+    is given - which is how it came back confident about silence.
+    """
+    if len(pcm) <= most:
+        return pcm
+    start = _on_sample((len(pcm) - most) // 2)
+    return pcm[start:start + most]
+
+
 def _confident(decision, margin: float) -> bool:
     """Whether a probe is sure enough to be worth cutting on.
 
@@ -108,6 +125,8 @@ def find_split(
     max_steps: int = LANGUAGE_SPLIT_MAX_STEPS,
     edge_ms: float = LANGUAGE_SPLIT_EDGE_MS,
     min_margin: float = LANGUAGE_SPLIT_MIN_MARGIN,
+    review_ms: float = LANGUAGE_SPLIT_REVIEW_MS,
+    hangover_ms: float = VAD_MIN_SILENCE_MS,
 ) -> Optional[Split]:
     """Where this utterance changes language, or None to leave it whole.
 
@@ -116,8 +135,12 @@ def find_split(
     """
     probe = ms_to_bytes(probe_ms)
     floor = ms_to_bytes(min_part_ms)
+    # The last half second of every utterance is the VAD's hangover, so a
+    # tail of `floor` bytes holds less speech than a head of the same size.
+    # The floor on the right pays for that difference.
+    tail_floor = ms_to_bytes(min_part_ms + hangover_ms)
     edge = ms_to_bytes(edge_ms)
-    if len(pcm) < 2 * (probe + edge) or len(pcm) < 2 * floor:
+    if len(pcm) < 2 * (probe + edge) or len(pcm) < floor + tail_floor:
         # Too short to hold two turns, and too short to probe both ends
         # without the windows overlapping - which would compare a span with
         # itself.
@@ -165,7 +188,7 @@ def find_split(
     search = max(high - low, ms_to_bytes(snap_ms))
     at = quietest_split_point(pcm, high, search)
 
-    if at < floor or len(pcm) - at < floor:
+    if at < floor or len(pcm) - at < tail_floor:
         # The snap pulled the cut under the floor, or the search landed there
         # to begin with. A sliver is worse than no cut: Whisper does not
         # return nothing for it, it returns a sign-off.
@@ -181,8 +204,9 @@ def find_split(
     # the screening probes having been wrong about audio the whole halves
     # agree on.
     probes += 2
-    head = prober.identify(pcm[:at])
-    tail = prober.identify(pcm[at:])
+    review = ms_to_bytes(review_ms)
+    head = prober.identify(middle_of(pcm[:at], review))
+    tail = prober.identify(middle_of(pcm[at:], review))
     if (not _confident(head, min_margin) or not _confident(tail, min_margin)
             or head.lang_code == tail.lang_code):
         log.debug("Language split refused on review: %s/%s across the probes "
