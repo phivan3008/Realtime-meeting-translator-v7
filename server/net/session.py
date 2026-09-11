@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable, Optional
 
@@ -35,13 +35,19 @@ from common.protocol import (
     parse_message,
     validate_audio_chunk,
 )
-from server.config import PARTIAL_WINDOW_SECONDS, SAMPLE_RATE
+from server.config import (
+    PARTIAL_WINDOW_SECONDS,
+    RETRY_ON_LANGUAGE_DISAGREEMENT,
+    SAMPLE_RATE,
+    STABLE_MAX_DRIFT,
+)
 from server.pipeline.asr import Transcriber
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
 from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
+from server.pipeline.stabilize import Stabilizer, drift_from
 from server.pipeline.translate import Translator, Turn
 from server.pipeline.translation_queue import TranslationWorker
 from server.pipeline.vad import VADSegmenter
@@ -96,6 +102,13 @@ class ServerSessionStats:
     #: the whole open utterance, so it does far more decoding than the finals
     #: do, and folding the two together hides which one is slow.
     slowest_partial_seconds: float = 0.0
+    #: Sentences decoded a second time because the LID and the running texts
+    #: disagreed about what language they were in.
+    language_retries: int = 0
+    #: Sentences shipped as what the running texts settled on, because the
+    #: committed decode was in a language nobody was speaking and had nothing
+    #: to do with what the running text had been showing all along.
+    sentences_from_running_text: int = 0
 
     @property
     def audio_seconds(self) -> float:
@@ -141,6 +154,10 @@ class ServerSession:
             TranslationWorker(translator, inline=translation_inline)
             if translator is not None else None
         )
+        # Agreement across the running texts of the open utterance. It
+        # decides nothing on its own; it is the reference a committed
+        # sentence gets checked against.
+        self.stabilizer = Stabilizer()
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
         self.hello: Optional[Hello] = None
@@ -211,6 +228,7 @@ class ServerSession:
             self.language_identifier.reset()
         if self.transcriber is not None:
             self.transcriber.reset()
+        self.stabilizer.reset()
         if self.translator is not None:
             # A new meeting carries none of the last one's context.
             self.translator.reset()
@@ -366,6 +384,7 @@ class ServerSession:
                 with self._timed("asr", spent):
                     transcript = self.transcriber.transcribe(audio, lang_code,
                                                              is_final=True)
+                transcript = self._settle(transcript, utterance, audio, spent)
                 if transcript.has_text:
                     self.stats.transcripts += 1
 
@@ -417,6 +436,67 @@ class ServerSession:
             self.stats.partials += 1
             messages += self._transcribe_partial(result.partial)
         return messages
+
+    def _settle(self, transcript, utterance, audio: bytes, spent: dict):
+        """Check a committed sentence against what its running texts settled on.
+
+        The running text is a second reading of the same audio, taken several
+        times while the sentence was still open and stitched back together
+        across the sliding window. Where it and the committed decode agree,
+        there is nothing to do - the committed one is the better telling, and
+        that is the whole reason it is decoded again with a beam search.
+
+        Where they disagree about the *language*, something is wrong that
+        does not announce itself: the ASR is forced into one language per
+        utterance, and forcing the wrong one does not fail, it returns fluent
+        text in a language nobody spoke. Measured over three real meetings, a
+        sentence whose language disagrees with its running text is three to
+        four times as likely to be unrelated to what was said.
+
+        Two steps, and only ever on that evidence. Text that merely drifts
+        while the language holds is left alone: nothing measured says the
+        running text is the better of the two, and the running text is
+        decoded greedily on four seconds.
+        """
+        stable = self.stabilizer.release(utterance.index)
+        if not stable.has_text or self.transcriber is None:
+            return transcript
+
+        disagrees = (bool(stable.language) and bool(transcript.lang_code)
+                     and stable.language != transcript.lang_code)
+        if not disagrees:
+            return transcript
+
+        if RETRY_ON_LANGUAGE_DISAGREEMENT:
+            with self._timed("asr_retry", spent):
+                retried = self.transcriber.transcribe(audio, stable.language,
+                                                      is_final=True)
+            self.stats.language_retries += 1
+            log.info(
+                "Session %s: sentence %d came back as %r while its running "
+                "text was %r; decoded again as %r: %r -> %r",
+                self.session_id or "?", utterance.index, transcript.lang_code,
+                stable.language, stable.language, transcript.text[:60],
+                retried.text[:60])
+            if retried.has_text:
+                return retried
+
+        # The retry said nothing, so the only reading of this audio that
+        # produced anything is a decode in a language the running texts say
+        # was not being spoken. Prefer what they settled on, if the committed
+        # sentence has wandered away from it entirely.
+        if not transcript.has_text:
+            return transcript
+        if drift_from(transcript.text, stable.whole) <= STABLE_MAX_DRIFT:
+            return transcript
+        self.stats.sentences_from_running_text += 1
+        log.warning(
+            "Session %s: sentence %d (%r, %r) has nothing to do with its "
+            "running text (%r, %r); showing the running text instead",
+            self.session_id or "?", utterance.index, transcript.lang_code,
+            transcript.text[:60], stable.language, stable.whole[:60])
+        return replace(transcript, text=stable.whole,
+                       lang_code=stable.language)
 
     def _report_if_slow(self, utterance, spent: dict) -> None:
         """Name the stage that stalled the connection, while it is still known.
@@ -474,6 +554,11 @@ class ServerSession:
         self._report_if_partial_slow(partial, spent)
         if not transcript.has_text:
             return []
+        # Kept for the sentence that is coming: the running texts of one
+        # utterance, stitched across the sliding window, are the only second
+        # reading of that audio this pipeline has.
+        self.stabilizer.observe(partial.index, transcript.text,
+                                transcript.lang_code)
         self.stats.transcripts += 1
         return [make_partial("", transcript.lang_code, transcript.text)]
 

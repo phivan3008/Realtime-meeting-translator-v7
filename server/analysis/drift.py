@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 
 from server.pipeline.asr import normalise_for_pattern
+from server.pipeline.textdiff import edit_distance, substring_distance
 
 #: A sentence that rewrote more than this share of the running text it was
 #: supposed to be confirming. A quarter is well past punctuation and casing -
@@ -49,69 +50,6 @@ LATIN_MIN_CHARS = 3
 #: too, so a word is only a candidate if the *whole* run is unaccented ASCII -
 #: matching ASCII inside a word would turn "thì" into the "word" "th".
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
-
-
-def substring_distance(needle: str, haystack: str) -> tuple[int, int, int]:
-    """Edit distance from ``needle`` to its best-matching span of ``haystack``.
-
-    Start and end are free: the running text is a *tail* of the utterance, so
-    it should align against the end of the sentence, and what comes before it
-    must not be charged as a difference. Returns the distance and the span.
-    """
-    n, m = len(needle), len(haystack)
-    if n == 0:
-        return 0, 0, 0
-    if m == 0:
-        return n, 0, 0
-
-    # Row 0: matching nothing of the needle costs nothing anywhere, which is
-    # what makes the start free.
-    prev = [0] * (m + 1)
-    prev_start = list(range(m + 1))
-    for i in range(1, n + 1):
-        cur = [i] + [0] * m
-        cur_start = [0] * (m + 1)
-        for j in range(1, m + 1):
-            cost = 0 if needle[i - 1] == haystack[j - 1] else 1
-            substitute = prev[j - 1] + cost
-            delete = prev[j] + 1
-            insert = cur[j - 1] + 1
-            best = min(substitute, delete, insert)
-            cur[j] = best
-            if best == substitute:
-                cur_start[j] = prev_start[j - 1]
-            elif best == delete:
-                cur_start[j] = prev_start[j]
-            else:
-                cur_start[j] = cur_start[j - 1]
-        prev, prev_start = cur, cur_start
-
-    end = min(range(m + 1), key=lambda j: (prev[j], j))
-    return prev[end], prev_start[end], end
-
-
-def edit_distance(left: str, right: str) -> int:
-    """Plain Levenshtein, both ends anchored.
-
-    :func:`substring_distance` is for finding a tail inside a sentence. This
-    is for asking whether two whole lines are the same line with words
-    changed, which is a different question and needs both ends charged.
-    """
-    if left == right:
-        return 0
-    if not left or not right:
-        return len(left) or len(right)
-    previous = list(range(len(right) + 1))
-    for index, character in enumerate(left, start=1):
-        current = [index]
-        for position, other in enumerate(right, start=1):
-            current.append(min(
-                previous[position] + 1,
-                current[position - 1] + 1,
-                previous[position - 1] + (character != other),
-            ))
-        previous = current
-    return previous[-1]
 
 
 def latin_words(text: str) -> tuple[str, ...]:

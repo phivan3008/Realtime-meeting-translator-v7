@@ -82,6 +82,52 @@ SPLIT_SEARCH_MS = 500
 # decoded once, in full, and is unaffected.
 PARTIAL_WINDOW_SECONDS = 4.0
 
+# --- 2b. Agreement between running texts (server/pipeline/stabilize.py) -----
+# The running text is decoded afresh every 800 ms on the last
+# PARTIAL_WINDOW_SECONDS of the open utterance. Stitching those views back
+# together gives a reference that covers the whole sentence, which is what a
+# committed sentence gets compared against.
+
+#: Consecutive views that must contain a word before it counts as settled.
+#: Two is the floor - agreement between one decode and itself is not
+#: evidence - and two is also what the running text can afford: at 800 ms a
+#: view, three would put the reference 2.4 s behind the speaker.
+STABLE_MIN_AGREEMENT = 2
+
+#: Tokens of overlap needed to splice two views together. One shared word
+#: matches by accident constantly, and a wrong splice puts words in an order
+#: nobody said. Consecutive views share about 3.2 s of audio, so a real
+#: overlap is many tokens long; this only rules out the accidental ones.
+STABLE_MIN_OVERLAP_TOKENS = 2
+
+#: Share of the overlapping tokens that must match for a splice to be
+#: believed. Two decodes of the same audio agree on most of it and reword the
+#: rest, so an exact match finds no overlap on about a third of real pairs -
+#: and an overlap that is not found is a clause that ends up in the reference
+#: twice.
+STABLE_OVERLAP_MATCH = 0.7
+
+#: Views kept per open utterance. A seven-second sentence produces nine, and
+#: only the newest few decide agreement.
+STABLE_HISTORY = 5
+
+#: Forcing the ASR into the wrong language does not fail loudly - it returns
+#: fluent text in a language nobody spoke. The running texts are a second
+#: opinion on the same audio, taken several times; when they disagree with
+#: the LID, the sentence is decoded again in the language they agreed on.
+#:
+#: Measured over three real meetings: a sentence whose language disagrees
+#: with its running text is three to four times as likely to be unrelated to
+#: what was said - 43% against 11% on one run, 75% against 24% on another.
+#: It covers 5-7% of sentences, and it lands on the worst of them.
+RETRY_ON_LANGUAGE_DISAGREEMENT = True
+
+#: How far a committed sentence may drift from what the running texts
+#: settled on before the two are treated as different sentences rather than
+#: two tellings of one. Measured on the 2026-09-11 run: below this they read
+#: as the same thing said twice; above it they are unrelated.
+STABLE_MAX_DRIFT = 0.6
+
 # --- 3. Deep Noise Filter (AST, DESIGN.md section 3.3) ----------------------
 # DESIGN.md allows "YAMNet or a slimmed AST". AST wins on this pod: YAMNet
 # means TensorFlow, and TF 2.17 pins numpy < 2.1 and protobuf 4.x while vllm,
