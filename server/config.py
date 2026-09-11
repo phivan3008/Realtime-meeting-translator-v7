@@ -128,6 +128,39 @@ RETRY_ON_LANGUAGE_DISAGREEMENT = True
 #: as the same thing said twice; above it they are unrelated.
 STABLE_MAX_DRIFT = 0.6
 
+# --- 2c. Splitting an utterance that holds two languages --------------------
+# The VAD closes a segment on VAD_MIN_SILENCE_MS of quiet and people answer
+# each other faster than that, so a reply in the other language lands inside
+# the same utterance. The LID then names one language and the ASR is forced
+# into it for all of it, and the turn in the other language is not
+# mistranslated - it is gone.
+
+#: Off with LANGUAGE_SPLIT=0. On by default: the fault it addresses was read
+#: off a real meeting, and the ordinary case costs two LID probes.
+LANGUAGE_SPLIT = os.environ.get("LANGUAGE_SPLIT", "1") != "0"
+
+#: Audio each probe reads. Comfortably over LID_MIN_DURATION_MS, because a
+#: probe that comes back undecided ends the search - and an undecided probe
+#: is the LID saying the window was too short, not that the audio was mixed.
+LANGUAGE_SPLIT_PROBE_MS = 1_000.0
+
+#: The shortest half a cut may leave. A fragment below this is not returned
+#: empty by Whisper - it is filled in. An earlier version of this search
+#: produced a 375 ms head and the other half came back as a subscribe line
+#: 31 ms after the first was committed.
+LANGUAGE_SPLIT_MIN_PART_MS = 800.0
+
+#: How far back from the boundary to look for a quiet frame to cut on.
+#: Shorter than SPLIT_SEARCH_MS: the length cut may land anywhere in the last
+#: half second, but a language boundary is known to within a probe, and
+#: dragging the cut far from it would put words on the wrong side.
+LANGUAGE_SPLIT_SNAP_MS = 200.0
+
+#: Halvings of the search range. Three narrows a five-second utterance to
+#: about 600 ms, which is inside the snap window, so a fourth would buy
+#: nothing but another probe.
+LANGUAGE_SPLIT_MAX_STEPS = 3
+
 # --- 3. Deep Noise Filter (AST, DESIGN.md section 3.3) ----------------------
 # DESIGN.md allows "YAMNet or a slimmed AST". AST wins on this pod: YAMNet
 # means TensorFlow, and TF 2.17 pins numpy < 2.1 and protobuf 4.x while vllm,

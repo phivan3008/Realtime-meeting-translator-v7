@@ -36,6 +36,7 @@ from common.protocol import (
     validate_audio_chunk,
 )
 from server.config import (
+    LANGUAGE_SPLIT,
     PARTIAL_WINDOW_SECONDS,
     RETRY_ON_LANGUAGE_DISAGREEMENT,
     SAMPLE_RATE,
@@ -44,6 +45,7 @@ from server.config import (
 from server.pipeline.asr import Transcriber
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
+from server.pipeline.language_split import find_split
 from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
@@ -105,6 +107,10 @@ class ServerSessionStats:
     #: Sentences decoded a second time because the LID and the running texts
     #: disagreed about what language they were in.
     language_retries: int = 0
+    #: Utterances the LID found two languages in, and the LID calls it took
+    #: to find them. Every utterance is checked; most cost two probes.
+    utterances_split: int = 0
+    language_probes: int = 0
     #: Sentences shipped as what the running texts settled on, because the
     #: committed decode was in a language nobody was speaking and had nothing
     #: to do with what the running text had been showing all along.
@@ -331,8 +337,52 @@ class ServerSession:
     def _announce(self, result: BufferOutput) -> list[str]:
         """Classify each finished sentence, then put it on the wire."""
         messages = []
-        for utterance in result.finals:
+        for committed in result.finals:
             spent: dict[str, float] = {}
+            # An utterance holding two languages is two sentences, and
+            # forcing one language on both loses one of them outright. Split
+            # before anything else reads the audio.
+            parts = self._split_languages(committed, spent)
+            # The running texts belong to the whole span. After a split each
+            # half is already in the language the LID found for *it*, which
+            # is a better answer than a vote taken over both, so the running
+            # texts have nothing to add.
+            stable = self.stabilizer.release(committed.index)
+            if len(parts) > 1:
+                stable = None
+            messages += self._announce_parts(parts, stable, spent)
+        self.stats.utterances += len(result.finals)
+        self.stats.events_sent += len(messages)
+        if result.partial is not None:
+            self.stats.partials += 1
+            messages += self._transcribe_partial(result.partial)
+        return messages
+
+    def _split_languages(self, utterance, spent: dict) -> list:
+        """One utterance, or the two turns it turned out to be holding."""
+        if not LANGUAGE_SPLIT or self.language_identifier is None:
+            return [utterance]
+        with self._timed("language_split", spent):
+            split = find_split(utterance.pcm, self.language_identifier)
+        self.stats.language_probes += split.probes if split else 2
+        if split is None:
+            return [utterance]
+        self.stats.utterances_split += 1
+        log.info(
+            "Session %s: utterance %d holds two languages (%s then %s); "
+            "cutting at %.0f ms of %.0f",
+            self.session_id or "?", utterance.index, split.first, split.second,
+            split.at_ms, utterance.duration_ms)
+        return [
+            replace(utterance, pcm=utterance.pcm[:split.at]),
+            replace(utterance, pcm=utterance.pcm[split.at:],
+                    start_ms=utterance.start_ms + split.at_ms,
+                    continues_previous=True),
+        ]
+
+    def _announce_parts(self, parts: list, stable, spent: dict) -> list[str]:
+        messages = []
+        for utterance in parts:
             keep, label, score = True, "", 0.0
             if self.noise_filter is not None:
                 with self._timed("noise", spent):
@@ -384,7 +434,8 @@ class ServerSession:
                 with self._timed("asr", spent):
                     transcript = self.transcriber.transcribe(audio, lang_code,
                                                              is_final=True)
-                transcript = self._settle(transcript, utterance, audio, spent)
+                if stable is not None:
+                    transcript = self._settle(transcript, stable, audio, spent)
                 if transcript.has_text:
                     self.stats.transcripts += 1
 
@@ -430,14 +481,9 @@ class ServerSession:
                     self.worker.submit(sentence_id, transcript.text,
                                        transcript.lang_code, speaker_id)
             self._report_if_slow(utterance, spent)
-        self.stats.utterances += len(result.finals)
-        self.stats.events_sent += len(messages)
-        if result.partial is not None:
-            self.stats.partials += 1
-            messages += self._transcribe_partial(result.partial)
         return messages
 
-    def _settle(self, transcript, utterance, audio: bytes, spent: dict):
+    def _settle(self, transcript, stable, audio: bytes, spent: dict):
         """Check a committed sentence against what its running texts settled on.
 
         The running text is a second reading of the same audio, taken several
@@ -458,7 +504,6 @@ class ServerSession:
         running text is the better of the two, and the running text is
         decoded greedily on four seconds.
         """
-        stable = self.stabilizer.release(utterance.index)
         if not stable.has_text or self.transcriber is None:
             return transcript
 
@@ -473,9 +518,9 @@ class ServerSession:
                                                       is_final=True)
             self.stats.language_retries += 1
             log.info(
-                "Session %s: sentence %d came back as %r while its running "
+                "Session %s: a sentence came back as %r while its running "
                 "text was %r; decoded again as %r: %r -> %r",
-                self.session_id or "?", utterance.index, transcript.lang_code,
+                self.session_id or "?", transcript.lang_code,
                 stable.language, stable.language, transcript.text[:60],
                 retried.text[:60])
             if retried.has_text:
@@ -491,9 +536,9 @@ class ServerSession:
             return transcript
         self.stats.sentences_from_running_text += 1
         log.warning(
-            "Session %s: sentence %d (%r, %r) has nothing to do with its "
+            "Session %s: a sentence (%r, %r) has nothing to do with its "
             "running text (%r, %r); showing the running text instead",
-            self.session_id or "?", utterance.index, transcript.lang_code,
+            self.session_id or "?", transcript.lang_code,
             transcript.text[:60], stable.language, stable.whole[:60])
         return replace(transcript, text=stable.whole,
                        lang_code=stable.language)

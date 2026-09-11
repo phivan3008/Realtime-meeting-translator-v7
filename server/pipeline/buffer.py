@@ -64,6 +64,40 @@ def bytes_to_ms(size: int) -> float:
     return size / BYTES_PER_MS
 
 
+def quietest_split_point(pcm: bytes, limit: int, search: int) -> int:
+    """Byte offset of the quietest frame boundary just before ``limit``.
+
+    Cutting at exactly ``limit`` usually lands in the middle of a word, and
+    Whisper turns half a word into a different word. So the cut looks back
+    over ``search`` bytes and lands on the quietest 32 ms frame it finds -
+    the gap between words, if there is one.
+
+    A plain function rather than a method: the length cut is no longer the
+    only caller. Splitting an utterance that holds two languages needs the
+    same thing at a different offset, and it never needed anything but the
+    bytes.
+    """
+    earliest = max(FRAME_BYTES, limit - search)
+    if limit <= earliest:
+        return limit
+
+    window = np.frombuffer(pcm[earliest:limit], dtype="<i2")
+    frames = window.size // VAD_FRAME_SAMPLES
+    if frames == 0:
+        return limit
+
+    usable = frames * VAD_FRAME_SAMPLES
+    energy = (
+        window[:usable]
+        .astype(np.float32)
+        .reshape(frames, VAD_FRAME_SAMPLES)
+    )
+    quietest = int(np.argmin(np.mean(energy * energy, axis=1)))
+    # Cut after the quiet frame, so the silence stays with the first half
+    # rather than opening the next utterance with it.
+    return earliest + (quietest + 1) * FRAME_BYTES
+
+
 class FinalizeReason(str, Enum):
     PAUSE = "pause"
     MAX_DURATION = "max_duration"
@@ -299,27 +333,11 @@ class BufferManager:
 
     def _quietest_split_point(self) -> int:
         """Byte offset of the quietest frame boundary near the length limit."""
-        limit = ms_to_bytes(self.max_duration_ms)
-        earliest = max(FRAME_BYTES, ms_to_bytes(self.max_duration_ms
-                                                - self.split_search_ms))
-        if limit <= earliest:                       # pragma: no cover - guarded
-            return limit
-
-        window = np.frombuffer(self._pcm[earliest:limit], dtype="<i2")
-        frames = window.size // VAD_FRAME_SAMPLES
-        if frames == 0:
-            return limit
-
-        usable = frames * VAD_FRAME_SAMPLES
-        energy = (
-            window[:usable]
-            .astype(np.float32)
-            .reshape(frames, VAD_FRAME_SAMPLES)
+        return quietest_split_point(
+            bytes(self._pcm),
+            ms_to_bytes(self.max_duration_ms),
+            ms_to_bytes(self.split_search_ms),
         )
-        quietest = int(np.argmin(np.mean(energy * energy, axis=1)))
-        # Cut after the quiet frame, so the silence stays with the first half
-        # rather than opening the next utterance with it.
-        return earliest + (quietest + 1) * FRAME_BYTES
 
     def _maybe_partial(self) -> Optional[PartialWindow]:
         if not self.is_open or not self._pcm:

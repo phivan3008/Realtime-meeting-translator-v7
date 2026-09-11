@@ -229,3 +229,134 @@ class TestHousekeeping:
         session.handle_text(Hello(session_id="abc").to_json())
         assert not finals(speak(session))
         assert session.stats.language_retries == 0
+
+
+# ---------------------------------------------------------------------------
+# Splitting an utterance that holds two languages
+# ---------------------------------------------------------------------------
+class LoudnessProber:
+    """A LID that answers by how loud the audio it is handed is.
+
+    The utterance below is quiet for its first half and loud for its second,
+    so a stub that reads the amplitude behaves the way a real LID does: its
+    answer depends on which span it was given, not on how many times it has
+    been called. Counting calls instead made this stub answer differently
+    depending on how many running texts had gone past, which is exactly the
+    kind of coupling a test should not have.
+    """
+
+    def __init__(self, quiet: str = "vi", loud: str = "ja"):
+        self.quiet, self.loud = quiet, loud
+        self.calls: list = []
+
+    def identify(self, pcm: bytes):
+        from server.pipeline.lid import LanguageDecision
+        self.calls.append(len(pcm))
+        samples = np.frombuffer(pcm, dtype="<i2")
+        if samples.size == 0:
+            return LanguageDecision("", 0.4, 0.05, "no audio")
+        loud = float(np.mean(np.abs(samples.astype(np.float32))))
+        return LanguageDecision(self.loud if loud >= 6_000 else self.quiet,
+                                0.9, 0.5, "clear")
+
+    def reset(self) -> None:
+        self.calls = []
+
+
+def split_session(decoder, prober):
+    vad = ScriptedVAD([0.9])
+    session = ServerSession(segmenter_factory=lambda: VADSegmenter(vad=vad),
+                            language_identifier=prober,
+                            transcriber=Transcriber(decoder=decoder))
+    session.handle_text(Hello(session_id="abc").to_json())
+    return session
+
+
+def speak_two_languages(session, quiet: int = 15, loud: int = 15) -> list:
+    """One utterance: a quiet turn, then a loud one, no pause between."""
+    messages = []
+    for _ in range(quiet):
+        messages += session.handle_binary(chunk(3_000)).messages
+    for _ in range(loud):
+        messages += session.handle_binary(chunk(12_000)).messages
+    messages += session.finish().messages
+    return [json.loads(message) for message in messages]
+
+
+def utterances(messages) -> list:
+    return [message for message in messages if message["type"] == "utterance"]
+
+
+class TestLanguageSplit:
+    def make(self):
+        decoder = ScriptedDecoder(partial="đang nói", partial_lang="vi",
+                                  final="Một câu.", final_lang="vi")
+        return decoder, LoudnessProber()
+
+    def test_an_utterance_holding_two_languages_becomes_two_sentences(self):
+        decoder, prober = self.make()
+        session = split_session(decoder, prober)
+        spoken = utterances(speak_two_languages(session))
+        assert session.stats.utterances_split >= 1
+        assert len(spoken) > session.buffer.stats.utterances - 1
+
+    def test_the_second_half_is_marked_as_continuing_the_first(self):
+        """The translation stage has to know it is reading the middle of a
+        turn rather than a new one."""
+        decoder, prober = self.make()
+        session = split_session(decoder, prober)
+        spoken = utterances(speak_two_languages(session))
+        assert any(part["continues_previous"] for part in spoken)
+
+    def test_the_halves_do_not_overlap_or_leave_a_gap(self):
+        decoder, prober = self.make()
+        session = split_session(decoder, prober)
+        spoken = utterances(speak_two_languages(session))
+        for first, second in zip(spoken, spoken[1:]):
+            if second["continues_previous"]:
+                assert second["start_ms"] == pytest.approx(first["end_ms"],
+                                                           abs=1.0)
+
+    def test_each_half_carries_the_language_found_for_it(self):
+        decoder, prober = self.make()
+        session = split_session(decoder, prober)
+        spoken = utterances(speak_two_languages(session))
+        assert {part["lang_code"] for part in spoken} == {"vi", "ja"}
+
+    def test_the_probes_are_counted(self):
+        decoder, prober = self.make()
+        session = split_session(decoder, prober)
+        speak_two_languages(session)
+        assert session.stats.language_probes >= 2
+
+    def test_the_running_text_arbitration_is_skipped_on_a_split(self):
+        """Each half already carries the language the LID found for it, which
+        beats a vote taken across both."""
+        decoder, prober = self.make()
+        session = split_session(decoder, prober)
+        speak_two_languages(session)
+        assert session.stats.utterances_split >= 1
+        assert session.stats.language_retries == 0
+
+    def test_one_language_throughout_is_left_whole(self):
+        decoder, prober = self.make()
+        session = split_session(decoder, prober)
+        speak(session, speech=20)
+        assert session.stats.utterances_split == 0
+
+    def test_without_a_language_model_nothing_is_split(self):
+        decoder = ScriptedDecoder(partial="đang nói", partial_lang="vi",
+                                  final="Một câu.", final_lang="vi")
+        session = session_with(decoder)
+        speak_two_languages(session)
+        assert session.stats.utterances_split == 0
+        assert session.stats.language_probes == 0
+
+    def test_the_environment_can_turn_it_off(self, monkeypatch):
+        import server.net.session as session_module
+        monkeypatch.setattr(session_module, "LANGUAGE_SPLIT", False)
+        decoder, prober = self.make()
+        session = split_session(decoder, prober)
+        speak_two_languages(session)
+        assert session.stats.utterances_split == 0
+        assert session.stats.language_probes == 0
