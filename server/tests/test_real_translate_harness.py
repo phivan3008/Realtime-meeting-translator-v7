@@ -43,34 +43,37 @@ class StubClient:
     wrong-script guard exists to catch, and the guard duly caught the stub.
     """
 
-    model = "stub/qwen"
-    source = "stub/qwen at http://stub/v1"
+    model = "stub/gemma"
+    source = "stub/gemma at http://stub/v1"
+    max_model_len = 4096
 
     #: Keyed by the language the prompt asks for.
-    ANSWERS = {"Japanese": "こんにちは",
-               "Vietnamese": "Xin chào"}
+    ANSWERS = {"Nhật": "こんにちは",
+               "Việt": "Xin chào"}
     #: What the history adds, in the same script as the answer.
-    FROM_HISTORY = {"Japanese": "（その件）",
-                    "Vietnamese": " (chuyện đó)"}
+    FROM_HISTORY = {"Nhật": "（その件）",
+                    "Việt": " (chuyện đó)"}
 
     def __init__(self, answer: str = "", chatty: bool = False,
                  ignores_history: bool = False):
         self.answer = answer
         self.chatty = chatty
         self.ignores_history = ignores_history
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[str] = []
 
-    def target_of(self, system: str) -> str:
+    def target_of(self, user: str) -> str:
         for name in self.ANSWERS:
-            if f"Write it in {name}" in system:
+            if f"sang tiếng {name}" in user:
                 return name
-        raise AssertionError(f"no target language in system prompt: {system!r}")
+        raise AssertionError(f"no target language in the prompt: {user!r}")
 
-    def complete(self, system: str, user: str) -> str:
-        self.calls.append((system, user))
-        target = self.target_of(system)
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        assert [m["role"] for m in messages] == ["user"], messages
+        user = messages[-1]["content"]
+        self.calls.append(user)
+        target = self.target_of(user)
         answer = self.answer if self.answer != "" else self.ANSWERS[target]
-        if "do not translate" in user and not self.ignores_history:
+        if "không dịch các câu này" in user and not self.ignores_history:
             answer = f"{answer}{self.FROM_HISTORY[target]}"
         if self.chatty:
             return f"Sure! Here is the translation: {answer}"
@@ -78,7 +81,7 @@ class StubClient:
 
 
 class BrokenClient:
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, messages: list[dict[str, str]]) -> str:
         raise TranslationError("no translation server at http://stub/v1")
 
 
@@ -199,7 +202,7 @@ def test_a_backend_that_answers_differently_each_time_is_caught():
     answers = iter(["こんにちは", "こんばんは"])
 
     class Wandering:
-        def complete(self, system, user):
+        def complete(self, messages):
             return next(answers)
 
     report = harness.Report()
@@ -214,11 +217,11 @@ def test_the_context_case_sends_the_history_to_the_model(capsys):
     report = harness.Report()
     harness.check_context(client, report)
     assert report.failed == []
-    with_history_prompt = client.calls[0][1]
-    without_history_prompt = client.calls[1][1]
-    assert "do not translate" in with_history_prompt
+    with_history_prompt = client.calls[0]
+    without_history_prompt = client.calls[1]
+    assert "không dịch các câu này" in with_history_prompt
     assert "Bản dựng thứ ba" in with_history_prompt
-    assert "do not translate" not in without_history_prompt
+    assert "không dịch các câu này" not in without_history_prompt
     assert "Identical output means" in capsys.readouterr().out
 
 
@@ -291,7 +294,8 @@ def test_a_model_that_refuses_the_complete_sentence_is_caught():
     class Echoing:
         """Hands every sentence straight back."""
 
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
             return user.strip().splitlines()[-1]
 
     report = harness.Report()
@@ -305,7 +309,8 @@ def test_the_mangled_sentences_alone_do_not_fail_the_check():
     """A model cannot translate what the ASR never heard, and blaming it for
     that would make this check impossible to pass."""
     class OnlyTranslatesTheQuestion:
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
             line = user.strip().splitlines()[-1]
             if "\u3053\u3053\u306b\u4f5c\u3063\u3066" in line:
                 return "\u0110ang t\u1ea1o \u1edf \u0111\u00e2y \u00e0?"
@@ -319,7 +324,8 @@ def test_the_mangled_sentences_alone_do_not_fail_the_check():
 def test_the_raw_answer_is_printed_for_every_refusal(capsys):
     """The reason this list exists at all."""
     class Echoing:
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
             return user.strip().splitlines()[-1]
 
     harness.check_meeting_refusals(Echoing(), harness.Report())
@@ -347,20 +353,20 @@ def test_the_none_variant_carries_no_history():
     """It is the control; if it carried history it would prove nothing."""
     client = StubClient()
     harness.ask(client, "ja", "はい。", "none")
-    assert "Earlier in the meeting" not in client.calls[0][1]
+    assert "Các câu trước đó trong cuộc họp" not in client.calls[0]
 
 
 @pytest.mark.parametrize("variant", ["plain", "labelled", "sources"])
 def test_every_other_variant_carries_the_history(variant):
     client = StubClient()
     harness.ask(client, "ja", "はい。", variant)
-    assert "Earlier in the meeting" in client.calls[0][1]
+    assert "Các câu trước đó trong cuộc họp" in client.calls[0]
 
 
 def test_the_sources_variant_sends_no_translations():
     client = StubClient()
     harness.ask(client, "ja", "はい。", "sources")
-    prompt = client.calls[0][1]
+    prompt = client.calls[0]
     assert "Cảm ơn." in prompt          # the source line is there
     assert "ありがとう" not in prompt   # its translation is not
 
@@ -374,10 +380,11 @@ def test_a_model_that_ignores_the_history_passes():
 def test_a_model_steered_only_by_the_plain_history_passes():
     """The style in use does its job, so nothing is reported against it."""
     class Steered:
-        def complete(self, system: str, user: str) -> str:
-            if "and into Vietnamese only" in user:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
+            if "và chỉ sang tiếng Việt" in user:
                 return "Đang tạo ở đây à?"
-            if "Write it in Japanese" in system:
+            if "sang tiếng Nhật" in user:
                 return "はい。"
             return "ここに作っているの？"
 
@@ -394,10 +401,11 @@ def test_a_style_that_does_not_fix_it_is_caught():
     made the test pass while proving nothing.
     """
     class SteeredByAnyHistory:
-        def complete(self, system: str, user: str) -> str:
-            if "Write it in Japanese" in system:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
+            if "sang tiếng Nhật" in user:
                 return "はい、承知しました。"
-            if "Earlier in the meeting" not in user:
+            if "Các câu trước đó trong cuộc họp" not in user:
                 return "Đang tạo ở đây à?"
             return "ここに作っているの？"
 
@@ -413,8 +421,9 @@ def test_a_sentence_that_fails_without_history_is_not_blamed_on_the_history(caps
     must also stop counting against the styles, or the check can never pass.
     """
     class CannotTranslateJapanese:
-        def complete(self, system: str, user: str) -> str:
-            if "Write it in Japanese" in system:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
+            if "sang tiếng Nhật" in user:
                 return "はい。"
             return ""            # refuses every ja -> vi sentence
 
@@ -428,8 +437,9 @@ def test_a_style_that_is_not_earning_its_place_is_reported_as_such(capsys):
     """If every other style works too, HISTORY_STYLE is solving a problem
     this run does not show - and saying so matters more than keeping it."""
     class Working:
-        def complete(self, system: str, user: str) -> str:
-            if "Write it in Japanese" in system:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
+            if "sang tiếng Nhật" in user:
                 return "はい。"
             return "Đang tạo ở đây à?"
 
@@ -472,12 +482,13 @@ def test_a_model_that_translates_short_lines_passes():
 def test_a_model_that_hands_a_one_word_line_back_is_caught():
     """Only when the hint fails to help - the hint is what is in use."""
     class HandsBackShortLines:
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
             line = user.strip().splitlines()[-1]
             if len(line) <= 3:
                 return line
             return ("\u3053\u3093\u306b\u3061\u306f"
-                    if "Write it in Japanese" in system else "Xin ch\u00e0o")
+                    if "sang tiếng Nhật" in user else "Xin ch\u00e0o")
 
     report = harness.Report()
     harness.check_short_lines(HandsBackShortLines(), report)
@@ -489,12 +500,13 @@ def test_a_model_that_hands_a_one_word_line_back_is_caught():
 def test_a_hint_that_rescues_the_line_passes():
     """The hint doing its job is the outcome this change is betting on."""
     class NeedsTheHint:
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            user = messages[-1]["content"]
             line = user.strip().splitlines()[-1]
-            if len(line) <= 3 and "still a line" not in system:
+            if len(line) <= 3 and "vẫn là một câu" not in user:
                 return line
             return ("\u3053\u3093\u306b\u3061\u306f"
-                    if "Write it in Japanese" in system else "V\u00e2ng")
+                    if "sang tiếng Nhật" in user else "V\u00e2ng")
 
     report = harness.Report()
     harness.check_short_lines(NeedsTheHint(), report)
@@ -527,3 +539,40 @@ def test_the_short_line_notes_say_what_happened_to_each():
     for _lang, source, note in harness.SHORT_LINES:
         assert note, source
         assert note.startswith(("translated", "refused", "failed")), note
+
+
+# ---------------------------------------------------------------------------
+# Gemma on vLLM
+# ---------------------------------------------------------------------------
+def test_a_server_started_with_the_configured_context_passes():
+    report = harness.Report()
+    harness.check_engine(StubClient(), report)
+    assert report.failed == []
+
+
+def test_a_server_started_with_another_context_length_is_caught():
+    client = StubClient()
+    client.max_model_len = 8192
+    report = harness.Report()
+    harness.check_engine(client, report)
+    assert len(report.failed) == 1
+    assert "8192" in report.failed[0].detail
+
+
+def test_a_server_that_does_not_report_its_context_is_caught():
+    client = StubClient()
+    client.max_model_len = None
+    report = harness.Report()
+    harness.check_engine(client, report)
+    assert len(report.failed) == 1
+
+
+def test_a_leaked_turn_marker_is_caught_in_the_raw_answer():
+    item = attempt_of("xin chào", "こんにちは")
+    item.result = Translation("こんにちは", "xin chào", "vi", "ja",
+                              raw="こんにちは<end_of_turn>")
+    report = harness.Report()
+    harness.check_answers([item], report)
+    assert "No Gemma turn marker leaks into an answer" in [
+        c.name for c in report.failed
+    ]

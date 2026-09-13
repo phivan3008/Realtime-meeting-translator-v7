@@ -9,19 +9,27 @@ is everything around that:
 
 * the server is reachable and says which model it is serving;
 * the answer is a translation and not a conversation about one;
-* the same sentence twice gives the same answer, because temperature is zero;
+* the same sentence twice gives the same answer, because the request carries
+  a fixed seed;
 * the history reaches the model, by giving it a sentence that cannot be
   translated correctly without one;
 * what a translation costs, which decides whether it can stay on the audio
-  path or has to move off it.
+  path or has to move off it;
+* the server was started with the configured context length, and no Gemma
+  turn marker reaches an answer.
 
 Starting the server
 -------------------
-    python3.11 -m vllm.entrypoints.openai.api_server \\
-        --model Qwen/Qwen3.5-9B \\
-        --port 8001 --gpu-memory-utilization 0.55
+    python3.11 server/launch_vllm.py
 
-Leave room for Whisper: the audio pipeline needs a few GB of the same card.
+which runs, from ``server/config.py``::
+
+    python3.11 -m vllm.entrypoints.openai.api_server \\
+        --model google/gemma-4-12b-it --port 8001 --dtype bfloat16 \\
+        --max-model-len 4096 --gpu-memory-utilization 0.85 --trust-remote-code
+
+Start it before the audio server: vLLM claims 85% of the whole card and
+refuses to start if that much is not free.
 
 The checkpoint has to match ``TRANSLATE_MODEL``. The client refuses a server
 running anything else, because vLLM would answer a wrong-model request
@@ -48,6 +56,8 @@ from server.config import (  # noqa: E402
     HISTORY_STYLE,
     SHORT_LINE_HINT_ENABLED,
     TRANSLATE_HISTORY,
+    TRANSLATE_STOP,
+    VLLM_MAX_MODEL_LEN,
 )
 from server.pipeline.translate import (  # noqa: E402
     TranslationContext,
@@ -302,6 +312,14 @@ def check_answers(attempts: list[Attempt], report: Report) -> None:
                f"{len(refused)} refused: "
                f"{[item.result.reason for item in refused][:3]}")
 
+    # Read from the raw answer, before cleaning strips them: a marker here
+    # means the stop strings or the chat template are not doing their job.
+    markers = (*TRANSLATE_STOP, "<start_of_turn>")
+    leaked = [item for item in attempts
+              if any(marker in item.result.raw for marker in markers)]
+    report.add("No Gemma turn marker leaks into an answer", not leaked,
+               f"{[item.result.raw[:60] for item in leaked][:2]}")
+
     translated = [item for item in attempts if item.result.ok]
     if not translated:
         return
@@ -343,7 +361,8 @@ def check_latency(attempts: list[Attempt], report: Report) -> None:
 
 
 def check_repeatable(translator_factory, report: Report) -> None:
-    """Temperature is zero, so the same sentence must give the same answer."""
+    """The request carries a fixed seed, so the same sentence must give the
+    same answer even at a temperature above zero."""
     lang, source = SAMPLES[0]
     first = translator_factory().translate(source, lang)
     second = translator_factory().translate(source, lang)
@@ -381,6 +400,15 @@ def check_context(client, report: Report) -> None:
     print("    Read both. With the history the subject is available to name; "
           "without it there is nothing to name. Identical output means the "
           "history is not reaching the model, or is being ignored.")
+
+
+def check_engine(client, report: Report) -> None:
+    """What can be read back over HTTP of how vLLM was started."""
+    served = getattr(client, "max_model_len", None)
+    report.add(f"vLLM was started with max_model_len {VLLM_MAX_MODEL_LEN}",
+               served == VLLM_MAX_MODEL_LEN, f"server reports {served}")
+    print("    dtype, gpu_memory_utilization and trust_remote_code are not "
+          "reported over HTTP: read them in the vLLM start-up log.")
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +547,7 @@ def main() -> int:
               f"{client.source}")
         report.add("The translation server is reachable", True, client.source)
         report.add("It is serving a model", bool(client.model), client.model)
+        check_engine(client, report)
 
         translator = Translator(backend=client)
         attempts = [attempt(translator, lang, source) for lang, source in SAMPLES]

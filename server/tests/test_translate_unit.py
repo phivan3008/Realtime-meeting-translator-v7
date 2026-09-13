@@ -1,7 +1,7 @@
 """Unit tests for the translation stage.
 
 The model is stubbed - including stubs that behave like a chatty
-instruction-tuned model - so these run without vLLM. Whether Qwen actually
+instruction-tuned model - so these run without vLLM. Whether Gemma actually
 translates well is a question for ``server/tests_real/test_real_translate.py``
 with a server running.
 
@@ -39,15 +39,15 @@ class StubBackend:
 
     def __init__(self, *answers: str):
         self.answers = list(answers) or [""]
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[list[dict[str, str]]] = []
 
-    def complete(self, system: str, user: str) -> str:
-        self.calls.append((system, user))
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        self.calls.append(messages)
         return self.answers[min(len(self.calls) - 1, len(self.answers) - 1)]
 
 
 class BrokenBackend:
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, messages: list[dict[str, str]]) -> str:
         raise TranslationError("no translation server at http://127.0.0.1:8001/v1")
 
 
@@ -194,11 +194,11 @@ def test_every_style_still_names_the_target_language(style):
     context.remember(turn("xin chào", "こんにちは"))
     translator = Translator(backend=StubBackend("x"), context=context,
                             history_style=style)
-    _system, user = translator.build_prompt("はい。", "ja")
+    user = translator.build_prompt("はい。", "ja")
     if style == "plain":
-        assert "into Vietnamese, and into Vietnamese only" not in user
+        assert "và chỉ sang tiếng Việt" not in user
     else:
-        assert "into Vietnamese, and into Vietnamese only" in user
+        assert "và chỉ sang tiếng Việt" in user
 
 
 def test_an_empty_history_contributes_nothing():
@@ -226,37 +226,74 @@ def test_clearing_the_history_forgets_the_meeting():
 # ---------------------------------------------------------------------------
 # The prompt
 # ---------------------------------------------------------------------------
-def test_the_prompt_names_both_languages():
-    system, _user = make().build_prompt("xin chào", "vi")
-    assert "Vietnamese" in system
-    assert "Japanese" in system
+#: The message Gemma is to be sent, word for word, for a Japanese sentence.
+EXACT_JA_TO_VI = (
+    "Bạn là một trợ lý phiên dịch trực tiếp. Hãy dịch câu tiếng Nhật sau "
+    "sang tiếng Việt một cách tự nhiên và chính xác nhất. Chỉ trả về kết quả "
+    "dịch, không giải thích thêm:\n\nはい、承知しました。"
+)
 
 
-def test_the_prompt_asks_for_the_translation_alone():
-    system, _user = make().build_prompt("xin chào", "vi")
-    assert "translation alone" in system
-    assert "no explanation" in system
+def test_without_hint_or_history_the_prompt_is_exactly_the_agreed_one():
+    translator = make(short_line_hint=False)
+    assert translator.build_prompt("はい、承知しました。", "ja") == EXACT_JA_TO_VI
+
+
+def test_the_other_direction_swaps_the_language_names():
+    prompt = make(short_line_hint=False).build_prompt("xin chào", "vi")
+    assert prompt.startswith(
+        "Bạn là một trợ lý phiên dịch trực tiếp. Hãy dịch câu tiếng Việt sau "
+        "sang tiếng Nhật một cách tự nhiên và chính xác nhất.")
+    assert prompt.endswith(":\n\nxin chào")
+
+
+def test_the_message_list_is_one_user_turn_and_no_system_turn():
+    """Gemma's chat template has no system role; vLLM rejects one."""
+    messages = make().build_messages("xin chào", "vi")
+    assert messages == [{"role": "user",
+                         "content": make().build_prompt("xin chào", "vi")}]
+
+
+def test_the_backend_is_sent_the_messages():
+    backend = StubBackend("こんにちは")
+    Translator(backend=backend).translate("xin chào", "vi")
+    assert [m["role"] for m in backend.calls[0]] == ["user"]
+
+
+def test_the_instruction_is_the_first_line():
+    translator = make()
+    translator.context.remember(turn("câu trước"))
+    prompt = translator.build_prompt("câu này", "vi")
+    assert prompt.startswith("Bạn là một trợ lý phiên dịch trực tiếp.")
+    assert prompt.splitlines()[0].endswith("không giải thích thêm:")
+
+
+def test_the_hint_sits_inside_the_instruction():
+    prompt = make(short_line_hint=True).build_prompt("はい", "ja")
+    first = prompt.splitlines()[0]
+    assert "vẫn là một câu" in first
+    assert "dịch sang tiếng Việt, không được giữ nguyên" in first
 
 
 def test_the_sentence_to_translate_is_the_last_thing_in_the_prompt():
     translator = make()
     translator.context.remember(turn("câu trước"))
-    _system, user = translator.build_prompt("câu này", "vi")
+    user = translator.build_prompt("câu này", "vi")
     assert user.strip().endswith("câu này")
 
 
 def test_the_history_is_marked_as_context_not_as_work():
     translator = make()
     translator.context.remember(turn("câu trước"))
-    _system, user = translator.build_prompt("câu này", "vi")
-    assert "do not translate" in user
+    user = translator.build_prompt("câu này", "vi")
+    assert "không dịch các câu này" in user
     assert "câu trước" in user
 
 
 def test_without_history_the_prompt_is_just_the_sentence():
-    _system, user = make().build_prompt("xin chào", "vi")
-    assert "context" not in user
-    assert user.endswith("xin chào")
+    user = make().build_prompt("xin chào", "vi")
+    assert "tham khảo" not in user
+    assert user.endswith("\n\nxin chào")
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +415,7 @@ def test_reset_forgets_the_meeting_and_the_counters():
 # Which checkpoint is actually serving
 # ---------------------------------------------------------------------------
 def test_the_configured_checkpoint_is_the_one_design_md_names():
-    assert TRANSLATE_MODEL == "Qwen/Qwen3.5-9B"
+    assert TRANSLATE_MODEL == "google/gemma-4-12b-it"
 
 
 def choose(wanted: str, served: list[str]) -> str:
@@ -388,18 +425,18 @@ def choose(wanted: str, served: list[str]) -> str:
 
 
 def test_the_configured_model_is_taken_when_the_server_has_it():
-    assert choose("Qwen/Qwen3.5-9B",
-                  ["Qwen/Qwen3.5-9B"]) == "Qwen/Qwen3.5-9B"
+    assert choose("google/gemma-4-12b-it",
+                  ["google/gemma-4-12b-it"]) == "google/gemma-4-12b-it"
 
 
 def test_a_server_running_the_wrong_checkpoint_is_refused():
     """Started on the wrong model, vLLM answers happily and only the
     translations are worse - which no log would ever show."""
     with pytest.raises(TranslationError) as caught:
-        choose("Qwen/Qwen3.5-9B", ["Qwen/Qwen2.5-7B-Instruct"])
+        choose("google/gemma-4-12b-it", ["Qwen/Qwen3.5-9B"])
     message = str(caught.value)
+    assert "google/gemma-4-12b-it" in message
     assert "Qwen/Qwen3.5-9B" in message
-    assert "Qwen/Qwen2.5-7B-Instruct" in message
     assert "--model" in message
 
 
@@ -409,7 +446,86 @@ def test_an_empty_setting_accepts_whatever_is_running():
 
 def test_a_server_with_no_model_is_refused():
     with pytest.raises(TranslationError, match="serving no model"):
-        choose("Qwen/Qwen3.5-9B", [])
+        choose("google/gemma-4-12b-it", [])
+
+
+# ---------------------------------------------------------------------------
+# What is sent to vLLM
+# ---------------------------------------------------------------------------
+def body(messages=None) -> dict:
+    from server.pipeline.translate import VllmClient
+
+    return VllmClient.request_body(
+        "google/gemma-4-12b-it",
+        messages or [{"role": "user", "content": "x"}])
+
+
+def test_the_generation_settings_are_the_agreed_ones():
+    from server.config import TRANSLATE_TEMPERATURE, TRANSLATE_TOP_P
+
+    assert 0.1 <= TRANSLATE_TEMPERATURE <= 0.2
+    assert TRANSLATE_TOP_P == 0.95
+    sent = body()
+    assert sent["temperature"] == TRANSLATE_TEMPERATURE
+    assert sent["top_p"] == 0.95
+
+
+def test_gemmas_stop_strings_are_sent():
+    assert body()["stop"] == ["<end_of_turn>", "<eos>"]
+
+
+def test_the_request_carries_a_fixed_seed():
+    """Above temperature zero, only a seed makes the same sentence give the
+    same answer twice."""
+    assert body()["seed"] == body()["seed"]
+    assert isinstance(body()["seed"], int)
+
+
+def test_the_request_is_a_chat_request_with_the_messages_as_given():
+    messages = [{"role": "user", "content": "câu"}]
+    sent = body(messages)
+    assert sent["messages"] == messages
+    assert sent["model"] == "google/gemma-4-12b-it"
+    assert sent["stream"] is False
+
+
+def test_a_system_message_is_refused_before_it_reaches_vllm():
+    with pytest.raises(TranslationError, match="system"):
+        body([{"role": "system", "content": "you translate"},
+              {"role": "user", "content": "x"}])
+
+
+def test_the_request_is_valid_json():
+    import json
+
+    assert json.loads(json.dumps(body()))["stop"] == ["<end_of_turn>", "<eos>"]
+
+
+def test_the_engine_settings_are_the_agreed_ones():
+    from server.config import (VLLM_DTYPE, VLLM_GPU_MEMORY_UTILIZATION,
+                               VLLM_MAX_MODEL_LEN, VLLM_TRUST_REMOTE_CODE)
+
+    assert VLLM_DTYPE == "bfloat16"
+    assert VLLM_MAX_MODEL_LEN == 4096
+    assert 0.85 <= VLLM_GPU_MEMORY_UTILIZATION <= 0.9
+    assert VLLM_TRUST_REMOTE_CODE is True
+
+
+@pytest.mark.parametrize("token", ["<end_of_turn>", "<eos>", "<start_of_turn>"])
+def test_a_leaked_gemma_turn_marker_is_not_part_of_the_answer(token):
+    assert clean(f"こんにちは{token}") == "こんにちは"
+
+
+def test_the_prompt_fits_the_context_many_times_over():
+    """Three turns of history and a long sentence are far inside 4096 tokens,
+    even counting one token per character."""
+    from server.config import VLLM_MAX_MODEL_LEN
+
+    translator = make()
+    for index in range(TRANSLATE_HISTORY):
+        translator.context.remember(turn("câu rất dài " * 20 + str(index)))
+    prompt = translator.build_prompt("câu rất dài " * 20, "vi")
+    assert len(prompt) < VLLM_MAX_MODEL_LEN // 2
 
 
 # ---------------------------------------------------------------------------
@@ -485,11 +601,9 @@ def test_an_echoed_sentence_is_refused():
     assert result.raw == "Bản dựng thứ ba。"
 
 
-def test_the_prompt_no_longer_offers_to_repeat_the_line():
-    """That clause invited the echo it was meant to allow for."""
-    system, _user = make().build_prompt("xin chào", "vi")
-    assert "repeat it" not in system.lower()
-    assert "never repeat the line back" in system.lower()
+def test_the_prompt_asks_for_the_translation_alone():
+    user = make().build_prompt("xin chào", "vi")
+    assert "Chỉ trả về kết quả dịch, không giải thích thêm" in user
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +710,7 @@ def test_the_guard_refuses_through_the_translator():
     source, echoed = UNTRANSLATED
 
     class Echoing:
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
             return echoed
 
     result = Translator(backend=Echoing()).translate(source, "ja")
@@ -610,7 +724,7 @@ def test_a_good_translation_still_passes_through_the_translator():
     answer = "V\u00e2ng, t\u00f4i \u0111\u00e3 hi\u1ec3u."
 
     class Working:
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
             return answer
 
     result = Translator(backend=Working()).translate(

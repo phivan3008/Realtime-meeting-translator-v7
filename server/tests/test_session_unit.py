@@ -503,8 +503,8 @@ class StubBackend:
         self.answer = answer
         self.calls: list[str] = []
 
-    def complete(self, system: str, user: str) -> str:
-        self.calls.append(user)
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        self.calls.append(messages[-1]["content"])
         return self.answer
 
 
@@ -564,7 +564,7 @@ def test_the_translation_follows_the_sentence_it_belongs_to():
 def test_the_sentence_does_not_wait_for_the_translation():
     """The whole point: an LLM call must not sit on the audio path."""
     class Slow:
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
             raise AssertionError("the translator was called on the audio path")
 
     from server.pipeline.asr import Transcriber
@@ -664,7 +664,7 @@ def test_a_translator_that_raises_costs_one_translation(caplog):
     """It runs off the audio path now, so it cannot reach the pipeline error
     handler at all - and must not take the worker down with it either."""
     class Exploding:
-        def complete(self, system: str, user: str) -> str:
+        def complete(self, messages: list[dict[str, str]]) -> str:
             raise RuntimeError("the translator fell over")
 
     session, _decoder, _backend = full_session([0.9] * 14 + [0.02],

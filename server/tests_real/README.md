@@ -80,13 +80,25 @@ by hand against Whisper's allocation; out of process each side sees a GPU it
 can reason about, and the LLM can be restarted without dropping a meeting.
 
 ```bash
-python3.11 -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen3.5-9B \
-    --port 8001 --gpu-memory-utilization 0.55
+python3.11 server/launch_vllm.py          # add --print to see the command only
 ```
 
-Leave headroom: Whisper large-v3 and the three small models want a few GB of
-the same card. `TRANSLATE_BASE_URL` points the audio server at it.
+It builds the command from `server/config.py`:
+
+```bash
+python3.11 -m vllm.entrypoints.openai.api_server \
+    --model google/gemma-4-12b-it --port 8001 --dtype bfloat16 \
+    --max-model-len 4096 --gpu-memory-utilization 0.85 --trust-remote-code
+```
+
+`bfloat16` is required for Gemma: float16 gives garbage or NaN, not an error.
+vLLM claims 85% of the whole card and will not start if that much is not
+free, so start it **before** the audio server loads Whisper and the three small
+models into the rest. `TRANSLATE_BASE_URL` points the audio server at it.
+
+Gemma's chat template has no system role, so the app sends one `user` message
+holding the instruction and the sentence, with `temperature` 0.1, `top_p` 0.95,
+a fixed `seed`, and `stop` `["<end_of_turn>", "<eos>"]`.
 
 The checkpoint must match `TRANSLATE_MODEL` in `server/config.py`. The client
 checks at connect time and refuses a server running something else: vLLM would

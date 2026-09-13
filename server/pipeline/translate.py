@@ -1,8 +1,15 @@
 """Translation - step 8 of the server pipeline, and the last one.
 
-``DESIGN.md`` section 3.8: Qwen behind vLLM, text to text, given the previous
+``DESIGN.md`` section 3.8: Gemma behind vLLM, text to text, given the previous
 two or three sentences of the meeting plus the language the LID decided and
 the sentence Whisper committed.
+
+Gemma has no system role
+------------------------
+Gemma's chat template knows two roles, user and model, and vLLM rejects a
+request carrying a ``system`` message. So there is no system prompt: the
+whole instruction is the first line of the one user message, and the
+sentence to translate is its last line.
 
 What the history is for, and what it is not for
 -----------------------------------------------
@@ -64,8 +71,12 @@ from server.config import (
     TRANSLATE_MAX_TOKENS,
     TRANSLATE_MODEL,
     TRANSLATE_PAIR,
+    TRANSLATE_SEED,
+    TRANSLATE_STOP,
     TRANSLATE_TEMPERATURE,
     TRANSLATE_TIMEOUT_S,
+    TRANSLATE_TOP_P,
+    VLLM_MAX_MODEL_LEN,
 )
 
 log = logging.getLogger(__name__)
@@ -91,6 +102,10 @@ _LEAD_IN = re.compile(
 #: would otherwise return 512 tokens of thinking and no translation.
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _UNCLOSED_THINK = re.compile(r"^\s*<think>.*", re.DOTALL | re.IGNORECASE)
+#: Gemma's turn markers. The stop strings end generation on them and vLLM
+#: normally drops special tokens from the text, so these should never arrive;
+#: if a server is configured otherwise, they are not part of the translation.
+_CONTROL_TOKENS = re.compile(r"<(?:start_of_turn|end_of_turn|eos|bos)>")
 
 #: Quote pairs a model reaches for when asked for exactly one line.
 _QUOTES = (('"', '"'), ("'", "'"), ("「", "」"), ("“", "”"), ("『", "』"))
@@ -102,7 +117,8 @@ def clean(answer: str) -> str:
     Applied repeatedly, because the additions stack: "Sure! Here is the
     translation: 「...」" is three of them in front of one sentence.
     """
-    text = _THINK.sub("", answer).strip()
+    text = _CONTROL_TOKENS.sub("", answer)
+    text = _THINK.sub("", text).strip()
     if _UNCLOSED_THINK.match(text):
         # The whole budget went on thinking and the answer never arrived.
         return ""
@@ -324,26 +340,38 @@ class TranslationStats:
 class Backend(Protocol):
     """What :class:`Translator` needs; a stub satisfies it in the tests."""
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, messages: list[dict[str, str]]) -> str:
         ...                                         # pragma: no cover
 
 
-SYSTEM_PROMPT = (
-    "You are a translator inside a live meeting transcript. "
-    "The final line is in {source_name}. Write it in {target_name}. "
-    "Reply with the {target_name} translation alone: no preface, no quotes, no "
-    "notes, no explanation, no romanisation. Keep names, numbers and technical "
-    "terms exactly as they are. Never repeat the line back in {source_name}."
+#: The instruction, as the first line of the user message. With no hint and
+#: no history the whole message is exactly::
+#:
+#:     Bạn là một trợ lý phiên dịch trực tiếp. Hãy dịch câu tiếng Nhật sau
+#:     sang tiếng Việt một cách tự nhiên và chính xác nhất. Chỉ trả về kết quả
+#:     dịch, không giải thích thêm:
+#:
+#:     <sentence>
+INSTRUCTION = (
+    "Bạn là một trợ lý phiên dịch trực tiếp. Hãy dịch câu tiếng {source_name} "
+    "sau sang tiếng {target_name} một cách tự nhiên và chính xác nhất.{hint} "
+    "Chỉ trả về kết quả dịch, không giải thích thêm:"
 )
 
-#: Appended to the system prompt. A meeting is mostly short lines, and the
+#: Inserted into the instruction. A meeting is mostly short lines, and the
 #: model handed はい straight back - it is a whole turn of a Japanese meeting
 #: and one of the commonest lines there is. Other short lines translated fine
 #: on the same run (えっ -> Eh?, いや違います -> Không, tôi nhầm rồi), so this
 #: is about single words rather than length as such.
 SHORT_LINE_HINT = (
-    " A line of one word, an interjection or a filler is still a line: write "
-    "it in {target_name} too, never leave it as it was."
+    " Câu chỉ có một từ, một thán từ hay một từ đệm vẫn là một câu: cũng phải "
+    "dịch sang tiếng {target_name}, không được giữ nguyên."
+)
+
+#: Introduces the history. Worded so the model reads it and leaves it alone.
+HISTORY_HEADER = (
+    "Các câu trước đó trong cuộc họp, chỉ để tham khảo ngữ cảnh, "
+    "không dịch các câu này:"
 )
 
 
@@ -376,41 +404,48 @@ class Translator:
 
     def build_prompt(self, source: str, lang_code: str,
                      history_style: str = "",
-                     short_line_hint: Optional[bool] = None) -> tuple[str, str]:
-        """The system and user messages, so a test can read them.
+                     short_line_hint: Optional[bool] = None) -> str:
+        """The one user message, as text, so a test can read it.
 
         ``history_style`` overrides this translator's own, so
         ``server/tests_real/test_real_translate.py`` can put every version to
         a real model on the same history and read the answers side by side.
-        ``"plain"`` rebuilds the prompt exactly as it was before any of this,
+        ``"plain"`` leaves out the instruction repeated after the history,
         which is how the diagnosis was confirmed rather than assumed.
         """
         style = history_style or self.history_style
         hint = self.short_line_hint if short_line_hint is None else short_line_hint
         target = target_language(lang_code)
-        target_name = LANGUAGE_NAMES.get(target, "the other language")
-        system = (SYSTEM_PROMPT + (SHORT_LINE_HINT if hint else "")).format(
-            source_name=LANGUAGE_NAMES.get(lang_code, "the source language"),
+        target_name = LANGUAGE_NAMES.get(target, target)
+        instruction = INSTRUCTION.format(
+            source_name=LANGUAGE_NAMES.get(lang_code, lang_code),
             target_name=target_name,
+            hint=SHORT_LINE_HINT.format(target_name=target_name) if hint else "",
         )
         history = self.context.as_prompt(style=style)
         if not history:
-            return system, f"Translate this line into {target_name}:\n{source}"
+            return f"{instruction}\n\n{source}"
         if style == "plain":
-            return system, (
-                "Earlier in the meeting, for context only - do not translate "
-                f"these:\n{history}\n\nTranslate this line:\n{source}"
-            )
-        # The instruction is repeated after the history as well as in the
-        # system message. The history is the last text the model reads before
-        # answering, and a run of lines all going the same way outweighed a
-        # system prompt asking for the other one.
-        user = (
-            "Earlier in the meeting, for context only - do not translate "
-            f"these:\n{history}\n\nNow translate the following line "
-            f"into {target_name}, and into {target_name} only:\n{source}"
+            return (f"{instruction}\n\n{HISTORY_HEADER}\n{history}\n\n"
+                    f"Câu cần dịch:\n{source}")
+        # The direction is repeated after the history as well as in the
+        # instruction. The history is the last text the model reads before
+        # answering, and a run of lines all going the same way outweighed an
+        # instruction asking for the other one.
+        return (
+            f"{instruction}\n\n{HISTORY_HEADER}\n{history}\n\n"
+            f"Câu cần dịch sang tiếng {target_name}, và chỉ sang tiếng "
+            f"{target_name}:\n{source}"
         )
-        return system, user
+
+    def build_messages(self, source: str, lang_code: str,
+                       history_style: str = "",
+                       short_line_hint: Optional[bool] = None,
+                       ) -> list[dict[str, str]]:
+        """The chat messages sent to vLLM: one user turn, never a system one."""
+        return [{"role": "user",
+                 "content": self.build_prompt(source, lang_code, history_style,
+                                              short_line_hint)}]
 
     def translate(self, source: str, lang_code: str,
                   speaker_id: str = "") -> Translation:
@@ -424,9 +459,9 @@ class Translator:
             return self._refuse(source, lang_code, target,
                                 "the language was undecided")
 
-        system, user = self.build_prompt(source, lang_code)
+        messages = self.build_messages(source, lang_code)
         try:
-            answer = self.backend.complete(system, user)
+            answer = self.backend.complete(messages)
         except TranslationError as exc:
             result = Translation("", source, lang_code, target, str(exc))
             self.stats.record(result, failed=True)
@@ -511,10 +546,19 @@ class VllmClient:
         self.base_url = (base_url or TRANSLATE_BASE_URL).rstrip("/")
         self.timeout = timeout
         wanted = model or TRANSLATE_MODEL
+        self._cards: dict[str, dict] = {}
         served = self.served_models()
         self.model = choose_model(wanted, served, self.base_url)
-        log.info("Translation backend ready: %s at %s", self.model,
-                 self.base_url)
+        #: The context length the server was started with, if it says.
+        self.max_model_len: Optional[int] = self._cards.get(
+            self.model, {}).get("max_model_len")
+        if self.max_model_len is not None and self.max_model_len != VLLM_MAX_MODEL_LEN:
+            log.warning("vLLM is serving %s with max_model_len=%s, not the "
+                        "configured %d; it was not started by "
+                        "server/launch_vllm.py", self.model,
+                        self.max_model_len, VLLM_MAX_MODEL_LEN)
+        log.info("Translation backend ready: %s at %s (max_model_len=%s)",
+                 self.model, self.base_url, self.max_model_len)
 
     def served_models(self) -> list[str]:
         """What this server is actually serving."""
@@ -525,27 +569,39 @@ class VllmClient:
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             raise TranslationError(
                 f"No translation server at {self.base_url}: {exc}. Start vLLM "
-                f"with `python3.11 -m vllm.entrypoints.openai.api_server "
-                f"--model {TRANSLATE_MODEL or '<checkpoint>'} --port 8001`."
+                "with `python3.11 server/launch_vllm.py`."
             ) from exc
-        return [str(entry.get("id", "")) for entry in (payload.get("data") or [])]
+        cards = [entry for entry in (payload.get("data") or [])
+                 if isinstance(entry, dict)]
+        self._cards = {str(card.get("id", "")): card for card in cards}
+        return [str(card.get("id", "")) for card in cards]
 
-
-    def complete(self, system: str, user: str) -> str:
-        body = json.dumps({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+    @staticmethod
+    def request_body(model: str, messages: list[dict[str, str]]) -> dict:
+        """The chat completion request, separate so a test can read it."""
+        roles = {message.get("role") for message in messages}
+        if not messages or not roles <= {"user", "assistant"}:
+            # Gemma's chat template raises on a system turn, and vLLM answers
+            # that with a 400 for every sentence of the meeting.
+            raise TranslationError(
+                f"Gemma takes user and assistant turns only, got {sorted(roles)}")
+        return {
+            "model": model,
+            "messages": messages,
             "temperature": TRANSLATE_TEMPERATURE,
+            "top_p": TRANSLATE_TOP_P,
+            "seed": TRANSLATE_SEED,
+            "stop": list(TRANSLATE_STOP),
             "max_tokens": TRANSLATE_MAX_TOKENS,
             "stream": False,
             # Qwen3 reasons before answering unless the chat template is told
-            # not to. A server whose template ignores this is caught by the
-            # <think> stripping instead.
+            # not to. A template without the switch ignores it, and a server
+            # that ignores it is caught by the <think> stripping instead.
             "chat_template_kwargs": {"enable_thinking": TRANSLATE_ENABLE_THINKING},
-        }).encode("utf-8")
+        }
+
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        body = json.dumps(self.request_body(self.model, messages)).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions", data=body,
             headers={"Content-Type": "application/json"}, method="POST",
@@ -553,6 +609,12 @@ class VllmClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            # vLLM puts the reason in the body - a rejected role, a prompt past
+            # max_model_len - and the status line alone does not say which.
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            raise TranslationError(
+                f"translation request failed: {exc}: {detail}") from exc
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             raise TranslationError(f"translation request failed: {exc}") from exc
 

@@ -381,19 +381,53 @@ TRANSLATE_BASE_URL = os.environ.get("TRANSLATE_BASE_URL",
 # serving something else, because a quietly substituted model is a difference
 # nobody would see in the logs and everybody would see in the translations.
 # Set to empty to accept whatever the server happens to be serving.
-TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "Qwen/Qwen3.5-9B")
+#
+# The name the server reports is whatever --model was given, so if vLLM is
+# started from a local directory, set this to that path instead.
+TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "google/gemma-4-12b-it")
 TRANSLATE_TIMEOUT_S = float(os.environ.get("TRANSLATE_TIMEOUT_S", "20"))
 
-# Translation is not a creative task and the same sentence twice should give
-# the same answer twice.
-TRANSLATE_TEMPERATURE = 0.0
+# How vLLM itself is started for that checkpoint. The audio server never
+# starts vLLM - it runs as its own process - so these are read by
+# ``server/launch_vllm.py``, which builds the command from them, and nothing
+# else. Kept here so the engine and the requests are configured in one place.
+#
+# bfloat16 is not a speed choice. Gemma was trained in bfloat16 and float16
+# overflows in its activations: the symptom is garbage text or NaN, not an
+# error, so it is set explicitly rather than left to --dtype auto.
+VLLM_DTYPE = "bfloat16"
+# One sentence plus three sentences of history is a few hundred tokens. The
+# context vLLM does not reserve is KV cache it does not have to allocate.
+VLLM_MAX_MODEL_LEN = 4096
+# Fraction of the WHOLE card vLLM claims at start-up, and vLLM refuses to start
+# if that much is not free. Whisper, AST, ECAPA and VoxLingua share the card,
+# so vLLM has to be started before the audio server loads them.
+VLLM_GPU_MEMORY_UTILIZATION = float(
+    os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.85")
+)
+VLLM_TRUST_REMOTE_CODE = True
+VLLM_PORT = int(os.environ.get("VLLM_PORT", "8001"))
+
+# Translation is not a creative task: the answer should follow the sentence
+# closely, not paraphrase it. Low, but not zero, as recommended for Gemma.
+TRANSLATE_TEMPERATURE = 0.1
+TRANSLATE_TOP_P = 0.95
+# At a temperature above zero the same sentence twice is no longer guaranteed
+# the same answer. A fixed per-request seed puts that guarantee back, which
+# the real test checks.
+TRANSLATE_SEED = 0
+
+# Gemma's end-of-turn markers. Without them the model can run on past its
+# answer and start the next turn itself, which would be shown as translation.
+TRANSLATE_STOP = ("<end_of_turn>", "<eos>")
 
 # Qwen3 reasons before it answers, emitting a <think> block first. For a
 # sentence-length translation that is all cost and no benefit: the first run
 # against Qwen3.5-9B spent its entire 512-token budget thinking and returned
 # no translation at all, at 3.5 s a sentence. Turned off through the chat
 # template; the <think> stripping in translate.py stays as a second line of
-# defence for a server that ignores the flag.
+# defence for a server that ignores the flag. A chat template that has no such
+# switch ignores it.
 TRANSLATE_ENABLE_THINKING = False
 
 # DESIGN.md asks for two or three previous sentences of context. Enough for
@@ -498,5 +532,5 @@ TRANSLATE_MAX_WRONG_SCRIPT = 0.30
 
 #: Which language each one becomes.
 TRANSLATE_PAIR = {"vi": "ja", "ja": "vi"}
-#: Human names, for the prompt.
-LANGUAGE_NAMES = {"vi": "Vietnamese", "ja": "Japanese"}
+#: Human names, as the prompt writes them after "tiếng": "tiếng Việt".
+LANGUAGE_NAMES = {"vi": "Việt", "ja": "Nhật"}
