@@ -155,6 +155,15 @@ class ServerSession:
         #: segment, so they cannot be used for it.
         self._sentences = 0
 
+        # Streaming ASR state.
+        #
+        # Buffer utterance indexes restart for each speech segment, so include the
+        # session ID when constructing the ASR utterance ID. The same ID must be used
+        # for every rolling partial and for the corresponding final utterance.
+        self._active_asr_utterance_id = ""
+        self._active_asr_utterance_index: Optional[int] = None
+        self._active_asr_start_ms: Optional[int] = None
+
     @property
     def session_id(self) -> str:
         return self.hello.session_id if self.hello else ""
@@ -211,6 +220,9 @@ class ServerSession:
             self.language_identifier.reset()
         if self.transcriber is not None:
             self.transcriber.reset()
+        self._active_asr_utterance_id = ""
+        self._active_asr_utterance_index = None
+        self._active_asr_start_ms = None
         if self.translator is not None:
             # A new meeting carries none of the last one's context.
             self.translator.reset()
@@ -310,6 +322,142 @@ class ServerSession:
             self.stats.stage_seconds[stage] = (
                 self.stats.stage_seconds.get(stage, 0.0) + spent)
 
+    def _asr_utterance_id(self, utterance) -> str:
+        """Return a stable ID shared by partials and the matching final.
+
+        Buffer objects are expected to expose ``index``. The session ID prevents
+        collisions between separate WebSocket sessions.
+        """
+
+        index = getattr(utterance, "index", None)
+
+        if index is None:
+            # A partial should normally carry the same index as its final. This
+            # fallback keeps one stable ID for the currently open utterance if an
+            # older BufferManager implementation does not expose partial.index.
+            if self._active_asr_utterance_id:
+                return self._active_asr_utterance_id
+
+            index = self.stats.utterances + 1
+
+        return f"{self.session_id or 'session'}:{index}"
+
+
+    def _remember_active_asr_utterance(self, utterance) -> str:
+        """Remember the identity and timeline origin of an open utterance."""
+
+        utterance_id = self._asr_utterance_id(utterance)
+        index = getattr(utterance, "index", None)
+        start_ms = getattr(utterance, "start_ms", None)
+
+        if (
+            self._active_asr_utterance_id
+            and utterance_id != self._active_asr_utterance_id
+            and self.transcriber is not None
+        ):
+            # Defensive cleanup. Normally BufferManager finishes one utterance
+            # before opening another, but stale ASR state must not leak between
+            # utterances.
+            self.transcriber.cancel_utterance(
+                self._active_asr_utterance_id
+            )
+
+        self._active_asr_utterance_id = utterance_id
+        self._active_asr_utterance_index = index
+
+        # Preserve the earliest known start. Calling tail() may move start_ms to
+        # the beginning of the rolling window, so that value cannot replace the
+        # original utterance origin.
+        if self._active_asr_start_ms is None:
+            self._active_asr_start_ms = start_ms
+        elif start_ms is not None:
+            self._active_asr_start_ms = min(
+                self._active_asr_start_ms,
+                start_ms,
+            )
+
+        return utterance_id
+
+
+    def _partial_window_start_seconds(
+        self,
+        partial,
+        window,
+    ) -> float:
+        """Return rolling-window start relative to the utterance origin."""
+
+        utterance_start_ms = self._active_asr_start_ms
+        window_start_ms = getattr(window, "start_ms", None)
+
+        if (
+            utterance_start_ms is not None
+            and window_start_ms is not None
+        ):
+            return max(
+                0.0,
+                (window_start_ms - utterance_start_ms) / 1000.0,
+            )
+
+        # Compatibility fallback for buffer objects that do not preserve start_ms
+        # when tail() is called. The rolling window ends at the newest received
+        # audio, so its relative start is total duration minus window duration.
+        full_duration_seconds = len(partial.pcm) / 2 / SAMPLE_RATE
+        window_duration_seconds = len(window.pcm) / 2 / SAMPLE_RATE
+
+        return max(
+            0.0,
+            full_duration_seconds - window_duration_seconds,
+        )
+
+
+    def _final_speech_end_seconds(self, utterance, pcm: bytes) -> float:
+        """Return Silero speech end relative to the utterance PCM start.
+
+        BufferManager finals are expected to end at the VAD speech boundary. When
+        timeline metadata is unavailable, use the PCM duration.
+        """
+
+        start_ms = getattr(utterance, "start_ms", None)
+        end_ms = getattr(utterance, "end_ms", None)
+
+        if start_ms is not None and end_ms is not None:
+            return max(
+                0.0,
+                (end_ms - start_ms) / 1000.0,
+            )
+
+        return len(pcm) / 2 / SAMPLE_RATE
+
+
+    def _clear_active_asr_utterance(self, utterance_id: str) -> None:
+        """Clear session-side state after finalization."""
+
+        if utterance_id != self._active_asr_utterance_id:
+            return
+
+        self._active_asr_utterance_id = ""
+        self._active_asr_utterance_index = None
+        self._active_asr_start_ms = None
+
+
+    @staticmethod
+    def _running_transcript_text(transcript) -> str:
+        """Render complete running text for the existing replace-only protocol.
+
+        StreamingTranscriber emits committed text and unstable text separately.
+        The current WebSocket protocol has only ``make_partial()``, whose text
+        replaces the previous running text, so send their complete combination.
+        """
+
+        return " ".join(
+            part.strip()
+            for part in (
+                transcript.committed_text,
+                transcript.partial_text,
+            )
+            if part and part.strip()
+        )
+
     def _announce(self, result: BufferOutput) -> list[str]:
         """Classify each finished sentence, then put it on the wire."""
         messages = []
@@ -360,14 +508,35 @@ class ServerSession:
                 lang_code = self._language_for(decision)
 
             transcript = None
+            asr_utterance_id = self._asr_utterance_id(utterance)
+
             if keep and self.transcriber is not None:
-                # The shaped audio, not the raw: gating is what the overlap
-                # resolver is for, and this is the stage it was for.
+                # Use the same utterance ID that was used by rolling partial calls.
+                #
+                # finish_utterance() preserves already committed text and decodes only
+                # the remaining endpoint tail with a short overlap for left context.
                 with self._timed("asr", spent):
-                    transcript = self.transcriber.transcribe(audio, lang_code,
-                                                             is_final=True)
+                    transcript = self.transcriber.finish_utterance(
+                        audio,
+                        utterance_id=asr_utterance_id,
+                        utterance_start_seconds=0.0,
+                        speech_end_seconds=self._final_speech_end_seconds(
+                            utterance,
+                            audio,
+                        ),
+                        lang_code=lang_code,
+                    )
+
+                self._clear_active_asr_utterance(asr_utterance_id)
+
                 if transcript.has_text:
                     self.stats.transcripts += 1
+
+            elif self.transcriber is not None:
+                # The utterance was rejected by the noise stage. Remove any stabilization
+                # state created by its earlier partial calls.
+                self.transcriber.cancel_utterance(asr_utterance_id)
+                self._clear_active_asr_utterance(asr_utterance_id)
 
             messages.append(
                 make_utterance(
@@ -412,10 +581,12 @@ class ServerSession:
                                        transcript.lang_code, speaker_id)
             self._report_if_slow(utterance, spent)
         self.stats.utterances += len(result.finals)
-        self.stats.events_sent += len(messages)
+
         if result.partial is not None:
             self.stats.partials += 1
             messages += self._transcribe_partial(result.partial)
+
+        self.stats.events_sent += len(messages)
         return messages
 
     def _report_if_slow(self, utterance, spent: dict) -> None:
@@ -441,41 +612,81 @@ class ServerSession:
         )
 
     def _transcribe_partial(self, partial) -> list[str]:
-        """The grey running text, replaced by the next one a second later.
+        """Decode and stabilize the current rolling ASR window.
 
-        No speaker label goes out with it. Identity can wait for the final:
-        showing a name and then correcting it reads worse than showing none.
-        The language cannot wait, because it changes the text itself.
+        The StreamingTranscriber can emit a committed delta followed by a partial
+        event. The existing protocol does not expose a separate committed event,
+        so this method sends one replace-only partial containing:
 
-        Timed separately from the committed sentences, and it has to be. This
-        runs every 600 ms on the *whole* open utterance, so a seven-second
-        sentence is decoded eleven times at growing lengths - far more work
-        than the one final decode. Measured only on finals, a ten-minute run
-        reported "slowest sentence 0.4 s" while the connection stalled for
-        eleven seconds inside this function.
+            complete committed text + complete unstable suffix
         """
+
         if self.transcriber is None:
             return []
-        # Only the tail of a long sentence. See PARTIAL_WINDOW_SECONDS: the
-        # full window cost more than every committed sentence put together.
-        partial = partial.tail(PARTIAL_WINDOW_SECONDS)
+
+        utterance_id = self._remember_active_asr_utterance(partial)
+
+        # Keep only the configured rolling tail. The ASR still needs the position
+        # of that tail relative to the beginning of the complete utterance.
+        window = partial.tail(PARTIAL_WINDOW_SECONDS)
+        window_start_seconds = self._partial_window_start_seconds(
+            partial,
+            window,
+        )
+
         spent: dict[str, float] = {}
         lang_code = ""
+
         if self.language_identifier is not None:
-            # A partial is a fragment of a sentence and shorter still than the
-            # utterances the LID already struggles with, so the fallback below
-            # matters more here, not less.
+            # A partial is shorter than a final utterance, so use the last known
+            # meeting language whenever LID cannot make a confident decision.
             with self._timed("partial_language", spent):
-                decision = self.language_identifier.identify(partial.pcm)
+                decision = self.language_identifier.identify(window.pcm)
+
+            if decision.known:
+                self._last_language = decision.lang_code
+
             lang_code = self._language_for(decision)
+
         with self._timed("partial_asr", spent):
-            transcript = self.transcriber.transcribe(partial.pcm, lang_code,
-                                                     is_final=False)
-        self._report_if_partial_slow(partial, spent)
-        if not transcript.has_text:
+            events = self.transcriber.process_partial(
+                window.pcm,
+                utterance_id=utterance_id,
+                window_start_seconds=window_start_seconds,
+                lang_code=lang_code,
+            )
+
+        self._report_if_partial_slow(window, spent)
+
+        # process_partial() normally returns an optional committed event followed
+        # by exactly one partial event. Only the latest partial should be placed on
+        # the replace-only WebSocket channel.
+        partial_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.kind == "partial"
+            ),
+            None,
+        )
+
+        if partial_event is None:
             return []
-        self.stats.transcripts += 1
-        return [make_partial("", transcript.lang_code, transcript.text)]
+
+        running_text = self._running_transcript_text(partial_event)
+
+        # An empty partial is meaningful: it clears an older unstable hypothesis.
+        # Therefore do not suppress the message merely because running_text is
+        # empty.
+        self.stats.transcripts += int(bool(running_text.strip()))
+
+        return [
+            make_partial(
+                "",
+                partial_event.lang_code,
+                running_text,
+            )
+        ]
 
     def _report_if_partial_slow(self, partial, spent: dict) -> None:
         """Say so when the running text is what held up the connection."""
