@@ -42,7 +42,17 @@ onnxruntime==1.29.0        # optional ONNX backend for Silero VAD
 # See server/pipeline/noise.py for why AST and not YAMNet. In short: YAMNet
 # means TensorFlow, TF pins numpy < 2.1 and protobuf 4.x, and everything else
 # on this list needs numpy >= 2.
-transformers==5.15.1
+#
+# Held at 5.14.1 for vLLM 0.26.0 and Gemma 4. Transformers 5.15.0 made Gemma
+# 4's head_dim a per-layer attribute (256 on sliding layers, 512 on full
+# attention), and reading it from the global config now raises
+# AmbiguousGlobalPerLayerAttributeError. vLLM 0.26.0 reads it globally, so it
+# cannot even build the model config; per-layer reading arrived in vLLM
+# 0.28.0, which needs torch 2.13. 5.14.1 is the last release before the change,
+# the one vLLM 0.26.0 shipped against, and has identical dependencies.
+# Forcing allow_global_per_layer_attribute_access instead would size the full
+# attention layers with the sliding head_dim.
+transformers==5.14.1
 
 # --- 3. Overlap Resolver (DSP) ---
 pedalboard==0.9.24
@@ -81,6 +91,7 @@ rich==15.0.0
 #
 # vllm is the tightest constraint in the file and decides most of it:
 #   vllm >= 0.26  ->  transformers >= 5.5.3   (so transformers 4.x is out)
+#   vllm <  0.28  ->  transformers <  5.15    (Gemma 4 per-layer head_dim)
 #   vllm          ->  a specific torch minor
 #
 # torch then decides torchaudio and torchvision, and numpy >= 2 follows from
