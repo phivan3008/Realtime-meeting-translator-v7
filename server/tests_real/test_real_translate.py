@@ -373,33 +373,50 @@ def check_repeatable(translator_factory, report: Report) -> None:
 
 
 def check_context(client, report: Report) -> None:
-    """A sentence that cannot be translated well without the previous ones."""
-    lang, source = CONTEXT_SENTENCE
-    context = TranslationContext(size=TRANSLATE_HISTORY)
-    for turn in CONTEXT_HISTORY:
-        context.remember(turn)
-    with_history = Translator(backend=client, context=context)
-    without = Translator(backend=client, context=TranslationContext())
+    """Does the history reach the model and change what it writes?
 
+    One probe cannot carry this. 終わりました。 was chosen because Japanese
+    drops the subject, but Vietnamese drops it just as freely: gemma-4-12b-it
+    answered "Xong rồi." with the history and without it, and both are
+    correct. The same run showed the history at work elsewhere - 薬師さん
+    became "dược sĩ" (a pharmacist) without it and "anh Yakushi" with it -
+    and this check had no way to see that.
+
+    So every probe that has a history is translated both ways, all of them
+    are printed, and the check passes when any one of them changes. A model
+    that ignores the history still fails it, which is what it is for.
+    """
+    probes = [(CONTEXT_HISTORY, *CONTEXT_SENTENCE)] + [
+        (CUT_HISTORY, lang, source) for lang, source in CUT_SENTENCES
+    ]
     print("\n  With and without history:")
-    print(f"    history: {[t.source for t in CONTEXT_HISTORY]}")
-    print(f"    line   : {source}")
-    first = with_history.translate(source, lang)
-    second = without.translate(source, lang)
-    print(f"      with   : {first.text}")
-    print(f"      without: {second.text}")
-    report.add("Both attempts answered", first.ok and second.ok,
-               f"{first.reason or 'ok'} / {second.reason or 'ok'}")
+    refused = []
+    changed = []
+    for history, lang, source in probes:
+        context = TranslationContext(size=TRANSLATE_HISTORY)
+        for turn in history:
+            context.remember(turn)
+        first = Translator(backend=client, context=context).translate(source, lang)
+        second = Translator(backend=client,
+                            context=TranslationContext()).translate(source, lang)
+        print(f"\n    history: {[t.source[:30] for t in history]}")
+        print(f"    line   : {source}")
+        print(f"      with   : {first.text if first.ok else 'REFUSED: ' + first.reason}")
+        print(f"      without: {second.text if second.ok else 'REFUSED: ' + second.reason}")
+        if not (first.ok and second.ok):
+            refused.append(source[:20])
+        elif first.text.strip() != second.text.strip():
+            changed.append(source[:20])
+
+    report.add("Both attempts answered", not refused,
+               f"{len(refused)} probe(s) refused: {refused}")
     # Asserting only that both answered was a check that could not fail. The
     # question is whether the history changed anything.
-    report.add(
-        "The history changes the translation",
-        first.ok and second.ok and first.text.strip() != second.text.strip(),
-        f"{first.text!r} vs {second.text!r}",
-    )
-    print("    Read both. With the history the subject is available to name; "
-          "without it there is nothing to name. Identical output means the "
-          "history is not reaching the model, or is being ignored.")
+    report.add("The history changes the translation", bool(changed),
+               f"{len(changed)} of {len(probes)} probes changed: {changed}")
+    print("\n    Read them. Identical output means the history is not reaching "
+          "the model, or is being ignored - on one probe that can be a "
+          "correct translation, on every probe it cannot.")
 
 
 def check_engine(client, report: Report) -> None:

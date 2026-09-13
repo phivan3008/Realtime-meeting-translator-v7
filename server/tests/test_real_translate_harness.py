@@ -225,6 +225,27 @@ def test_the_context_case_sends_the_history_to_the_model(capsys):
     assert "Identical output means" in capsys.readouterr().out
 
 
+def test_one_probe_that_needs_no_history_does_not_fail_the_check():
+    """終わりました。 -> "Xong rồi." is right with or without a subject, which
+    is what gemma-4-12b-it did on its first real run."""
+    class SubjectlessOnce(StubClient):
+        def complete(self, messages):
+            if messages[-1]["content"].endswith("終わりました。"):
+                self.calls.append(messages[-1]["content"])
+                return "Xong rồi."
+            return super().complete(messages)
+
+    report = harness.Report()
+    harness.check_context(SubjectlessOnce(), report)
+    assert report.failed == []
+
+
+def test_every_history_probe_is_tried_both_ways():
+    client = StubClient()
+    harness.check_context(client, harness.Report())
+    assert len(client.calls) == 2 * (1 + len(harness.CUT_SENTENCES))
+
+
 def test_a_model_that_ignores_the_history_is_caught():
     """The old check asserted only that both attempts answered, which no
     model could fail."""
@@ -497,8 +518,10 @@ def test_a_model_that_hands_a_one_word_line_back_is_caught():
     ]
 
 
-def test_a_hint_that_rescues_the_line_passes():
-    """The hint doing its job is the outcome this change is betting on."""
+@pytest.mark.parametrize("hint_in_use", [True, False])
+def test_a_hint_that_rescues_the_line_passes_only_while_it_is_in_use(
+        monkeypatch, hint_in_use):
+    """The check judges the prompt the pipeline actually sends."""
     class NeedsTheHint:
         def complete(self, messages: list[dict[str, str]]) -> str:
             user = messages[-1]["content"]
@@ -508,9 +531,11 @@ def test_a_hint_that_rescues_the_line_passes():
             return ("\u3053\u3093\u306b\u3061\u306f"
                     if "sang tiếng Nhật" in user else "V\u00e2ng")
 
+    monkeypatch.setattr(harness, "SHORT_LINE_HINT_ENABLED", hint_in_use)
     report = harness.Report()
     harness.check_short_lines(NeedsTheHint(), report)
-    assert report.failed == []
+    expected = [] if hint_in_use else ["Every short line comes back translated"]
+    assert [c.name for c in report.failed] == expected
 
 
 def test_a_hint_that_changes_nothing_is_reported_as_such(capsys):

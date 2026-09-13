@@ -464,7 +464,13 @@ HISTORY_STYLE = "sources"
 # Japanese meeting, and one of the commonest lines in one. Longer short lines
 # on the same run were fine (えっ -> Eh?, いや違います -> Không, tôi nhầm rồi),
 # so it is single words the model treats as nothing to do.
-SHORT_LINE_HINT_ENABLED = True
+#
+# Off for gemma-4-12b-it. The first real run put all eight short lines to it
+# with and without the hint, and the plain prompt translated every one - はい
+# -> Vâng included - so the hint was doing nothing. Off, the message is also
+# exactly the agreed prompt. The real test still tries both, so turn it back
+# on if a later run shows the plain prompt handing a line back.
+SHORT_LINE_HINT_ENABLED = False
 
 # Translation runs off the audio path, so a sentence appears as soon as it is
 # transcribed and its translation follows. That needs a queue, and a queue
