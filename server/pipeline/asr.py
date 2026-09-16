@@ -181,9 +181,10 @@ class Transcript:
     kept: tuple[Piece, ...] = ()
     dropped: tuple[tuple[Piece, str], ...] = ()
 
-    #: A final only: the language the caller asked for and did not get,
-    #: because the running text had already committed words in another one.
-    overruled_language: str = ""
+    #: A final only: the language the running text had been decoded in,
+    #: when the final was asked for another one. Everything the running text
+    #: worked out was thrown away and the whole utterance decoded again.
+    discarded_language: str = ""
 
     @property
     def is_final(self) -> bool:
@@ -219,6 +220,11 @@ class AsrStats:
     #: Words a final decode repeated from the committed text and that were
     #: removed at the join.
     duplicates_removed: int = 0
+    #: Finals that came back with no text. ``empty`` counts every event.
+    empty_finals: int = 0
+    #: Open utterances whose running text was started again because the
+    #: language it was being decoded in changed.
+    language_resets: int = 0
 
     @property
     def realtime_factor(self) -> float:
@@ -236,6 +242,8 @@ class AsrStats:
 
         if not transcript.has_text:
             self.empty += 1
+            if transcript.kind == "utterance_final":
+                self.empty_finals += 1
 
         for _piece, reason in transcript.dropped:
             self.dropped_pieces += 1
@@ -303,6 +311,21 @@ def is_unspaced(char: str) -> bool:
     )
 
 
+_UNSPACED = (
+    "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    "\uff66-\uff9f\u3000-\u303f\uff00-\uff65"
+)
+#: Whitespace between two characters of an unspaced script. Whisper writes one
+#: where the speaker paused ("その結果 本人は"), and Japanese is not written
+#: with spaces: 13 sentences of a real run carried one.
+_UNSPACED_GAP = re.compile(f"(?<=[{_UNSPACED}])\\s+(?=[{_UNSPACED}])")
+
+
+def close_unspaced_gaps(text: str) -> str:
+    """Remove the spaces between two Japanese characters, and only those."""
+    return _UNSPACED_GAP.sub("", text)
+
+
 def _needs_space(left: str, right: str) -> bool:
     """Whether two pieces of text written apart need a space between them."""
     if not left or not right:
@@ -324,7 +347,8 @@ def join_texts(left: str, right: str) -> str:
     left, right = left.strip(), right.strip()
     if not left or not right:
         return left or right
-    return f"{left} {right}" if _needs_space(left, right) else left + right
+    return close_unspaced_gaps(
+        f"{left} {right}" if _needs_space(left, right) else left + right)
 
 
 def render_words(words: Iterable[Word]) -> str:
@@ -342,7 +366,7 @@ def render_words(words: Iterable[Word]) -> str:
     text = re.sub(r"\s+([.,!?;:%)\]\}、。！？])", r"\1", text)
     # Remove spaces after opening punctuation.
     text = re.sub(r"([(\[\{])\s+", r"\1", text)
-    return text.strip()
+    return close_unspaced_gaps(text).strip()
 
 
 _TOKEN = re.compile(r"\s*\S+")
@@ -461,6 +485,13 @@ class StreamingTranscriber:
     # Public API
     # ------------------------------------------------------------------
 
+    def stream_language(self, utterance_id: str) -> str:
+        """The language an open utterance's running text is decoded in."""
+        state = self._states.get(utterance_id)
+        if state is None or not (state.hypotheses or state.committed_words):
+            return ""
+        return state.lang_code
+
     def has_committed(self, utterance_id: str) -> bool:
         """Whether the running text has already committed words here."""
         state = self._states.get(utterance_id)
@@ -532,6 +563,11 @@ class StreamingTranscriber:
             UtteranceState(utterance_id=utterance_id, lang_code=lang_code),
         )
 
+        if lang_code and state.lang_code and lang_code != state.lang_code:
+            # Decodes in two languages never agree, and merging them is how a
+            # sentence came out as "これからこのタスは có thểので những次". The
+            # running text starts again in the new language.
+            self._restart(state)
         if lang_code:
             state.lang_code = lang_code
 
@@ -558,7 +594,11 @@ class StreamingTranscriber:
             state.lang_code = hypothesis.lang_code
 
         state.hypotheses.append(hypothesis)
-        state.hypotheses = state.hypotheses[-self.history_size:]
+        # Only decodes in the utterance's language may agree with each other.
+        state.hypotheses = [
+            kept for kept in state.hypotheses
+            if kept.lang_code == state.lang_code
+        ][-self.history_size:]
 
         events: list[Transcript] = []
 
@@ -600,11 +640,12 @@ class StreamingTranscriber:
         come from the VAD, excluding its silence hangover. Audio beyond the
         configured post-roll is not given to Whisper.
 
-        ``lang_code`` is used unless the running text has already committed
-        words in another language: those words were decoded in that language,
-        and a sentence whose language disagrees with its running text was
-        measured three to four times as likely to be unrelated to what was
-        said. The language that lost is reported as ``overruled_language``.
+        ``lang_code`` is the language to finish in. When it differs from the
+        one the running text was decoded in, nothing the running text worked
+        out is kept - it was decoded in a language the caller has decided is
+        wrong - and the whole utterance is decoded again. The language thrown
+        away is reported as ``discarded_language``. A caller unsure of the
+        language passes "" and the running text's language stands.
         """
 
         self._validate_pcm(full_pcm)
@@ -614,12 +655,13 @@ class StreamingTranscriber:
             UtteranceState(utterance_id=utterance_id, lang_code=lang_code),
         )
 
-        overruled = ""
+        discarded = ""
+        if lang_code and state.lang_code and lang_code != state.lang_code:
+            if state.hypotheses or state.committed_words:
+                discarded = state.lang_code
+            self._restart(state)
         if lang_code:
-            if not state.committed_words or not state.lang_code:
-                state.lang_code = lang_code
-            elif lang_code != state.lang_code:
-                overruled = lang_code
+            state.lang_code = lang_code
 
         if not full_pcm:
             final = Transcript(
@@ -627,7 +669,7 @@ class StreamingTranscriber:
                 lang_code=state.lang_code,
                 kind="utterance_final",
                 committed_text=state.committed_text,
-                overruled_language=overruled,
+                discarded_language=discarded,
             )
             self.stats.record(final)
             self._states.pop(utterance_id, None)
@@ -711,13 +753,20 @@ class StreamingTranscriber:
                 if final_hypothesis is not None
                 else ()
             ),
-            overruled_language=overruled,
+            discarded_language=discarded,
         )
 
         self.stats.record(final)
         self._states.pop(utterance_id, None)
 
         return final
+
+    def _restart(self, state: UtteranceState) -> None:
+        """Forget what an utterance's running text worked out."""
+        state.hypotheses.clear()
+        state.committed_words.clear()
+        state.committed_end = 0.0
+        self.stats.language_resets += 1
 
     def cancel_utterance(self, utterance_id: str) -> None:
         """Discard one active utterance without producing a final result."""

@@ -34,7 +34,7 @@ chunk 200 ms ─────────►  6b. Language split         cắt c�
                           7. ASR (Whisper large-v3)  streaming, chốt dần từng từ
       ◄──── partial ───      (mỗi 600 ms)
       ◄──── final ─────   8. Translation (Gemma/vLLM) chạy ngoài luồng audio
-      ◄── speakers ────  5b. Gom cụm lại            sửa nhãn người nói đã gửi
+                         5b. Gom cụm lại            chỉ đo, không gửi (mặc định)
       ◄─ translation ──
 ```
 
@@ -191,6 +191,7 @@ Không cần biến nào để chạy. Bảng này để **thử nghiệm**, và
 | `NOISE_DEVICE` | `cpu` | `cuda` để thử AST trên GPU. Từng đổ ở cuDNN rồi segfault |
 | `DISABLE_OVERLAP` | không đặt | `=1` cho ASR ăn audio thô |
 | `LANGUAGE_SPLIT` | `1` | `=0` để thôi cắt câu chứa hai ngôn ngữ |
+| `SPEAKER_RECLUSTER` | không đặt | `=1` để gửi nhãn người nói đã gom cụm lại. Đo được: làm nhãn **tệ hơn** trên họp 4 người |
 | `ASR_PROMPT_ON_PARTIALS` | không đặt | `=1` để cả chữ mờ cũng nhận từ vựng mồi — chỉ để đo |
 | `MEETING_DATA_DIR` | `server/data` | Đọc danh sách chặn/giữ và từ vựng ở chỗ khác |
 | `ASR_DEVICE`, `LID_DEVICE`, `SPEAKER_DEVICE` | tự chọn | `cuda` / `cpu` |

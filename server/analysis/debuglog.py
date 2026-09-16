@@ -234,6 +234,20 @@ def is_cjk(text: str) -> bool:
     return bool(_CJK_ANY.search(text))
 
 
+#: A letter only Vietnamese writes: Latin with a diacritic, including đ.
+_VIETNAMESE = re.compile("[À-ɏḀ-ỿ]")
+
+
+def is_mixed(text: str) -> bool:
+    """A sentence holding both Japanese and Vietnamese.
+
+    Not a thing people say in these meetings - English terms inside Japanese
+    are plain ASCII and do not count. On a real run it was two decodes in two
+    languages merged into one sentence: "これからこのタスは có thểので ...".
+    """
+    return is_cjk(text) and bool(_VIETNAMESE.search(text))
+
+
 def survival(before: str, after: str) -> float:
     """Share of the running text on screen that the next update kept.
 
@@ -313,6 +327,7 @@ def measure(run: Run) -> dict:
         "identical_to_partial": sum(1 for value in rewrites if value == 0.0),
         "far_from_partial": sum(1 for value in rewrites if value > FAR),
         "language_disagrees": len(disagreed),
+        "mixed_language": sum(1 for final in finals if is_mixed(final.text)),
         "far_and_language_disagrees": len(far_and_disagreed),
         "summary": run.summary,
     }

@@ -10,6 +10,12 @@ wrong that no amount of threshold tuning fixes:
 * an answer, once given, stands. A mistake in the first minute survives the
   ten minutes of evidence that follow it.
 
+**Measured, not sent, by default.** On a real meeting of four people the
+live matcher gave four main labels (113/91/67/18 sentences); these
+corrections moved 140 of 290 sentences, merged two people into one and left
+seven clusters of one to three sentences. ``SPEAKER_RECLUSTER=1`` sends them;
+otherwise :meth:`SpeakerHistory.survey` logs what they would have been.
+
 Diarization is a clustering problem, not a streaming classification one. This
 keeps every voiceprint of the meeting and periodically clusters the lot from
 scratch, then reports the labels that came out different. The transcript is
@@ -84,11 +90,18 @@ class ReclusterStats:
     #: The best refused merge of every run: where the threshold sits against
     #: the real distribution.
     stop_scores: list = field(default_factory=list)
+    #: Cluster sizes at the last run, largest first.
+    sizes: list = field(default_factory=list)
+    #: Surveys only: sentences whose label the clustering disagreed with at
+    #: the last run. Nothing was changed.
+    would_move: int = 0
 
     def record(self, changed: int, result: Clustering, pending: int) -> None:
         self.runs += 1
         self.corrections += changed
         self.speakers = len(result.groups)
+        self.sizes = sorted((len(group) for group in result.groups),
+                            reverse=True)
         self.pending = pending
         self.forced_merges += result.forced
         if result.stopped_at is not None:
@@ -193,6 +206,14 @@ def name_clusters(groups: list[list[int]], labels: list[str]) -> list[str]:
     return [name for name in chosen]                    # type: ignore[misc]
 
 
+def live_sizes(labels: list) -> list:
+    """How many sentences each live label holds, largest first."""
+    counts: dict = {}
+    for label in labels:
+        counts[label] = counts.get(label, 0) + 1
+    return sorted(counts.values(), reverse=True)
+
+
 class SpeakerHistory:
     """Every voiceprint of the meeting, and second thoughts about the labels."""
 
@@ -273,6 +294,35 @@ class SpeakerHistory:
             "none" if result.stopped_at is None
             else f"{result.stopped_at:.3f}", self.threshold)
         return corrections
+
+    def survey(self) -> int:
+        """Cluster the meeting and count what would move, changing nothing.
+
+        On a real meeting of four people the live matcher gave four main
+        labels and the corrections made them worse - two people merged into
+        one and seven clusters of one to three sentences. Until clustering
+        does better, it is measured here rather than sent.
+        """
+        self._since = 0
+        if len(self.voices) < 2:
+            return 0
+        embeddings = np.vstack([voice.embedding for voice in self.voices])
+        labels = [voice.label for voice in self.voices]
+        result = cluster_scored(embeddings, self.threshold, self.max_speakers)
+        names = name_clusters(result.groups, labels)
+        would_move = sum(1 for group, name in zip(result.groups, names)
+                         for member in group if labels[member] != name)
+        self.stats.record(0, result, 0)
+        self.stats.would_move = would_move
+        log.info(
+            "Speaker survey (not sent): %d sentences, live labels %s; "
+            "clustering finds %d speakers sized %s and disagrees on %d; "
+            "best refused merge %s",
+            len(self.voices), live_sizes(labels), len(result.groups),
+            self.stats.sizes, would_move,
+            "none" if result.stopped_at is None
+            else f"{result.stopped_at:.3f}")
+        return would_move
 
     def reset(self) -> None:
         self.voices.clear()

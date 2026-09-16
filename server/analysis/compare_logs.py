@@ -35,6 +35,7 @@ ROWS = (
     ("mean_rewrite", "{:.3f}"),
     ("far_from_partial", "{:d}"),
     ("language_disagrees", "{:d}"),
+    ("mixed_language", "{:d}"),
     ("update_survival", "{:.1%}"),
     ("updates_wiping_half", "{:.1%}"),
 )

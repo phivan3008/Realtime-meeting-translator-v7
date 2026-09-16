@@ -110,6 +110,10 @@ def test_a_clean_japanese_meeting_passes_the_rendering_checks(
 
 
 def test_spaced_japanese_is_caught(monkeypatch, tmp_path, capsys):
+    # The renderer closes these gaps now, so it is switched off here to prove
+    # the check still catches them if that ever regresses.
+    import server.pipeline.asr as asr
+    monkeypatch.setattr(asr, "close_unspaced_gaps", lambda text: text)
     run_main(monkeypatch, tmp_path, "今| 日| は| 会| 議")
     out = capsys.readouterr().out
     assert "[FAIL] Japanese is written without spaces" in out
@@ -165,3 +169,10 @@ def test_nothing_the_pod_runs_needs_the_client_package():
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"^\s*(from|import) client\b", text,
                              re.MULTILINE), path
+
+
+def test_a_sentence_mixing_the_languages_is_caught(monkeypatch, tmp_path,
+                                                   capsys):
+    run_main(monkeypatch, tmp_path, "これは| có| thểです")
+    out = capsys.readouterr().out
+    assert "[FAIL] No sentence mixes Japanese and Vietnamese" in out

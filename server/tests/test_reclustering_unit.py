@@ -275,3 +275,23 @@ def test_a_proposal_that_is_not_repeated_is_forgotten():
 def test_confirmations_must_be_positive():
     with pytest.raises(ValueError):
         history(confirmations=0)
+
+
+
+def test_a_survey_counts_what_would_move_and_moves_nothing():
+    watcher = history()
+    watcher.add(1, voice(0), "Speaker_01")
+    watcher.add(2, voice(0), "Speaker_01")
+    watcher.add(3, voice(0), "Speaker_02")
+    assert watcher.survey() == 1
+    assert [v.label for v in watcher.voices] == [
+        "Speaker_01", "Speaker_01", "Speaker_02"]
+    assert watcher.stats.would_move == 1
+    assert watcher.stats.sizes == [3]
+    assert watcher.stats.corrections == 0
+    assert watcher.due is False
+
+
+def test_the_live_label_sizes_are_read_largest_first():
+    from server.pipeline.reclustering import live_sizes
+    assert live_sizes(["a", "b", "a", "c", "a", "b"]) == [3, 2, 1]

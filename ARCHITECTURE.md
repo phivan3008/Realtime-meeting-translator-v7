@@ -58,7 +58,7 @@ sequenceDiagram
         W->>V: chat completion
         V-->>W: bản dịch
         S-->>C: translation (sentence_id, translation, reason, raw)
-        S-->>C: speakers ({sentence_id: speaker_id}, khi gom cụm lại)
+        S-->>C: speakers ({sentence_id: speaker_id}, chỉ khi SPEAKER_RECLUSTER=1)
     end
     C->>S: bye
     S-->>C: các final / translation còn lại
@@ -160,7 +160,7 @@ flowchart TD
     UTT --> OUT
     ASR -->|"final"| OUT
     SPK -->|"voiceprint"| RC["5b. SpeakerHistory<br/>gom cụm mỗi 15 câu"]
-    RC -->|"speakers"| OUT
+    RC -->|"speakers<br/>(SPEAKER_RECLUSTER=1)"| OUT
     ASR -->|"submit + bản chụp lịch sử"| TQ["8. TranslationWorker<br/>thread riêng"]
     TQ -->|"HTTP"| VLLM["vLLM"]
     TQ -->|"translation<br/>gửi kèm chunk kế tiếp"| OUT
@@ -173,7 +173,7 @@ flowchart TD
 | 3 | Noise Filter | `pipeline/noise.py` | **Mặc định tắt** (`ENABLE_NOISE_FILTER=1`), CPU. AST `MIT/ast-finetuned-audioset-10-10-0.4593`, cửa sổ 10 s. Chỉ bỏ câu khi speech < 0.2 **và** một nhãn non-speech ≥ 0.3. Câu bị bỏ vẫn gửi `utterance` với `kept: false`. |
 | 4 | Overlap Resolver | `pipeline/overlap.py` | Noise gate (ngưỡng = peak P90 − 12 dB, ratio 4) rồi compressor (peak + 3 dB, ratio 3). Bỏ qua câu có mức ≤ −55 dBFS. Chỉ audio cho ASR đi qua tầng này. |
 | 5 | Speaker ID | `pipeline/diarization.py` | ECAPA `speechbrain/spkrec-ecapa-voxceleb` trên audio thô. Cosine ≥ 0.30 thì khớp người đã biết (centroid momentum 0.7), không thì tạo `Speaker_NN`, tối đa 12 người. Câu < 600 ms gắn `Speaker_unknown`. |
-| 5b | Gom cụm lại | `pipeline/reclustering.py` | Mỗi 15 câu: agglomerative liên kết trung bình trên cosine, cắt ở 0.30 và không quá 12 cụm. Nhãn chỉ đổi khi hai lần gom liên tiếp cùng đề xuất; gửi `speakers`. |
+| 5b | Gom cụm lại | `pipeline/reclustering.py` | Mỗi 15 câu: agglomerative liên kết trung bình trên cosine, cắt ở 0.30 và không quá 12 cụm. **Mặc định chỉ đo và ghi log** (`survey`); với `SPEAKER_RECLUSTER=1` thì nhãn đổi khi hai lần gom liên tiếp cùng đề xuất và được gửi bằng `speakers`. |
 | 6 | Language ID | `pipeline/lid.py` | VoxLingua107 ECAPA, chỉ so `vi` với `ja`. Chênh lệch < 0.30 hoặc câu < 600 ms thì coi là chưa rõ; khi đó session dùng ngôn ngữ chắc chắn gần nhất của phiên. |
 | 6b | Cắt theo ngôn ngữ | `pipeline/language_split.py` | Thăm dò 1 s ở hai đầu (lùi vào 300 ms), cần biên ≥ 0.50. Khác nhau thì tìm nhị phân tối đa 3 bước, bắt vào khung im nhất, rồi thăm dò lại hai nửa (tối đa 2.5 s giữa mỗi nửa). Không nửa nào < 1.2 s tiếng nói. Mỗi nửa mang sẵn ngôn ngữ của nó. `LANGUAGE_SPLIT=0` để tắt. |
 | 7 | ASR | `pipeline/asr.py` | faster-whisper `large-v3` (CUDA float16 / CPU int8), xem 4.3. |
@@ -219,7 +219,8 @@ flowchart LR
 - **Khớp từ giữa các cửa sổ:** so văn bản đã chuẩn hoá, sai lệch thời gian ≤ 0.45 s.
 - **Ranh giới phần đã chốt** xét theo điểm giữa của từ. Bản sao của từ chốt cuối ở ngay chỗ nối bị bỏ (`duplicates_removed`).
 - **Khi hợp nhất phần cuối:** từ đã ổn định qua nhiều partial được ưu tiên hơn bản giải mã cuối nếu hai bên mâu thuẫn. Từ nằm sau `speech_end` bị bỏ. `speech_end` = cuối câu trừ độ dài hangover VAD đã chuyển tiếp (≈ 480 ms với câu chốt vì ngắt, 0 với câu cắt vì quá dài).
-- **Ngôn ngữ:** chữ mờ hỏi LID tới khi có câu trả lời chắc chắn rồi giữ nguyên cho cả câu. Final dùng ngôn ngữ của LID trừ khi đã có chữ chốt bằng ngôn ngữ khác; khi đó giữ ngôn ngữ của chữ chốt và đếm vào `language_flips`.
+- **Ngôn ngữ:** LID chạy trên mỗi cửa sổ chữ mờ. Ngôn ngữ của chữ mờ được chốt khi 2 cửa sổ liên tiếp cùng chắc chắn, và đổi khi 2 cửa sổ liên tiếp cùng chắc chắn ngôn ngữ khác — khi đó trạng thái streaming bị xoá (`language_resets`). Chỉ các hypothesis cùng ngôn ngữ được so khớp và hợp nhất. Final dùng LID của cả câu nếu LID chắc chắn; nếu khác ngôn ngữ của chữ mờ thì bỏ trạng thái streaming và giải mã lại cả câu (`language_flips`). LID không chắc thì dùng ngôn ngữ của chữ mờ.
+- **Khoảng trắng tiếng Nhật:** khoảng trắng nằm giữa hai ký tự tiếng Nhật (Whisper đặt ở chỗ ngừng) bị bỏ; quanh chữ Latin thì giữ.
 - Câu bị Noise Filter loại, hoặc bị cắt theo ngôn ngữ, thì trạng thái streaming của câu đó bị huỷ; câu bị cắt được giải mã nguyên từng nửa (`transcribe`).
 
 ### 4.4 Hàng đợi dịch (`TranslationWorker`)

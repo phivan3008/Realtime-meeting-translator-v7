@@ -233,6 +233,13 @@ SPEAKER_RECLUSTER_THRESHOLD = SPEAKER_MATCH_THRESHOLD
 # would not sit still on screen.
 SPEAKER_RECLUSTER_CONFIRMATIONS = 2
 
+# OFF: the corrected labels are not sent unless SPEAKER_RECLUSTER=1. Measured
+# on a real meeting of four people: the live matcher gave four main labels
+# (113/91/67/18 sentences); reclustering moved 140 of 290 sentences, merged
+# two of those people into one and left seven clusters of one to three
+# sentences. The clustering still runs and is logged, so it can be measured.
+SPEAKER_RECLUSTER = _flag("SPEAKER_RECLUSTER")
+
 # --- 6. Language ID (DESIGN.md section 3.6) ---------------------------------
 LID_MODEL = os.environ.get("LID_MODEL", "speechbrain/lang-id-voxlingua107-ecapa")
 LID_DEVICE = os.environ.get("LID_DEVICE", "")
@@ -391,6 +398,13 @@ ASR_STREAM_FINAL_POST_ROLL_SECONDS = 0.20
 ASR_STREAM_WORD_TOLERANCE_SECONDS = 0.45
 #: Decodes kept per open utterance for agreement.
 ASR_STREAM_HISTORY = 5
+#: Consecutive confident LID answers on the running text's windows that fix
+#: its language, or change it once fixed. One was not enough: fixed on the
+#: first 0.6-1.2 s window, about thirty sentences of a real meeting ran as
+#: Vietnamese inventions over Japanese speech ("Các bạn có thể nhận thêm
+#: thông tin về các bài hát...") while the LID on the whole sentence got the
+#: language right.
+ASR_STREAM_LANGUAGE_VOTES = 2
 
 # --- 8. Translation (DESIGN.md section 3.8) ---------------------------------
 # vLLM runs as its own process behind its OpenAI-compatible API, and this

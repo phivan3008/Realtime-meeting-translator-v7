@@ -74,6 +74,10 @@ MAX_REPEAT_SHARE = 0.08
 #: Mean share of the running text an update keeps. The sliding window kept
 #: 34%, the streaming rewrite 64%.
 MIN_UPDATE_SURVIVAL = 0.50
+#: Sentences whose language differs from their running text's. The
+#: sliding-window run of the same meeting sat at 2.7%; the first streaming
+#: run, with the language fixed on one window, at 12.8%.
+MAX_DISAGREE_SHARE = 0.05
 #: Translations refused, with --translate. The baseline refused 3%.
 MAX_REFUSED_SHARE = 0.06
 
@@ -199,8 +203,9 @@ def check(session: ServerSession, debug_path: Path, audio_seconds: float,
                 f"{stats.utterances} utterances, {stats.running_texts} "
                 f"running texts")
     report.note("language", f"{stats.language_splits} utterances split, "
-                f"{stats.language_flips} sentences kept the running text's "
-                f"language over the LID's")
+                f"{stats.language_flips} sentences decoded again in the "
+                f"LID's language, {stats.running_language_changes} running "
+                f"texts changed language")
     if session.language_splitter is not None:
         split = session.language_splitter.stats
         report.note("language split", f"{split.split}/{split.checked} cut; "
@@ -210,14 +215,16 @@ def check(session: ServerSession, debug_path: Path, audio_seconds: float,
                     f"{split.probes} probes")
     if session.transcriber is not None:
         asr = session.transcriber.stats
-        report.note("asr", f"{asr.finals} finals ({asr.empty} empty), "
+        report.note("asr", f"{asr.finals} finals ({asr.empty_finals} empty), "
                     f"{asr.committed_events} commits, "
                     f"{asr.duplicates_removed} repeats removed at a join, "
                     f"dropped {asr.dropped_reasons}")
     if session.speaker_history is not None:
         history = session.speaker_history.stats
         report.note("speakers", f"{history.speakers} after {history.runs} "
-                    f"runs, {history.corrections} labels corrected, "
+                    f"runs, sized {history.sizes}, {history.would_move} "
+                    f"would move (not sent unless SPEAKER_RECLUSTER=1), "
+                    f"{history.corrections} labels corrected, "
                     f"{history.forced_merges} merges forced by the cap, "
                     f"refused merges {sorted(history.stop_scores)[:5]}...")
     report.note("stages", {k: round(v, 1) for k, v in
@@ -240,6 +247,14 @@ def check(session: ServerSession, debug_path: Path, audio_seconds: float,
                share <= MAX_REPEAT_SHARE,
                f"{found['with_repeats']} sentences ({share:.1%}), "
                f"limit {MAX_REPEAT_SHARE:.0%}")
+    report.add("No sentence mixes Japanese and Vietnamese",
+               found["mixed_language"] == 0,
+               f"{found['mixed_language']} sentences")
+    disagree = found["language_disagrees"] / max(found["sentences"], 1)
+    report.add("Sentences mostly keep their running text's language",
+               disagree <= MAX_DISAGREE_SHARE,
+               f"{found['language_disagrees']} sentences ({disagree:.1%}), "
+               f"limit {MAX_DISAGREE_SHARE:.0%}")
     report.add("The running text keeps what the reader is reading",
                found["update_survival"] >= MIN_UPDATE_SURVIVAL,
                f"{found['update_survival']:.1%} kept per update, "

@@ -401,6 +401,24 @@ hàng đổi. Client khoá hàng theo `sentence_id` nên sửa tại chỗ.
 
 | `SPEAKER_RECLUSTER_THRESHOLD` | `0.30` | Liên kết trung bình dưới ngưỡng này thì thôi gộp |
 | `SPEAKER_RECLUSTER_CONFIRMATIONS` | `2` | Số lần gom liên tiếp phải cùng đề xuất một nhãn mới |
+| `SPEAKER_RECLUSTER` | `False` | Biến môi trường `=1` để **gửi** nhãn đã sửa; mặc định chỉ đo |
+
+**Mặc định chỉ đo, không gửi.**
+
+> **Đo được (họp thật 30 phút, 4 người nói, 09-16):**
+>
+> | | nhãn | phân bố câu |
+> | --- | --- | --- |
+> | bộ khớp trực tiếp | 5 | 113 / 91 / 67 / 18 / 1 — **4 người chính** |
+> | sau gom cụm (140 câu bị đổi nhãn) | 11 | 183 / 66 / 16 / 12 + bảy cụm 1–3 câu |
+>
+> Gom cụm **gộp hai người thật làm một** và đẻ ra cụm lẻ từ các câu ngoại lai.
+> Mọi lần gộp bị từ chối nằm ở 0.218–0.299, sát ngưỡng — hạ ngưỡng chỉ làm gộp
+> thêm.
+
+Gom cụm vẫn chạy và dòng tổng kết in kết quả của nó cạnh nhãn trực tiếp
+(`measured only ... sized [...] ... would have moved`), để đo tiếp mà không
+làm nhảy tên trên màn hình.
 
 > **Đo được (họp thật 30 phút, trước hai luật dưới):** `22 speakers after 21
 > reclustering runs, 329 labels corrected` trên 313 câu — hơn một lần sửa mỗi
@@ -633,6 +651,7 @@ prompt cho câu sau, đúng cơ chế biến **một câu bịa thành cả đo�
 | `ASR_STREAM_COMMIT_MARGIN_SECONDS` | `1.0` | Không chốt từ nằm gần mép âm thanh mới nhất hơn ngần này |
 | `ASR_STREAM_WORD_TOLERANCE_SECONDS` | `0.45` | Hai lần giải mã đặt cùng một từ lệch nhau tối đa ngần này |
 | `ASR_STREAM_HISTORY` | `5` | Số lần giải mã giữ lại để so |
+| `ASR_STREAM_LANGUAGE_VOTES` | `2` | Số cửa sổ liên tiếp phải chắc chắn cùng một ngôn ngữ để chốt, hoặc đổi, ngôn ngữ của chữ mờ |
 | `ASR_STREAM_FINAL_OVERLAP_SECONDS` | `1.2` | Audio đã chốt được giải mã lại phía trước phần đuôi, làm ngữ cảnh |
 | `ASR_STREAM_FINAL_POST_ROLL_SECONDS` | `0.20` | Audio giữ lại sau chỗ tiếng nói kết thúc |
 
@@ -664,12 +683,39 @@ Hai điều nữa đổi so với lần chạy đó:
 
 - Phần đuôi của câu chốt được giải mã **beam 5** kèm từ vựng mồi. Greedy làm số
   từ lặp tăng gấp đôi trên một cuộc họp thật (`"mở mở mở mở mở mở"`).
-- **Ngôn ngữ của chữ mờ được chốt** ở câu trả lời chắc chắn đầu tiên của LID
-  cho mỗi câu. Hai lần giải mã bị ép hai ngôn ngữ khác nhau không bao giờ khớp,
-  nên không từ nào được chốt. Câu chốt dùng LID của cả câu, **trừ khi** đã có chữ
-  chốt bằng ngôn ngữ khác: câu lệch ngôn ngữ với chữ mờ đo được sai gấp 3–4 lần
-  (43% so với 11% trên một lần chạy, 75% so với 24% trên lần khác). Mỗi lần như
-  vậy được đếm vào `language_flips`.
+- Whisper tự đặt khoảng trắng tiếng Nhật ở chỗ người nói ngừng
+  (`その結果 本人は`); 13 câu của một lần chạy mang nó. Khoảng trắng **giữa hai
+  ký tự tiếng Nhật** bị bỏ; quanh chữ Latin thì giữ.
+
+### Ngôn ngữ của chữ mờ và của câu chốt
+
+> **Đo được (họp thật 30 phút, 09-16):** 37 câu có ngôn ngữ lệch với chữ mờ,
+> so với 8 ở bản cửa sổ trượt. Khoảng 30 câu trong số đó là người nói tiếng
+> Nhật, chữ mờ bị chốt tiếng Việt ở cửa sổ đầu và **bịa** suốt câu
+> (`Các bạn có thể nhận thêm thông tin về các bài hát...`), trong khi LID của cả
+> câu ra tiếng Nhật đúng. Và vài câu **trộn hai ngôn ngữ**
+> (`これからこのタスは có thểので những次 tiếp theo...`): từ của chữ mờ tiếng
+> Việt được hợp nhất với phần đuôi tiếng Nhật.
+
+Ba luật, mỗi luật có test dựng lại từ đúng những câu đó:
+
+- **Ngôn ngữ của chữ mờ** được chốt khi `ASR_STREAM_LANGUAGE_VOTES` cửa sổ
+  liên tiếp cùng chắc chắn một ngôn ngữ, và **đổi** khi chừng ấy cửa sổ cùng
+  chắc chắn ngôn ngữ kia — chữ mờ khi đó bắt đầu lại (`running texts restarted
+  in another language`). LID vẫn chạy mỗi cửa sổ; nó rẻ (vài giây cho 30 phút).
+- **Chỉ các lần giải mã cùng ngôn ngữ** được so khớp và hợp nhất với nhau. Câu
+  trộn hai ngôn ngữ không còn đường nào để xuất hiện.
+- **Câu chốt theo LID của cả câu khi LID chắc chắn.** Nếu chữ mờ đang ở ngôn ngữ
+  khác, mọi thứ chữ mờ đã làm bị bỏ và **cả câu được giải mã lại** (đếm vào
+  `language_flips`). LID không chắc thì ngôn ngữ của chữ mờ đứng.
+
+Luật cũ — giữ ngôn ngữ của chữ mờ khi đã có chữ chốt — dựa trên phép đo của
+nhánh improve (câu lệch ngôn ngữ với chữ mờ sai gấp 3–4 lần), nhưng chữ mờ ở
+đó bỏ phiếu qua **mọi** cửa sổ. Chốt ở một cửa sổ ngắn thì nó kém tin hơn LID
+của cả câu, và lần chạy 09-16 cho thấy đúng điều đó.
+
+- `ASR_STREAM_LANGUAGE_VOTES` tăng: chốt chắc hơn, chữ mờ ở đầu câu đổi ngôn
+  ngữ lâu hơn và chữ chốt tới muộn hơn.
 
 Đo lại bằng `python -m server.analysis.compare_logs` trên nhật ký của cùng cuộc
 họp, hoặc `server/tests_real/test_real_streaming.py` trên pod.

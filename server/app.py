@@ -333,18 +333,20 @@ def _log_summary(session: ServerSession) -> None:
                  session.session_id or "?", split.split, split.checked,
                  split.one_language, split.undecided, split.too_short,
                  split.sliver, split.refused_on_review, split.probes)
-    if stats.language_flips:
-        log.warning("Session %s: %d sentence(s) were asked for one language "
-                    "while their running text had committed words in the "
-                    "other; the running text's language was kept",
-                    session.session_id or "?", stats.language_flips)
+    if stats.language_flips or stats.running_language_changes:
+        log.warning("Session %s: %d sentence(s) decoded whole again in the "
+                    "language the LID was sure of; %d running text(s) "
+                    "changed language part way",
+                    session.session_id or "?", stats.language_flips,
+                    stats.running_language_changes)
     if session.transcriber is not None:
         asr = session.transcriber.stats
         log.info("Session %s ASR: %d finals (%d empty), %d commits, "
-                 "%d repeated words removed at a join, dropped %s",
-                 session.session_id or "?", asr.finals, asr.empty,
+                 "%d repeated words removed at a join, %d running texts "
+                 "restarted in another language, segments dropped %s",
+                 session.session_id or "?", asr.finals, asr.empty_finals,
                  asr.committed_events, asr.duplicates_removed,
-                 asr.dropped_reasons)
+                 asr.language_resets, asr.dropped_reasons)
     if session.worker is not None:
         tr = session.worker.translator.stats
         if tr.retried:
@@ -358,11 +360,15 @@ def _log_summary(session: ServerSession) -> None:
     if session.speaker_history is not None:
         history = session.speaker_history.stats
         scores = sorted(history.stop_scores)
-        log.info("Session %s speakers: %d after %d reclustering runs, "
-                 "%d labels corrected, %d merges forced by the speaker cap, "
-                 "refused merges %s",
-                 session.session_id or "?", history.speakers, history.runs,
-                 history.corrections, history.forced_merges,
+        log.info("Session %s speakers (%s): %d after %d reclustering runs, "
+                 "sized %s, %d labels corrected, %d would have moved, "
+                 "%d merges forced by the speaker cap, refused merges %s",
+                 session.session_id or "?",
+                 "sent" if session.send_speaker_corrections
+                 else "measured only",
+                 history.speakers, history.runs, history.sizes,
+                 history.corrections, history.would_move,
+                 history.forced_merges,
                  _deciles(scores) if scores else "none")
 
 

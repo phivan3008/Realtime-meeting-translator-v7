@@ -305,29 +305,107 @@ def test_a_cancelled_utterance_leaves_nothing_behind():
 # ---------------------------------------------------------------------------
 # Language
 # ---------------------------------------------------------------------------
-def test_the_final_keeps_the_language_its_words_were_committed_in():
-    """A sentence whose language disagrees with its running text was
-    measured three to four times as likely to be unrelated to what was said.
-    The committed words are in the running text's language already."""
+JAPANESE = (("今日", 0.0, 0.3), ("は", 0.3, 0.5), ("会議", 0.5, 0.9),
+            ("です", 0.9, 1.3))
+
+
+def test_a_final_in_another_language_throws_the_running_text_away():
+    """On a real meeting the running text was fixed on Vietnamese over
+    Japanese speech and showed inventions; the LID on the whole sentence was
+    right. Nothing decoded in the wrong language may reach the sentence."""
+    transcriber, decoder = make([piece(*SENTENCE)], [piece(*SENTENCE)],
+                                [piece(*JAPANESE)])
+    for _ in range(2):
+        transcriber.process_partial(audio(2.0), utterance_id="u",
+                                    window_start_seconds=0.0, lang_code="vi")
+    assert transcriber.has_committed("u")
+    final = transcriber.finish_utterance(audio(2.0), utterance_id="u",
+                                         lang_code="ja")
+    assert final.lang_code == "ja"
+    assert final.discarded_language == "vi"
+    assert final.text == "今日は会議です"
+    # The whole utterance, not a tail after words that no longer count.
+    assert decoder.calls[-1]["lang_code"] == "ja"
+    assert decoder.calls[-1]["seconds"] == pytest.approx(2.0)
+
+
+def test_a_final_in_the_same_language_keeps_the_running_text():
+    transcriber, _ = make([piece(*SENTENCE)])
+    committed_twice(transcriber)
+    final = transcriber.finish_utterance(audio(2.0), utterance_id="u",
+                                         lang_code="vi")
+    assert final.discarded_language == ""
+    assert final.text == "Hôm nay thì bác nói"
+
+
+def test_without_a_language_the_running_texts_one_stands():
     transcriber, decoder = make([piece(*SENTENCE)])
     for _ in range(2):
         transcriber.process_partial(audio(2.0), utterance_id="u",
                                     window_start_seconds=0.0, lang_code="vi")
-    final = transcriber.finish_utterance(audio(2.0), utterance_id="u",
-                                         lang_code="ja")
+    final = transcriber.finish_utterance(audio(2.0), utterance_id="u")
     assert final.lang_code == "vi"
-    assert final.overruled_language == "ja"
     assert decoder.calls[-1]["lang_code"] == "vi"
 
 
-def test_with_nothing_committed_the_final_takes_the_language_it_is_given():
-    transcriber, decoder = make([piece(*SENTENCE)])
+def test_the_stream_language_is_reported_only_once_something_was_decoded():
+    transcriber, _ = make([piece(*SENTENCE)])
+    assert transcriber.stream_language("u") == ""
     transcriber.process_partial(audio(2.0), utterance_id="u",
                                 window_start_seconds=0.0, lang_code="vi")
-    final = transcriber.finish_utterance(audio(2.0), utterance_id="u",
+    assert transcriber.stream_language("u") == "vi"
+
+
+def test_a_running_text_that_changes_language_starts_again():
+    """Merging decodes of two languages is how a sentence came out as
+    'これからこのタスは có thểので những次 tiếp theoタスは宮地さんから'."""
+    transcriber, _ = make([piece(*SENTENCE)], [piece(*SENTENCE)],
+                          [piece(*JAPANESE)])
+    for _ in range(2):
+        transcriber.process_partial(audio(2.0), utterance_id="u",
+                                    window_start_seconds=0.0, lang_code="vi")
+    events = transcriber.process_partial(audio(2.0), utterance_id="u",
+                                         window_start_seconds=0.0,
                                          lang_code="ja")
-    assert final.lang_code == "ja"
-    assert final.overruled_language == ""
+    assert events[-1].committed_text == ""
+    assert events[-1].running_text == "今日は会議です"
+    assert transcriber.stats.language_resets == 1
+
+
+def test_decodes_in_another_language_never_agree():
+    transcriber, _ = make([piece(*SENTENCE)])
+    transcriber.process_partial(audio(2.0), utterance_id="u",
+                                window_start_seconds=0.0, lang_code="vi")
+    state = transcriber._states["u"]
+    from server.pipeline.asr import Hypothesis
+    state.hypotheses.insert(0, Hypothesis(words=(), text="", window_start=0.0,
+                                          window_end=2.0, lang_code="ja"))
+    transcriber.process_partial(audio(2.0), utterance_id="u",
+                                window_start_seconds=0.0, lang_code="vi")
+    assert {h.lang_code for h in state.hypotheses} == {"vi"}
+
+
+def test_whispers_own_space_between_japanese_characters_is_closed():
+    """Whisper writes one where the speaker paused: 'その結果 本人は'.
+    Thirteen sentences of a real run carried one."""
+    paused = (("その", 0.0, 0.2), ("結果", 0.2, 0.5), (" 本人", 0.6, 0.9),
+              ("は", 0.9, 1.0), (" YAM", 1.1, 1.3), ("さん", 1.3, 1.5))
+    assert render_words(words(*paused)) == "その結果本人は YAMさん"
+
+
+def test_spaces_around_latin_words_in_japanese_stay():
+    from server.pipeline.asr import close_unspaced_gaps
+    assert close_unspaced_gaps("GLM 5.2 を 使う") == "GLM 5.2 を使う"
+    assert close_unspaced_gaps("Hôm nay thì") == "Hôm nay thì"
+
+
+def test_empty_finals_are_counted_apart_from_empty_running_texts():
+    transcriber, _ = make([])
+    transcriber.process_partial(audio(1.0), utterance_id="u",
+                                window_start_seconds=0.0)
+    transcriber.finish_utterance(audio(1.0), utterance_id="u")
+    assert transcriber.stats.empty == 2
+    assert transcriber.stats.empty_finals == 1
 
 
 def test_a_short_scrap_is_judged_on_no_speech_prob_alone_while_streaming():

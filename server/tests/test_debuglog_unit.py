@@ -315,3 +315,14 @@ def test_the_replay_writer_speaks_the_clients_format(tmp_path):
     assert run.finals[0].partials[0][1] == "はい"
     assert run.finals[0].refused
     assert run.partial_count == 1
+
+
+@pytest.mark.parametrize("text, mixed", [
+    ("これからこのタスは có thểので những次", True),
+    ("Đang thiếu cái phần đó, câuつの答えはとても重要です", True),
+    ("ステップ05を行っています", False),
+    ("GLM5.2のReviewをお願いします", False),
+    ("Hiện tại là mình đang thực hiện Step 05", False),
+])
+def test_a_sentence_mixing_the_two_languages_is_recognised(text, mixed):
+    assert debuglog.is_mixed(text) is mixed

@@ -330,6 +330,7 @@ def test_corrected_labels_are_sent_as_a_speakers_message():
         speaker_identifier=Voices("Speaker_01", "Speaker_02", "Speaker_01"))
     from server.pipeline.reclustering import SpeakerHistory
     session.speaker_history = SpeakerHistory(every=3, confirmations=1)
+    session.send_speaker_corrections = True
     responses = speak(session, 30)
     corrections = of_type(responses, "speakers")
     assert corrections, "no correction was sent"
@@ -340,16 +341,107 @@ def test_corrected_labels_are_sent_as_a_speakers_message():
 # ---------------------------------------------------------------------------
 # Running text
 # ---------------------------------------------------------------------------
-def test_the_running_texts_language_is_decided_once_per_utterance():
-    """Decodes forced into different languages never agree, so nothing
-    would ever be committed."""
-    lid = LID("vi")
+class ScriptedLID:
+    """Answers each call from a script, then repeats the last answer."""
+
+    def __init__(self, *codes: str):
+        self.codes = list(codes)
+        self.calls = 0
+
+    def reset(self) -> None:
+        pass
+
+    def identify(self, pcm: bytes) -> LanguageDecision:
+        code = self.codes[min(self.calls, len(self.codes) - 1)]
+        self.calls += 1
+        return LanguageDecision(code, 0.9, 0.6 if code else 0.0, "scripted")
+
+
+def running_languages(session, lid, chunks):
+    decoder = session.transcriber.decoder
+    speak(session, chunks)
+    return [call["lang"] for call in decoder.calls if call["beam"] == 1]
+
+
+def test_one_window_does_not_fix_the_running_texts_language():
+    """Fixed on the first short window, about thirty sentences of a real
+    meeting ran as Vietnamese inventions over Japanese speech."""
+    lid = ScriptedLID("vi", "ja", "ja", "ja", "ja")
     session = session_with(vad_script=[0.9] * 200,
                            transcriber=Transcriber(decoder=Decoder(), prompt=""),
                            language_identifier=lid)
-    speak(session, 15)
-    assert session.stats.partials >= 3
-    assert lid.calls == 1
+    languages = running_languages(session, lid, 15)
+    assert languages[:2] == ["vi", "ja"]
+    assert set(languages[2:]) == {"ja"}
+    assert session._open_language == "ja"
+
+
+def test_two_confident_windows_change_a_fixed_language():
+    lid = ScriptedLID("vi", "vi", "vi", "ja", "ja", "ja")
+    session = session_with(vad_script=[0.9] * 300,
+                           transcriber=Transcriber(decoder=Decoder(), prompt=""),
+                           language_identifier=lid)
+    languages = running_languages(session, lid, 20)
+    assert languages[:4] == ["vi", "vi", "vi", "vi"]
+    assert set(languages[4:]) == {"ja"}
+    assert session.stats.running_language_changes == 1
+    assert session.transcriber.stats.language_resets == 1
+
+
+def test_one_stray_window_does_not_change_a_fixed_language():
+    lid = ScriptedLID("vi", "vi", "ja", "vi", "vi")
+    session = session_with(vad_script=[0.9] * 200,
+                           transcriber=Transcriber(decoder=Decoder(), prompt=""),
+                           language_identifier=lid)
+    languages = running_languages(session, lid, 15)
+    assert set(languages) == {"vi"}
+    assert session.stats.running_language_changes == 0
+
+
+def test_the_vote_starts_again_with_each_utterance():
+    lid = ScriptedLID("vi")
+    session = session_with(transcriber=Transcriber(decoder=Decoder(), prompt=""),
+                           language_identifier=lid)
+    speak(session, 8)                  # two running-text windows
+    assert session._open_language == "vi"
+    speak(session, 1)                  # the pause ends the sentence
+    assert session._open_language == ""
+    assert session._language_run == ("", 0)
+
+
+def test_a_sure_lid_on_the_whole_sentence_wins_over_the_running_text():
+    """The sentence is decoded whole again in the LID's language."""
+    # Two running-text windows say Vietnamese; the whole sentence is Japanese.
+    lid = ScriptedLID("vi", "vi", "ja")
+    decoder = Decoder()
+    session = session_with(transcriber=Transcriber(decoder=decoder, prompt=""),
+                           language_identifier=lid)
+    session.language_splitter = None       # it would ask the LID as well
+    responses = speak(session, 10)
+    finals = of_type(responses, "final")
+    assert finals and finals[0]["lang_code"] == "ja"
+    assert finals[0]["transcript"] == "こんにちは皆さん"
+    assert session.stats.language_flips == 1
+
+
+def test_an_unsure_lid_leaves_the_running_texts_language():
+    class UnsureOnWholeSentences(ScriptedLID):
+        def identify(self, pcm: bytes) -> LanguageDecision:
+            if len(pcm) > 64_000:        # over two seconds: the whole sentence
+                self.calls += 1
+                return LanguageDecision("", 0.5, 0.05, "too close")
+            return super().identify(pcm)
+
+    lid = UnsureOnWholeSentences("ja")
+    session = session_with(vad_script=[0.9] * 90 + [0.02] * 30,
+                           transcriber=Transcriber(decoder=Decoder(), prompt=""),
+                           language_identifier=lid)
+    session.language_splitter = None
+    session._last_language = "vi"
+    responses = speak(session, 20)
+    finals = of_type(responses, "final")
+    assert finals and finals[0]["lang_code"] == "ja"
+    assert session.stats.language_flips == 0
 
 
 def test_an_unsure_lid_is_asked_again_on_the_next_window():
@@ -433,3 +525,29 @@ def test_the_goodbye_carries_the_hangover_it_already_forwarded():
     session.handle_text(make_bye("done"))
     duration, speech_end = spy.ends[0]
     assert duration - speech_end == pytest.approx(11 * 0.032, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Speaker corrections are measured, not sent, by default
+# ---------------------------------------------------------------------------
+def test_corrections_are_not_sent_by_default(caplog):
+    """On a real meeting of four people they made the labels worse."""
+    import logging
+    from server.pipeline.reclustering import SpeakerHistory
+
+    session = session_with(
+        transcriber=Transcriber(decoder=Decoder(), prompt=""),
+        speaker_identifier=Voices("Speaker_01", "Speaker_02", "Speaker_01"))
+    assert session.send_speaker_corrections is False
+    session.speaker_history = SpeakerHistory(every=3, confirmations=1)
+    with caplog.at_level(logging.INFO):
+        responses = speak(session, 30)
+    assert of_type(responses, "speakers") == []
+    assert session.stats.speaker_corrections == 0
+    stats = session.speaker_history.stats
+    assert stats.runs >= 1
+    assert stats.would_move == 1
+    assert "not sent" in caplog.text
+    # And nothing on the history itself was relabelled.
+    assert [v.label for v in session.speaker_history.voices][:2] == [
+        "Speaker_01", "Speaker_02"]

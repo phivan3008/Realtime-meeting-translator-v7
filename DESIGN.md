@@ -127,6 +127,10 @@ Gom cụm **không vượt** `SPEAKER_MAX_SPEAKERS`, và một nhãn chỉ đổ
 gom liên tiếp** cùng đề xuất — một lần chạy 30 phút không có hai luật này ra 22
 người và sửa 329 nhãn trên 313 câu.
 
+**Mặc định không gửi** (`SPEAKER_RECLUSTER=1` để gửi). Trên một cuộc họp 4 người,
+bộ khớp trực tiếp cho đúng 4 nhãn chính; gom cụm gộp hai người làm một và đẻ ra
+bảy cụm lẻ. Nó vẫn chạy và ghi log để đo tiếp.
+
 **6. Language ID chỉ đọc điểm của đúng hai ngôn ngữ** rồi chuẩn hoá lại giữa
 chúng. Model biết 107 thứ tiếng và sẽ trả lời tiếng Hàn cho tiếng Nhật nếu được
 tự do. Hai điểm quá gần nhau thì trả rỗng: **ép sai ngôn ngữ không báo lỗi**,
@@ -156,10 +160,14 @@ hết cộng 200 ms.
   từng chữ.
 - Một từ thuộc phần đã chốt hay chưa được xét theo **điểm giữa** của nó, và bản
   sao của từ chốt cuối ở chỗ nối bị bỏ — không thì 45% câu mang một từ lặp đôi.
-- Ngôn ngữ của chữ mờ được chốt **một lần mỗi câu**, ở câu trả lời chắc chắn đầu
-  tiên của LID: hai lần giải mã bị ép hai ngôn ngữ khác nhau không bao giờ khớp.
-  Câu đã có chữ chốt thì giữ ngôn ngữ đó dù LID của cả câu nói khác — câu lệch
-  ngôn ngữ với chữ mờ đo được sai gấp 3–4 lần.
+- Ngôn ngữ của chữ mờ được chốt khi **hai cửa sổ liên tiếp** cùng chắc chắn, và
+  đổi khi hai cửa sổ cùng chắc chắn ngôn ngữ kia (chữ mờ bắt đầu lại). Chốt ở
+  một cửa sổ ngắn làm khoảng 30 câu tiếng Nhật hiện chữ mờ tiếng Việt bịa.
+- Chỉ các lần giải mã **cùng ngôn ngữ** được so khớp và hợp nhất — không còn câu
+  trộn hai thứ tiếng.
+- Câu chốt theo **LID của cả câu khi nó chắc chắn**; chữ mờ ở ngôn ngữ khác thì
+  bị bỏ và cả câu được giải mã lại. LID không chắc thì ngôn ngữ của chữ mờ đứng.
+- Khoảng trắng Whisper đặt giữa hai ký tự tiếng Nhật bị bỏ.
 - Hai nửa của một câu bị cắt theo ngôn ngữ được giải mã **nguyên nửa**, bằng
   ngôn ngữ phép thăm dò đã tìm cho nửa đó.
 
