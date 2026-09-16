@@ -290,3 +290,28 @@ def test_the_comparison_table_names_a_different_meeting(tmp_path):
     text = compare_logs.table([str(first), str(other)])
     assert "japanese_spaced" in text
     assert "NOT the same meeting" in text
+
+
+def test_the_replay_writer_speaks_the_clients_format(tmp_path):
+    """The pod replays meetings without the client package, and the log it
+    writes has to read back exactly like one the client wrote."""
+    clock = [100.0]
+    writer = debuglog.LogWriter(tmp_path / "out" / "r.debug.txt",
+                                clock=lambda: clock[0])
+    clock[0] = 102.5
+    writer.apply({"type": "partial", "lang_code": "ja", "transcript": "はい"})
+    writer.apply({"type": "partial", "lang_code": "ja", "transcript": ""})
+    clock[0] = 103.0
+    writer.apply({"type": "final", "sentence_id": 1, "speaker_id": "Speaker_01",
+                  "lang_code": "ja", "transcript": "はい見ます"})
+    writer.apply({"type": "translation", "sentence_id": 1, "translation": "",
+                  "reason": "the model returned nothing"})
+    writer.close()
+    writer.close()
+
+    run = debuglog.parse(tmp_path / "out" / "r.debug.txt")
+    assert [final.text for final in run.finals] == ["はい見ます"]
+    assert run.finals[0].at == pytest.approx(3.0)
+    assert run.finals[0].partials[0][1] == "はい"
+    assert run.finals[0].refused
+    assert run.partial_count == 1

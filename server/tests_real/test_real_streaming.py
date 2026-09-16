@@ -51,10 +51,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from client.record import Recorder  # noqa: E402
 from common.protocol import Hello, make_bye, parse_message  # noqa: E402
 from server.analysis.compare_logs import table  # noqa: E402
-from server.analysis.debuglog import measure, parse, same_meeting  # noqa: E402
+from server.analysis.debuglog import (  # noqa: E402
+    LogWriter,
+    measure,
+    parse,
+    same_meeting,
+)
 from server.config import CHANNELS, CHUNK_BYTES, SAMPLE_RATE, SAMPLE_WIDTH  # noqa: E402
 from server.net.session import ServerSession, Stages  # noqa: E402
 
@@ -145,7 +149,7 @@ def load_stages(args) -> tuple:
     return loaded
 
 
-def replay(pcm: bytes, loaded: dict, recorder: Recorder,
+def replay(pcm: bytes, loaded: dict, recorder: LogWriter,
            clock: list) -> ServerSession:
     from server.pipeline.vad import VADSegmenter
 
@@ -312,10 +316,9 @@ def main() -> int:
             raise RuntimeError("cannot replay without the VAD and Whisper")
 
         clock = [0.0]
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        recorder = Recorder(args.out.with_suffix("").with_suffix(".txt"),
-                            args.out, session_id="replay",
-                            clock=lambda: clock[0])
+        # Written by the server package itself: the pod does not need the
+        # client package to replay a meeting.
+        recorder = LogWriter(args.out, clock=lambda: clock[0])
         print("\nReplaying:")
         started = time.perf_counter()
         session = replay(pcm, loaded, recorder, clock)

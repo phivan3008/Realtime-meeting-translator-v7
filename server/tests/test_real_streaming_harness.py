@@ -150,3 +150,18 @@ def test_a_recording_in_the_wrong_format_is_refused(tmp_path):
         wav.writeframes(bytes(400))
     with pytest.raises(ValueError, match="ffmpeg"):
         harness.read_pcm(path)
+
+
+def test_nothing_the_pod_runs_needs_the_client_package():
+    """The pod reported ModuleNotFoundError: No module named 'client' - the
+    first version of the streaming replay wrote its log through
+    client.record."""
+    import re
+
+    server = ROOT / "server"
+    for path in server.rglob("*.py"):
+        if "tests" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"^\s*(from|import) client\b", text,
+                             re.MULTILINE), path

@@ -18,6 +18,7 @@ Pure text. No audio, no model.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -155,6 +156,64 @@ def parse(path: Path) -> Run:
         elif kind == "end":
             run.summary = payload
     return run
+
+
+class LogWriter:
+    """Write server messages as the client's debug log would record them.
+
+    For replaying a meeting on the pod, which does not carry the client
+    package. Only the lines :func:`parse` reads are written, in the client's
+    exact format, so a replay can be compared with a real client log.
+    """
+
+    def __init__(self, path: Path, clock) -> None:
+        self.path = Path(path)
+        self.clock = clock
+        self.started = clock()
+        self.sentences = 0
+        self.refused = 0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("w", encoding="utf-8", newline="\n")
+        self.note("start", "session=replay")
+
+    def apply(self, message: dict) -> None:
+        kind = message.get("type")
+        if kind == "partial":
+            text = message.get("transcript", "")
+            if text:
+                self.note("partial", f"[{message.get('lang_code', '')}] {text}")
+        elif kind == "final":
+            self.sentences += 1
+            self.note("final", f"#{message.get('sentence_id', 0)} "
+                               f"{message.get('speaker_id') or '?'} "
+                               f"[{message.get('lang_code', '')}] "
+                               f"{message.get('transcript', '')}")
+        elif kind == "translation":
+            translation = message.get("translation", "")
+            if not translation.strip():
+                self.refused += 1
+            self.note("translation", f"#{message.get('sentence_id')} " + (
+                translation if translation.strip()
+                else f"(từ chối: {message.get('reason') or 'không rõ'})"))
+        elif kind == "utterance" and not message.get("kept", True):
+            self.note("dropped", f"utterance {message.get('index')} — "
+                                 f"{message.get('label') or 'không rõ'}")
+        elif kind == "error":
+            self.note("error", message.get("message", ""))
+
+    def note(self, kind: str, text: str) -> None:
+        now = self.clock()
+        clock = time.strftime("%H:%M:%S", time.localtime(now))
+        self._file.write(f"{clock}.{int(now % 1 * 1000):03d}  "
+                         f"{now - self.started:7.1f}s  {kind:<11} {text}\n")
+        self._file.flush()
+
+    def close(self) -> None:
+        if self._file.closed:
+            return
+        self.note("end", f"{self.sentences} câu, "
+                         f"{self.refused} không dịch được")
+        self._file.close()
 
 
 # ---------------------------------------------------------------------------
