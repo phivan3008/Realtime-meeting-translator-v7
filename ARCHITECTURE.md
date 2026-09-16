@@ -28,7 +28,7 @@ flowchart LR
         SRV -- "HTTP /v1/chat/completions" --> LLM
     end
     WS -- "WebSocket /ws/stream<br/>PCM 200 ms/chunk" --> SRV
-    SRV -- "JSON: vad, utterance,<br/>partial, final, translation" --> WS
+    SRV -- "JSON: vad, utterance, partial,<br/>final, translation, speakers" --> WS
 ```
 
 ## 2. Giao thức (`common/protocol.py`)
@@ -58,6 +58,7 @@ sequenceDiagram
         W->>V: chat completion
         V-->>W: bản dịch
         S-->>C: translation (sentence_id, translation, reason, raw)
+        S-->>C: speakers ({sentence_id: speaker_id}, khi gom cụm lại)
     end
     C->>S: bye
     S-->>C: các final / translation còn lại
@@ -74,7 +75,8 @@ sequenceDiagram
 | `partial` | S → C | `lang_code`, `transcript` (chữ đã chốt + chữ chưa ổn định) |
 | `final` | S → C | `sentence_id`, `speaker_id`, `lang_code`, `transcript`, `speech_score` |
 | `translation` | S → C | `sentence_id`, `translation`; khi không dịch được thì `translation` rỗng, kèm `reason` và `raw` |
-| `error` | S → C | `message`, `fatal` |
+| `speakers` | S → C | `labels`: `{sentence_id: speaker_id}`, chỉ những câu đổi nhãn |
+| `error` | S → C | `message`, `fatal`; `fatal: false` khi một tầng bị tắt giữa cuộc họp |
 
 `sentence_id` tăng dần trong một phiên và không lặp. Nó là khoá để ghép
 `translation` với `final`.
@@ -98,17 +100,19 @@ flowchart LR
 | `audio/resampler.py` | Downmix về mono, resample về 16 kHz bằng `soxr` (giữ trạng thái filter giữa các chunk), fallback `scipy.resample_poly`. |
 | `net/ws_client.py` | `StreamClient`: bắt tay `hello`/`ready`, gửi và nhận song song. Tự kết nối lại với backoff 0.5 → 10 s, ping 20 s. Audio lúc mất kết nối bị bỏ, không phát lại. Khi dừng: gửi `bye` và nghe thêm 2 s để nhận các message cuối. |
 | `config.py` | Re-export hợp đồng audio từ `common/protocol.py`. |
+| `ui/transcript.py` | Nội dung màn hình, thuần Python. Hàng khoá theo `sentence_id`; `translation` và `speakers` cập nhật tại chỗ; `partial` rỗng xoá chữ mờ. |
+| `ui/session.py` | Thu âm và socket trên thread riêng với asyncio loop riêng, chạm Qt chỉ qua signal. |
+| `ui/window.py`, `ui/main.py` | Cửa sổ PySide6: `py -3.11 -m client.ui.main --url ws://127.0.0.1:8000`. |
+| `record.py` | Ghi `recordings/meeting-<ngày>-<giờ>.txt` (biên bản) và `.debug.txt` (mọi message theo thứ tự tới), UTF-8, flush từng dòng. |
 
 Client không lọc audio, kể cả khoảng lặng (~256 kbps) và không chứa ML.
-Thư mục `client/ui` hiện còn trống; luồng end-to-end đang chạy qua
-`client/tests_real/test_real_stream.py`.
 
 ## 4. Server (`server/`)
 
 ### 4.1 Tiến trình và vòng đời
 
-- `server/app.py` (FastAPI) nạp mọi model một lần lúc khởi động: Silero, AST, ECAPA, VoxLingua, Whisper, và kết nối vLLM.
-- Silero bắt buộc: nạp lỗi thì server không khởi động. Các model còn lại nạp lỗi thì server vẫn chạy, chỉ thiếu tầng đó. `/health` báo trạng thái và lỗi của từng model.
+- `server/app.py` (FastAPI) nạp mọi model một lần lúc khởi động: Silero, ECAPA, VoxLingua, Whisper, và kết nối vLLM. AST chỉ nạp khi `ENABLE_NOISE_FILTER=1`, và chạy CPU.
+- Silero bắt buộc: nạp lỗi thì server không khởi động. Các model còn lại nạp lỗi thì server vẫn chạy, chỉ thiếu tầng đó; mọi tầng đều được thử nạp. `/health` báo trạng thái và lỗi của từng model, interpreter (`python`, `in_venv`) và các biến môi trường đang đặt (`overrides`).
 - `server/net/session.py` (`ServerSession`) chứa toàn bộ logic phiên, đồng bộ. Mỗi hàm trả về danh sách message cần gửi, nên unit test chạy được mà không cần socket hay GPU.
 
 ```mermaid
@@ -139,11 +143,12 @@ flowchart TD
     VAD -->|"AudioSpan"| BUF["2. BufferManager"]
 
     BUF -->|"mỗi 600 ms"| PW["PartialWindow<br/>4 s cuối"]
-    PW --> PLID["LID trên cửa sổ"]
+    PW --> PLID["LID trên cửa sổ<br/>(tới khi chắc chắn, rồi chốt)"]
     PLID --> PASR["StreamingTranscriber<br/>.process_partial"]
     PASR -->|"partial"| OUT
 
-    BUF -->|"câu đã chốt"| NOISE["3. NoiseFilter (AST)"]
+    BUF -->|"câu đã chốt<br/>+ độ dài hangover"| SPLIT["6b. LanguageSplitter<br/>cắt câu hai ngôn ngữ"]
+    SPLIT --> NOISE["3. NoiseFilter (AST)<br/>mặc định tắt"]
     NOISE -->|"kept = false"| UTT["utterance"]
     NOISE -->|"kept"| OVL["4. OverlapResolver<br/>pedalboard"]
     NOISE -->|"audio thô"| SPK["5. SpeakerIdentifier<br/>ECAPA"]
@@ -154,7 +159,9 @@ flowchart TD
     ASR --> UTT
     UTT --> OUT
     ASR -->|"final"| OUT
-    ASR -->|"submit"| TQ["8. TranslationWorker<br/>thread riêng"]
+    SPK -->|"voiceprint"| RC["5b. SpeakerHistory<br/>gom cụm mỗi 15 câu"]
+    RC -->|"speakers"| OUT
+    ASR -->|"submit + bản chụp lịch sử"| TQ["8. TranslationWorker<br/>thread riêng"]
     TQ -->|"HTTP"| VLLM["vLLM"]
     TQ -->|"translation<br/>gửi kèm chunk kế tiếp"| OUT
 ```
@@ -163,15 +170,23 @@ flowchart TD
 |---|---|---|---|
 | 1 | VAD | `pipeline/vad.py` | Silero v5, frame 512 mẫu. Mở segment khi xác suất ≥ 0.5 liên tục 96 ms; đóng khi < 0.35 trong 500 ms. Pre-roll 256 ms để không mất âm đầu. |
 | 2 | Buffer Manager | `pipeline/buffer.py` | Chốt câu khi VAD đóng segment (`pause`), khi dài quá 7 s (`max_duration`, cắt tại frame 32 ms yên nhất trong 500 ms cuối, phần sau có `continues_previous`), hoặc khi hết phiên (`end_of_stream`). Mỗi 600 ms phát một `PartialWindow`. |
-| 3 | Noise Filter | `pipeline/noise.py` | AST `MIT/ast-finetuned-audioset-10-10-0.4593`, cửa sổ 10 s. Chỉ bỏ câu khi speech < 0.2 **và** một nhãn non-speech ≥ 0.3. Câu bị bỏ vẫn gửi `utterance` với `kept: false`. |
+| 3 | Noise Filter | `pipeline/noise.py` | **Mặc định tắt** (`ENABLE_NOISE_FILTER=1`), CPU. AST `MIT/ast-finetuned-audioset-10-10-0.4593`, cửa sổ 10 s. Chỉ bỏ câu khi speech < 0.2 **và** một nhãn non-speech ≥ 0.3. Câu bị bỏ vẫn gửi `utterance` với `kept: false`. |
 | 4 | Overlap Resolver | `pipeline/overlap.py` | Noise gate (ngưỡng = peak P90 − 12 dB, ratio 4) rồi compressor (peak + 3 dB, ratio 3). Bỏ qua câu có mức ≤ −55 dBFS. Chỉ audio cho ASR đi qua tầng này. |
 | 5 | Speaker ID | `pipeline/diarization.py` | ECAPA `speechbrain/spkrec-ecapa-voxceleb` trên audio thô. Cosine ≥ 0.30 thì khớp người đã biết (centroid momentum 0.7), không thì tạo `Speaker_NN`, tối đa 12 người. Câu < 600 ms gắn `Speaker_unknown`. |
+| 5b | Gom cụm lại | `pipeline/reclustering.py` | Mỗi 15 câu: agglomerative liên kết trung bình trên cosine, cắt ở 0.30 và không quá 12 cụm. Nhãn chỉ đổi khi hai lần gom liên tiếp cùng đề xuất; gửi `speakers`. |
 | 6 | Language ID | `pipeline/lid.py` | VoxLingua107 ECAPA, chỉ so `vi` với `ja`. Chênh lệch < 0.30 hoặc câu < 600 ms thì coi là chưa rõ; khi đó session dùng ngôn ngữ chắc chắn gần nhất của phiên. |
+| 6b | Cắt theo ngôn ngữ | `pipeline/language_split.py` | Thăm dò 1 s ở hai đầu (lùi vào 300 ms), cần biên ≥ 0.50. Khác nhau thì tìm nhị phân tối đa 3 bước, bắt vào khung im nhất, rồi thăm dò lại hai nửa (tối đa 2.5 s giữa mỗi nửa). Không nửa nào < 1.2 s tiếng nói. Mỗi nửa mang sẵn ngôn ngữ của nó. `LANGUAGE_SPLIT=0` để tắt. |
 | 7 | ASR | `pipeline/asr.py` | faster-whisper `large-v3` (CUDA float16 / CPU int8), xem 4.3. |
 | 8 | Dịch | `pipeline/translation_queue.py`, `pipeline/translate.py` | Xem 4.4 và 4.5. |
 
 Mỗi tầng được đo thời gian. Câu chiếm socket > 1 s bị ghi log kèm tên tầng
-chậm nhất. Lỗi trong pipeline chỉ làm mất câu đó, không đóng kết nối.
+chậm nhất.
+
+Lỗi được bắt **ở mức tầng**: tầng ném lỗi thì câu đi tiếp như khi thiếu tầng
+đó. Ba lỗi liên tiếp thì tắt tầng cho hết cuộc họp; lỗi có chữ `cuda`, `cudnn`,
+`cublas`, `out of memory` thì tắt ngay lần đầu (lần gọi lại từng segfault cả
+tiến trình). Tầng đọc cùng model tắt theo (speaker → gom cụm; language → cắt
+theo ngôn ngữ). Client nhận `error` với `fatal: false`.
 
 ### 4.3 ASR streaming (`StreamingTranscriber`)
 
@@ -188,22 +203,24 @@ flowchart LR
     A -->|"không"| UNS["unstable"]
     COM --> P["partial = committed + unstable"]
     UNS --> P
-    E["Câu đã chốt<br/>(finish_utterance)"] --> T["Giải mã phần đuôi:<br/>committed_end − 1.2 s<br/>→ speech_end + 0.2 s"]
+    E["Câu đã chốt<br/>(finish_utterance)"] --> T["Giải mã phần đuôi, beam 5 + từ vựng:<br/>committed_end − 1.2 s<br/>→ speech_end + 0.2 s"]
     T --> R["Hợp nhất với từ ổn định<br/>của các partial"]
     COM --> F["final = committed + đuôi"]
     R --> F
 ```
 
-- **Tham số giải mã:** `temperature` 0, `beam_size` 1, `condition_on_previous_text` tắt, `vad_filter` tắt (Silero đã chạy ở đầu), `word_timestamps` bật.
+- **Tham số giải mã:** `temperature` 0, `condition_on_previous_text` tắt, `vad_filter` tắt (Silero đã chạy ở đầu), `word_timestamps` bật. Partial `beam_size` 1, không prompt; phần đuôi của final `beam_size` 5, `initial_prompt` dựng từ `server/data/vocabulary.txt` (tối đa 200 ký tự, cắt theo ranh giới từ).
 - **Segment bị loại** khi:
-  - `no_speech_prob` > 0.6 và `avg_logprob` < −1.0;
-  - `no_speech_prob` > 0.95;
+  - `no_speech_prob` > 0.6 và (`avg_logprob` ≤ −1.0, hoặc câu < 600 ms, hoặc `no_speech_prob` > 0.95);
   - `avg_logprob` < −1.0;
   - `compression_ratio` > 2.4 (câu lặp);
-  - khớp danh sách câu Whisper hay bịa (`ASR_HALLUCINATIONS`, `ASR_HALLUCINATION_PATTERNS`).
+  - khớp danh sách câu Whisper hay bịa trong `server/data/` (`hallucinations.txt`, `hallucination_patterns.txt`), trừ khi có trong `keep.txt`.
+- **Dựng văn bản:** nối nguyên chuỗi từ của Whisper (đã có khoảng trắng đầu từ với tiếng Việt, không có với tiếng Nhật), chỉ gộp khoảng trắng thừa. Hai đoạn từ hai lần giải mã khác nhau được nối bằng `join_texts`, chỉ thêm khoảng trắng giữa hai ký tự thuộc chữ viết có dấu cách.
 - **Khớp từ giữa các cửa sổ:** so văn bản đã chuẩn hoá, sai lệch thời gian ≤ 0.45 s.
-- **Khi hợp nhất phần cuối:** từ đã ổn định qua nhiều partial được ưu tiên hơn bản giải mã cuối nếu hai bên mâu thuẫn. Từ nằm sau `speech_end` bị bỏ.
-- Câu bị Noise Filter loại thì trạng thái ASR của câu đó bị huỷ (`cancel_utterance`).
+- **Ranh giới phần đã chốt** xét theo điểm giữa của từ. Bản sao của từ chốt cuối ở ngay chỗ nối bị bỏ (`duplicates_removed`).
+- **Khi hợp nhất phần cuối:** từ đã ổn định qua nhiều partial được ưu tiên hơn bản giải mã cuối nếu hai bên mâu thuẫn. Từ nằm sau `speech_end` bị bỏ. `speech_end` = cuối câu trừ độ dài hangover VAD đã chuyển tiếp (≈ 480 ms với câu chốt vì ngắt, 0 với câu cắt vì quá dài).
+- **Ngôn ngữ:** chữ mờ hỏi LID tới khi có câu trả lời chắc chắn rồi giữ nguyên cho cả câu. Final dùng ngôn ngữ của LID trừ khi đã có chữ chốt bằng ngôn ngữ khác; khi đó giữ ngôn ngữ của chữ chốt và đếm vào `language_flips`.
+- Câu bị Noise Filter loại, hoặc bị cắt theo ngôn ngữ, thì trạng thái streaming của câu đó bị huỷ; câu bị cắt được giải mã nguyên từng nửa (`transcribe`).
 
 ### 4.4 Hàng đợi dịch (`TranslationWorker`)
 
@@ -228,7 +245,7 @@ flowchart TD
 
 - Mọi câu đều nhận đúng một message `translation`, kể cả khi bị bỏ (khi đó có `reason`).
 - Khi phiên kết thúc (`bye` hoặc rớt kết nối): worker dịch nốt các câu còn trong queue (tối đa 2 s), câu nào còn lại thì trả `reason: the meeting ended before this was translated`.
-- Lịch sử hội thoại được lưu ngay khi câu được chốt, kể cả khi bản dịch của nó sau đó bị bỏ.
+- Lịch sử hội thoại do session giữ và chỉ session ghi. Khi chốt một câu, session **chụp lại** lịch sử (chưa có câu đó), rồi mới thêm câu vào; bản chụp đi cùng câu vào hàng đợi. Translator không ghi gì vào lịch sử dùng chung. Nhờ vậy câu đang dịch không bao giờ nằm trong lịch sử của chính nó, và mỗi câu chỉ xuất hiện một lần.
 
 ### 4.5 Dịch (`Translator`, `VllmClient`)
 
@@ -267,6 +284,9 @@ chước ngôn ngữ của các bản dịch cũ.
 | Sai chữ viết | Tỉ lệ kana/kanji < 0.30 khi dịch sang `ja`, > 0.30 khi dịch sang `vi` |
 | Quá dài | Dài hơn `len(câu gốc) × hệ số + 50` ký tự; hệ số 2.0 khi dịch sang `vi`, 1.0 khi sang `ja` |
 
+Câu bị từ chối vì **trả lại nguyên câu** mà prompt có lịch sử thì được hỏi lại
+một lần không kèm lịch sử. `retried`/`rescued` ghi vào tổng kết cuối phiên.
+
 **Tham số request:** `temperature` 0.1, `top_p` 0.95, `seed` 0,
 `stop` `["<end_of_turn>", "<eos>"]`, `max_tokens` 512, timeout 20 s.
 
@@ -303,15 +323,22 @@ client/
   audio/capture.py          WASAPI loopback, chunk 200 ms
   audio/resampler.py        Downmix, resample 16 kHz
   net/ws_client.py          WebSocket, reconnect
+  ui/                       Cửa sổ họp PySide6
+  record.py                 Biên bản và nhật ký gỡ lỗi
   tests/, tests_real/       Unit test; real test chạy trên Windows Client PC
 server/
   app.py                    FastAPI, nạp model, /health, /ws/stream
-  config.py                 Mọi tham số của pipeline
+  config.py                 Mọi tham số của pipeline, và các biến môi trường
+  wordlists.py              Đọc server/data
+  data/                     Danh sách chặn/giữ, từ vựng mồi
   launch_vllm.py            Khởi động vLLM
   net/session.py            Máy trạng thái phiên và điều phối pipeline
-  pipeline/                 vad, buffer, noise, overlap, diarization, lid,
-                            asr, translation_queue, translate
+  pipeline/                 vad, buffer, language_split, noise, overlap,
+                            diarization, reclustering, lid, asr,
+                            translation_queue, translate, textdiff
+  analysis/                 Đọc và so nhật ký gỡ lỗi của client
   tests/, tests_real/       Unit test; real test chạy trên GPU Pod
+docs/TUNING.md              Mỗi tham số, phép đo đã chọn ra nó
 ```
 
 ## 7. Kiểm thử
@@ -320,4 +347,6 @@ server/
 |---|---|---|
 | Unit test (model được stub) | `client/tests`, `server/tests`, `common/tests` | Dev PC: `.venv\Scripts\python.exe -m pytest` |
 | Real test từng module (có sẵn smoke test cho chính script) | `server/tests_real/test_real_*.py` | GPU Pod |
-| Real test thu âm và end-to-end | `client/tests_real/test_real_audio_capture.py`, `test_real_stream.py` | Windows Client PC |
+| Real test cả pipeline trên bản ghi cuộc họp | `server/tests_real/test_real_streaming.py` | GPU Pod |
+| Real test thu âm và end-to-end | `client/tests_real/test_real_audio_capture.py`, `test_real_stream.py`, `python -m client.ui.main` | Windows Client PC |
+| So nhật ký của các lần chạy cùng cuộc họp | `python -m server.analysis.compare_logs <log>...` | Máy nào cũng được |

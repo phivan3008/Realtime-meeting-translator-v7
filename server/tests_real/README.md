@@ -44,6 +44,7 @@ an afternoon once already.
 | `test_real_lid.py` | Language ID: Vietnamese against Japanese, per sentence, with the margin behind every verdict |
 | `test_real_asr.py` | Whisper large-v3: decodes far faster than real time, keeps the forced language, and prints the transcripts for you to read |
 | `test_real_translate.py` | Translation through vLLM: answers are translations rather than conversations, deterministic, history reaches the model, and what one costs |
+| `test_real_streaming.py` | The whole pipeline on a recorded meeting, fed in 200 ms chunks exactly as the client sends it: Japanese without spaces between characters, no word shown twice at a join, running text that does not rewrite what is being read, no stage failures, inside real time |
 
 ```bash
 python3.11 server/tests_real/test_real_vad.py \
@@ -67,6 +68,22 @@ If the pod has no internet access it cannot pull the AST checkpoint from
 HuggingFace. Download it once elsewhere, copy the directory over, and either
 pass `--model-id <dir>` or export `AST_MODEL_ID=<dir>` before starting the
 server.
+
+```bash
+# Start with three minutes; a full thirty-minute meeting takes a few minutes
+# of H100 time. --translate needs vLLM running.
+python3.11 server/tests_real/test_real_streaming.py     --wav recordings/meeting_30min.wav --limit-seconds 180     --baseline recordings/meeting-20260911-144023.debug.txt     --baseline recordings/meeting-20260910-144120.debug.txt
+```
+
+`test_real_streaming.py` writes `server/tests_real/output/streaming.debug.txt`
+in the client's own format, so it can be compared with any client log of the
+same meeting (`python3.11 -m server.analysis.compare_logs ...`).
+
+`recordings/` is not in git. The `--baseline` logs are the ones the Windows
+client wrote; copy them to the pod first (`scp`), or leave `--baseline` out and
+copy `streaming.debug.txt` back to run `compare_logs` where the logs are. The WAV must
+be 16 kHz mono 16-bit; convert with
+`ffmpeg -i meeting.m4a -ac 1 -ar 16000 -sample_fmt s16 meeting_16k.wav`.
 
 `test_real_buffer.py` writes one WAV per sentence into
 `server/tests_real/output/<name>_utterances/`. Listen to any file named
