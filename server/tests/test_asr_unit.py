@@ -1,8 +1,9 @@
-"""Unit tests for the ASR guards.
+"""Unit tests for the ASR guards and the one-shot decode.
 
 Whisper is stubbed, so these run without the model. Whether it transcribes
 Vietnamese and Japanese correctly is a question for
-``server/tests_real/test_real_asr.py`` on the pod.
+``server/tests_real/test_real_asr.py`` on the pod. The streaming side -
+agreement, commits and the final tail - is in ``test_asr_streaming_unit.py``.
 
 Run with::
 
@@ -31,7 +32,7 @@ from server.pipeline.asr import (
     normalise_for_match,
     pcm_seconds,
 )
-from server.config import ASR_HALLUCINATIONS
+from server.wordlists import Hallucinations
 
 
 class StubDecoder:
@@ -41,7 +42,7 @@ class StubDecoder:
         self.rounds = list(rounds) or [[]]
         self.calls: list[dict] = []
 
-    def decode(self, samples, lang_code, beam_size):
+    def decode(self, samples, lang_code, beam_size, prompt=None):
         self.calls.append({"samples": samples, "lang_code": lang_code,
                            "beam_size": beam_size})
         pieces = self.rounds[min(len(self.calls) - 1, len(self.rounds) - 1)]
@@ -139,12 +140,48 @@ def test_clean_speech_is_kept():
     assert len(transcript.kept) == 1
 
 
-def test_a_segment_whisper_thinks_is_silence_is_dropped():
-    """This is the "Thank you for watching" that appears over quiet audio."""
-    invented = Piece(" Thank you for watching!", -0.3, 0.95, 1.4)
+def test_a_segment_whisper_thinks_is_silence_and_decoded_badly_is_dropped():
+    """Both signals, which is faster-whisper's own rule."""
+    invented = Piece(" mumble over a quiet room", -1.4, 0.9, 1.4)
     transcript = make([invented]).transcribe(audio())
     assert transcript.text == ""
     assert transcript.dropped[0][1] == "no speech"
+
+
+def test_a_confident_segment_survives_a_high_no_speech_prob():
+    """The clause that was missing, and what it cost.
+
+    Over thirty minutes of real meeting, no_speech_prob refused 68 segments
+    on its own. All 68 were decoded confidently - median avg_logprob -0.37 -
+    and one was 6.8 s of a man talking, matching what he said word for word.
+    """
+    real = Piece(" Về tác 07 thì cũng đang chờ bác Kiryu review.",
+                 -0.37, 0.9, 1.6)
+    transcript = make([real]).transcribe(audio())
+    assert transcript.text == "Về tác 07 thì cũng đang chờ bác Kiryu review."
+    assert transcript.dropped == ()
+
+
+def test_on_a_scrap_of_audio_no_speech_prob_alone_is_enough():
+    """Every invention confirmed on a real meeting came from audio this
+    short, and Whisper wrote them confidently: no_speech 0.86, logprob -0.31."""
+    invented = Piece(" Cảm ơn nhé", -0.31, 0.86, 1.2)
+    assert make([invented]).transcribe(audio(500)).text == ""
+    assert make([invented]).transcribe(audio(2000)).text == "Cảm ơn nhé"
+
+
+def test_a_near_certain_no_speech_prob_refuses_at_any_length():
+    invented = Piece(" something", -0.2, 0.97, 1.2)
+    transcript = make([invented]).transcribe(audio(6000))
+    assert transcript.dropped[0][1] == "no speech"
+
+
+def test_the_english_sign_off_is_refused_by_the_list_not_by_luck():
+    """It used to be caught by no_speech_prob. That was never policy."""
+    invented = Piece(" Thank you for watching!", -0.3, 0.9, 1.4)
+    transcript = make([invented]).transcribe(audio())
+    assert transcript.text == ""
+    assert transcript.dropped[0][1] == "known hallucination"
 
 
 def test_a_low_confidence_segment_is_dropped():
@@ -260,15 +297,15 @@ def test_the_fixtures_survived_being_written_to_disk():
 def test_the_statistical_guards_would_have_kept_it():
     """The reason a content rule had to exist at all: with the list emptied,
     every other guard waves this line straight through."""
-    transcript = make([confident(SIGN_OFF_VI)],
-                      hallucinations=()).transcribe(audio())
+    transcript = make([confident(SIGN_OFF_VI)], hallucinations=(),
+                      hallucination_patterns=()).transcribe(audio())
     assert transcript.text == SIGN_OFF_VI
     assert transcript.dropped == ()
 
 
 def test_the_list_is_not_empty():
     """An empty list would make every test above pass for the wrong reason."""
-    assert ASR_HALLUCINATIONS
+    assert Hallucinations().exact
 
 
 def test_the_vietnamese_sign_off_is_refused():
@@ -430,8 +467,7 @@ def test_a_pattern_must_match_the_whole_line():
 
 def test_the_patterns_are_not_empty():
     """An empty tuple would make every test above pass for nothing."""
-    from server.config import ASR_HALLUCINATION_PATTERNS
-    assert ASR_HALLUCINATION_PATTERNS
+    assert Hallucinations().patterns
 
 
 def test_the_patterns_can_be_replaced_for_a_test():
@@ -486,3 +522,51 @@ def test_these_were_only_caught_by_luck_before():
             "c\u1ee7a m\u00ecnh nh\u00e9.")
     kept = make([confident(line)], hallucination_patterns=())
     assert kept.transcribe(audio()).text == line
+
+
+# ---------------------------------------------------------------------------
+# The vocabulary prompt reaches the committed sentence, and only it
+# ---------------------------------------------------------------------------
+class Recorder:
+    def __init__(self):
+        self.prompts: list = []
+
+    def decode(self, samples, lang_code="", beam_size=1, prompt=None):
+        self.prompts.append(prompt)
+        return [Piece(" xin chào", -0.2, 0.05, 1.5)], "vi"
+
+
+def test_a_committed_sentence_carries_the_prompt():
+    decoder = Recorder()
+    Transcriber(decoder=decoder, prompt="solution, Slack").transcribe(
+        audio(), is_final=True)
+    assert decoder.prompts == ["solution, Slack"]
+
+
+def test_the_running_text_does_not():
+    """Decoded six times as often, and a prompt makes Whisper fill silence."""
+    decoder = Recorder()
+    Transcriber(decoder=decoder, prompt="solution, Slack").transcribe(
+        audio(), is_final=False)
+    assert decoder.prompts == [None]
+
+
+def test_an_empty_prompt_is_no_prompt():
+    """"" is itself a prompt as far as Whisper is concerned."""
+    decoder = Recorder()
+    Transcriber(decoder=decoder, prompt="").transcribe(audio())
+    assert decoder.prompts == [None]
+
+
+def test_the_default_prompt_comes_from_the_vocabulary_file():
+    from server.wordlists import vocabulary_prompt
+    assert Transcriber(decoder=Recorder()).prompt == (vocabulary_prompt()
+                                                      or None)
+
+
+def test_the_block_list_never_reaches_the_prompt():
+    """The block list is matched against what Whisper already wrote; only
+    vocabulary.txt tilts what it writes."""
+    prompt = Transcriber(decoder=Recorder()).prompt or ""
+    for line in Hallucinations().exact:
+        assert line not in prompt.casefold().replace(" ", "")

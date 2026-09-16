@@ -2,11 +2,24 @@
 
 Machine-specific tuning lives here; the wire-level audio contract lives in
 ``common/protocol.py`` and is re-exported below so both sides cannot drift.
+
+Every number is also explained in ``docs/TUNING.md``: what it means, the
+measurement behind it, and what breaks if it moves. A test keeps the two in
+step. The blocked-sentence lists and the vocabulary prompt are editable text
+files in ``server/data/``.
 """
 
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
+
+
+def _flag(name: str, default: str = "0") -> bool:
+    """An on/off environment variable. Anything but empty or "0" is on."""
+    return os.environ.get(name, default) not in ("", "0")
+
 
 # --- Audio contract ----------------------------------------------------------
 # Defined once in common/protocol.py and re-exported here, because a mismatch
@@ -91,10 +104,15 @@ PARTIAL_WINDOW_SECONDS = 4.0
 AST_MODEL_ID = os.environ.get(
     "AST_MODEL_ID", "MIT/ast-finetuned-audioset-10-10-0.4593"
 )
-# "cuda", "cpu", or "" to pick automatically. The model is ~350 MB of VRAM,
-# which is nothing next to vLLM, and on CPU a 7 s utterance would eat most of
-# the latency budget.
-NOISE_DEVICE = os.environ.get("NOISE_DEVICE", "")
+# The whole stage is OFF unless ENABLE_NOISE_FILTER=1. Measured over two real
+# meetings from the venv, 237 utterances: it dropped nothing at all, and cost
+# a fixed 1.31 s per utterance on CPU - a quarter of the thread that reads the
+# socket. Turning it off took the slowest sentence from 2.1 s to 0.4 s.
+ENABLE_NOISE_FILTER = _flag("ENABLE_NOISE_FILTER")
+# CPU by default. DESIGN.md wants this stage off the GPU so the VRAM belongs
+# to Whisper and vLLM, and on the pod AST on CUDA raised in cuDNN and the next
+# call into it segfaulted the process. NOISE_DEVICE=cuda opts back in.
+NOISE_DEVICE = os.environ.get("NOISE_DEVICE", "cpu")
 
 # An utterance survives unless the classifier is confident it holds no speech
 # at all. The filter is deliberately timid: dropping real speech loses a
@@ -145,6 +163,11 @@ OVERLAP_COMPRESSOR_RELEASE_MS = 120.0
 # the little signal there is. Pass it through untouched instead.
 OVERLAP_MIN_LEVEL_DBFS = -55.0
 
+# DISABLE_OVERLAP=1 feeds Whisper raw audio. The resolver's only consumer is
+# the ASR, and what shaping does to transcription accuracy has never been
+# measured - only what it does to voiceprints, where it costs 0.06 cosine.
+DISABLE_OVERLAP = _flag("DISABLE_OVERLAP")
+
 # --- 5. Speaker Diarization (DESIGN.md section 3.5) -------------------------
 # ECAPA-TDNN voiceprints, matched by cosine similarity. The checkpoint is
 # public, so no HuggingFace token is needed.
@@ -192,6 +215,24 @@ SPEAKER_CENTROID_MOMENTUM = 0.7
 #: Label used when an utterance is too short to identify.
 SPEAKER_UNKNOWN = "Speaker_unknown"
 
+# Second thoughts: the whole meeting is clustered again every this many
+# sentences, and corrected labels are sent back. The live matcher answers in
+# meeting order and never revisits an answer; on a real four-minute meeting
+# every sentence came out Speaker_01.
+SPEAKER_RECLUSTER_EVERY = 15
+# Voiceprints kept. Clustering cost grows with the square of this.
+SPEAKER_RECLUSTER_MAX = 300
+# Where average linkage stops merging. The same number as the live matcher
+# for now, but it is NOT the same measurement: 0.30 was measured on single
+# pairs, and the average between two clusters is a different quantity. A
+# thirty-minute run found 22 speakers with it. Every run logs the merge
+# scores so this can be placed from a real meeting.
+SPEAKER_RECLUSTER_THRESHOLD = SPEAKER_MATCH_THRESHOLD
+# A label only moves after two reclustering runs in a row agree on the new
+# one. The same run corrected 329 labels across 313 sentences - names that
+# would not sit still on screen.
+SPEAKER_RECLUSTER_CONFIRMATIONS = 2
+
 # --- 6. Language ID (DESIGN.md section 3.6) ---------------------------------
 LID_MODEL = os.environ.get("LID_MODEL", "speechbrain/lang-id-voxlingua107-ecapa")
 LID_DEVICE = os.environ.get("LID_DEVICE", "")
@@ -213,8 +254,50 @@ LID_MIN_MARGIN = 0.30
 # Shorter than this there is not enough speech to tell the languages apart.
 LID_MIN_DURATION_MS = 600
 
-#: Reported when the languages cannot be told apart; Whisper then auto-detects.
+#: Reported when the languages cannot be told apart; the session then reuses
+#: the meeting's last known language rather than letting Whisper pick one of 99.
 LID_UNKNOWN = ""
+
+# --- 6b. Splitting an utterance that holds two languages --------------------
+# The VAD closes a segment on VAD_MIN_SILENCE_MS of quiet and people answer
+# each other faster than that, so a reply in the other language lands inside
+# the same utterance. The LID then names one language, the ASR is forced into
+# it for all of it, and the turn in the other language is not mistranslated -
+# it is gone. Measured: four turns lost per ten-minute meeting.
+
+#: Off with LANGUAGE_SPLIT=0. The ordinary case costs two LID probes.
+LANGUAGE_SPLIT = _flag("LANGUAGE_SPLIT", "1")
+
+#: Audio each probe reads. Comfortably over LID_MIN_DURATION_MS: an undecided
+#: probe ends the search, and on 600 ms probes the real margins ran near 0.13.
+LANGUAGE_SPLIT_PROBE_MS = 1_000.0
+
+#: Skipped at each end before probing. The first VAD_SPEECH_PAD_MS is
+#: pre-roll and the last part is the VAD hangover. Probing the outermost
+#: second gave 26 of 41 visible splits the same language on both halves.
+LANGUAGE_SPLIT_EDGE_MS = 300.0
+
+#: Margin a probe must clear to count towards a cut, well over LID_MIN_MARGIN.
+#: A missed cut loses a turn; an unnecessary one manufactures a fragment, and
+#: Whisper fills a fragment in ("All right, they will.").
+LANGUAGE_SPLIT_MIN_MARGIN = 0.50
+
+#: The shortest half a cut may leave, in speech. The tail floor adds the
+#: utterance's own hangover on top. 800 ms left 34 of 41 second halves at
+#: twenty-five characters or less, which is where the inventions were.
+LANGUAGE_SPLIT_MIN_PART_MS = 1_200.0
+
+#: Longest window a review probe reads, from the middle of its half. Without
+#: the cap the slowest sentence went from 0.7 s to 1.2 s.
+LANGUAGE_SPLIT_REVIEW_MS = 2_500.0
+
+#: Narrowest window the quiet-frame search uses once the binary search has
+#: converged.
+LANGUAGE_SPLIT_SNAP_MS = 200.0
+
+#: Halvings of the search range. Three narrow a five-second utterance to about
+#: 600 ms, which is inside the snap search.
+LANGUAGE_SPLIT_MAX_STEPS = 3
 
 # --- 7. ASR (DESIGN.md section 3.7) -----------------------------------------
 ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
@@ -231,137 +314,83 @@ ASR_BEAM_SIZE_FINAL = 5
 
 # Whisper's own guards, passed through so they are visible here rather than
 # buried in a default.
+#
+# no_speech_prob over this refuses a segment only when avg_logprob agrees -
+# faster-whisper's own rule. Read alone, over thirty minutes of real meeting,
+# it refused 68 segments that were all decoded confidently (median avg_logprob
+# -0.37), including a 6.8 s sentence that matched what was said word for word.
 ASR_NO_SPEECH_THRESHOLD = 0.6
 ASR_LOG_PROB_THRESHOLD = -1.0
+
+# ... except on audio shorter than this, where no_speech_prob alone refuses
+# again. Every invention confirmed on a real meeting came from a scrap under
+# 2 s, many of them Speaker_unknown, and the sentence the rule above was built
+# for ran 6.8 s. 600 ms is the floor where the speaker model and the LID both
+# already decline to answer; Whisper is the only model that answers below it.
+ASR_SHORT_UTTERANCE_MS = SPEAKER_MIN_DURATION_MS
+
+# ... and at any length, a no_speech_prob this high refuses on its own. Kept
+# from the streaming rewrite; it has not been measured against real meetings,
+# so the refusals it makes are logged with both scores.
+ASR_NO_SPEECH_CERTAIN = 0.95
 
 # Repetition guard. Whisper answers near-silence with confident invented text
 # and sometimes locks into a loop; a segment whose text compresses far better
 # than real speech is that loop. gzip on natural speech lands near 1.5-2.0.
 ASR_MAX_COMPRESSION_RATIO = 2.4
 
-# Sentences Whisper invents out of near-silence, verbatim. Every guard above is
-# statistical, and these defeat all of them: Whisper is *confident* when it
-# writes them - low no_speech_prob, high avg_logprob, ordinary compression -
-# because they close a large share of the videos it was trained on.
-#
-# Only entries this project has actually seen are listed. Each is matched in
-# full, after punctuation and spacing are stripped, so a real sentence that
-# merely contains one of these phrases is kept.
-ASR_HALLUCINATIONS = (
-    # Seen in the 60 s end-to-end run, as running text over a Vietnamese
-    # meeting about task tables.
-    "C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i "
-    "v\u00e0 h\u1eb9n g\u1eb7p l\u1ea1i.",
-    # Seen in the Module 9 ASR test, and refused there by no_speech_prob.
-    # Listed because that refusal was luck, not policy.
-    "C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i.",
-    "\u3054\u8996\u8074\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044"
-    "\u307e\u3057\u305f\u3002",
-    # The same sign-off in the non-past. One character apart from the line
-    # above, and Whisper picks between them freely.
-    "\u3054\u8996\u8074\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044"
-    "\u307e\u3059\u3002",
-    # Whisper's answer to silence in English. A meeting where somebody says
-    # exactly "you" and nothing else loses one word; that trade is worth it.
-    "you",
-    # Committed as a whole sentence at 55.3 s of the second end-to-end run,
-    # attributed to Speaker_02 and translated to さようなら。 The recording
-    # was played back over 54-56 s and nobody says it.
-    #
-    # This entry is a different trade from the ones above. Those are video
-    # sign-offs that no meeting produces; this is an ordinary Vietnamese
-    # sentence, and blocking it means a real goodbye said in exactly these
-    # words and no others is deleted. Whole-segment matching is what keeps
-    # that narrow: "Chào tạm biệt nhé", "Thôi chào tạm biệt mọi người" and
-    # anything else with a word attached all survive.
-    "Ch\u00e0o t\u1ea1m bi\u1ec7t.",
-    # Running text at 107.3 s of the eighth end-to-end run, over a meeting
-    # about task tables. A Vietnamese YouTube channel's subscribe pitch,
-    # named channel and all - not something a meeting says, and the surest
-    # entry on this list.
-    #
-    # It also shows what the list cannot do. It never became a sentence, so
-    # nothing failed; the check "No running text is a Whisper sign-off"
-    # passed, because the line was not on the list to be caught by. Only a
-    # person reading the output found it.
-    "H\u00e3y subscribe cho k\u00eanh Ghi\u1ec1n M\u00ec G\u00f5 "
-    "\u0110\u1ec3 kh\u00f4ng b\u1ecf l\u1ee1 nh\u1eefng video h\u1ea5p d\u1eabn",
-    # A committed sentence at 7.6 s of the ninth end-to-end run, translated
-    # into Japanese and shown to the reader. The utterance it came from scored
-    # 0.03 for speech, while every real sentence in that run scored 0.66 or
-    # better.
-    #
-    # Second new YouTube line in two runs. This list is not keeping up and
-    # cannot: it only ever knows what has already been seen. That score is a
-    # signal that needs no list, which is why `speech_score` now travels with
-    # every sentence - so the separation can be measured over real runs
-    # instead of assumed from one.
-    "H\u00e3y \u0111\u0103ng k\u00fd k\u00eanh \u0111\u1ec3 \u1ee7ng h\u1ed9 "
-    "k\u00eanh c\u1ee7a m\u00ecnh nh\u00e9.",
-    # A committed sentence at 331.4 s of a ten-minute run, scored 0.57 for
-    # speech - squarely among the real sentences, which is one more nail in
-    # the score-based idea - and translated into Japanese. The closing line
-    # of a video, not of a meeting.
-    "H\u1eb9n g\u1eb7p l\u1ea1i c\u00e1c b\u1ea1n trong "
-    "nh\u1eefng video ti\u1ebfp theo.",
-)
-
-# What the list above cannot do: it matches whole sentences, so the same
-# invention with one word changed walks through it. That is not a worry, it is
-# a measurement. Two runs after "Hãy subscribe cho kênh Ghiền Mì Gõ ..." was
-# added, this arrived and was translated into Japanese and shown:
-#
-#     Hãy subscribe cho kênh La La School Để không bỏ lỡ những video hấp dẫn
-#
-# Same sentence, different channel name. The name is a hole, and there are
-# unlimited channel names to put in it.
-#
-# So the shapes with holes in them are matched as patterns instead. Each is
-# anchored to the whole segment, and each is written narrowly enough that a
-# meeting saying something similar survives: "Hãy đăng ký kênh Teams cho dự án
-# này" has no "để không bỏ lỡ những video hấp dẫn" after it, and is kept.
-#
-# Only shapes seen twice, or seen once and obviously templated, are here.
-ASR_HALLUCINATION_PATTERNS = (
-    # Seen twice, with two different channel names.
-    r"h[ãa]y subscribe cho k[êe]nh .{1,40} "
-    r"đ[ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[ữu]ng video h[ấa]p d[ẫa]n",
-    # Seen once. The channel name is optional in this one - the run that
-    # produced it had none - which is why it is a pattern rather than the
-    # exact line it also appears as above.
-    r"h[ãa]y đ[ăa]ng k[ýy] k[êe]nh( .{1,40})? đ[ểe] [ủu]ng h[ộo] "
-    r"k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?",
-    # Three variants of one shape in a single ten-minute run, all caught by
-    # no_speech_prob rather than by policy:
-    #
-    #     Các bạn có thể nhớ like, share và đăng ký kênh để ủng hộ kênh...
-    #     Các bạn có thể nhớ like và share video này để ủng hộ kênh của...
-    #     Các bạn có thể nhớ đăng ký kênh để ủng hộ kênh của mình nhé.
-    #
-    # The middle clause is the hole this time, not a channel name. Being
-    # caught by a statistical guard is luck; the same lines have arrived
-    # confident before.
-    r"c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,30}",
-)
-
-# What none of this can do: it only knows what has already been seen, whether
-# as a line or as a shape. Every entry was found by a person reading the
-# output and reporting that nobody said it.
-#
-# The obvious alternative was tested and does not work. The noise filter
-# scores every utterance for speech before Whisper sees it, and the invention
-# that reached the screen on the ninth run came from audio scored 0.03 while
-# real sentences scored 0.66 and up - which looked like a rule needing no
-# list at all. The next run settled it: "これ" and "おいっ" are real speech
-# scoring 0.01 and 0.04, and the La La School line above scored 0.77, in the
-# middle of the real ones. There is no threshold there. The scores are still
-# reported, because they are worth reading, but nothing is decided by them.
+# Sentences Whisper invents out of near-silence are not here any more. They
+# are three editable text files in server/data/ (hallucinations.txt,
+# hallucination_patterns.txt, keep.txt), read by server/wordlists.py, so a
+# line can be added without a redeploy. server/data/README.md says why every
+# statistical guard above lets them through and how to test an entry first.
+MEETING_DATA_DIR = os.environ.get(
+    "MEETING_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 
 # Whisper carries the previous sentence into the next by default, which is
 # where streaming hallucination loops come from: one invented sentence becomes
 # the prompt for the next. Each utterance here is already a complete thought,
 # so it is decoded alone.
 ASR_CONDITION_ON_PREVIOUS = False
+
+# --- 7b. The meeting's own vocabulary ---------------------------------------
+# server/data/vocabulary.txt becomes Whisper's initial_prompt. It tilts the
+# model where it is undecided between two readings of one sound: the running
+# text hears "solution" and the committed sentence writes "sau lưu sinh". A
+# run of the same meeting that carried such a list read both correctly.
+#
+# Capped on a term boundary. Whisper reads only the start, and a non-empty
+# prompt makes it fill near-silence rather than leave it, so a long list
+# costs something merely by existing. A list seeded with thirty guesses made
+# inventions rise sharply.
+ASR_PROMPT_MAX_CHARS = 200
+# The running text does not get it: it is decoded six times more often, which
+# would multiply the one cost a prompt has. Set to 1 to measure the other way.
+ASR_PROMPT_ON_PARTIALS = _flag("ASR_PROMPT_ON_PARTIALS")
+
+# --- 7c. Streaming stabilisation (server/pipeline/asr.py) -------------------
+# The running text is decoded again every PARTIAL_INTERVAL_MS on the last
+# PARTIAL_WINDOW_SECONDS. A word that consecutive decodes agree on, at about
+# the same time, is committed and never rewritten; the sentence at the end
+# decodes only what was not committed yet. Measured on the debug logs, this
+# took the share of on-screen text surviving an update from 33% to 67%.
+
+#: Consecutive decodes that must contain a word before it is committed. Two is
+#: the floor - one decode agreeing with itself is not evidence.
+ASR_STREAM_MIN_AGREEMENT = 2
+#: Words closer than this to the newest audio are never committed; Whisper
+#: revises the end of a window more than anything else.
+ASR_STREAM_COMMIT_MARGIN_SECONDS = 1.0
+#: Committed audio decoded again in front of the final tail, for left context.
+ASR_STREAM_FINAL_OVERLAP_SECONDS = 1.2
+#: Audio kept after the VAD's last speech frame when the tail is decoded. The
+#: rest of the hangover is silence, and Whisper answers silence with words: a
+#: clause was added over 400 ms nobody spoke into.
+ASR_STREAM_FINAL_POST_ROLL_SECONDS = 0.20
+#: How far apart two decodes may place the same word and still agree.
+ASR_STREAM_WORD_TOLERANCE_SECONDS = 0.45
+#: Decodes kept per open utterance for agreement.
+ASR_STREAM_HISTORY = 5
 
 # --- 8. Translation (DESIGN.md section 3.8) ---------------------------------
 # vLLM runs as its own process behind its OpenAI-compatible API, and this
@@ -540,3 +569,29 @@ TRANSLATE_MAX_WRONG_SCRIPT = 0.30
 TRANSLATE_PAIR = {"vi": "ja", "ja": "vi"}
 #: Human names, as the prompt writes them after "tiếng": "tiếng Việt".
 LANGUAGE_NAMES = {"vi": "Việt", "ja": "Nhật"}
+
+
+# ---------------------------------------------------------------------------
+# Overrides
+# ---------------------------------------------------------------------------
+def known_variables() -> list[str]:
+    """Every environment variable this file reads, taken from the file.
+
+    Derived rather than listed by hand: a list that has to be kept in step
+    with the code is a list that stops being true.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    return sorted(set(re.findall(r'(?:os\.environ\.get|_flag)\(\s*"(\w+)"',
+                                 source)))
+
+
+def overrides() -> dict[str, str]:
+    """The ones actually set right now.
+
+    Startup reports these, because a variable left over from an earlier
+    terminal changes what the pipeline does and says nothing about it. Three
+    measurements in this project were taken against a configuration nobody
+    had meant to be running.
+    """
+    return {name: os.environ[name]
+            for name in known_variables() if name in os.environ}

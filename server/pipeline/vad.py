@@ -156,6 +156,11 @@ class AudioSpan:
     start_ms: float              # stream position of the first sample
     opens_segment: bool = False
     closes_segment: bool = False
+    #: On a closing span: how much of the end of the segment is the silence
+    #: hangover, forwarded while the state machine waited to be sure the
+    #: speaker had stopped. Whisper answers that silence with words, so the
+    #: final decode needs to know where the speech really ended.
+    trailing_silence_ms: float = 0.0
 
     @property
     def duration_ms(self) -> float:
@@ -350,6 +355,9 @@ class SegmenterOutput:
     probabilities: list[float] = field(default_factory=list)
     is_speech: bool = False
     position_ms: float = 0.0                           # stream time after this chunk
+    #: Set by :meth:`VADSegmenter.close`: the hangover already forwarded when
+    #: the stream ended mid-segment. There is no closing span to carry it.
+    trailing_silence_ms: float = 0.0
 
     @property
     def pcm(self) -> bytes:
@@ -415,7 +423,8 @@ class VADSegmenter:
         keep_start_ms: Optional[float] = None
         opens = False
 
-        def flush(closes: bool, at_ms: Optional[float] = None) -> None:
+        def flush(closes: bool, at_ms: Optional[float] = None,
+                  trailing_silence_ms: float = 0.0) -> None:
             """Emit the audio gathered so far as one span.
 
             ``at_ms`` matters when a segment ends on a chunk that contributed
@@ -432,6 +441,7 @@ class VADSegmenter:
                         start_ms=start,
                         opens_segment=opens,
                         closes_segment=closes,
+                        trailing_silence_ms=trailing_silence_ms,
                     )
                 )
             keep = bytearray()
@@ -474,7 +484,11 @@ class VADSegmenter:
                 out.events.append(
                     SegmentEvent(kind=VADEvent.SPEECH_END, at_ms=frame_start_ms)
                 )
-                flush(closes=True, at_ms=frame_start_ms)
+                # Every quiet frame before this one was forwarded as part of
+                # the segment: that is the hangover.
+                flush(closes=True, at_ms=frame_start_ms,
+                      trailing_silence_ms=(self.state.min_silence_frames - 1)
+                      * self.frame_ms)
 
         flush(closes=False)
         out.is_speech = self.state.is_speech
@@ -484,7 +498,8 @@ class VADSegmenter:
 
     def close(self) -> SegmenterOutput:
         """Flush at the end of a session so no segment stays open."""
-        out = SegmenterOutput(is_speech=False, position_ms=self.position_ms)
+        out = SegmenterOutput(is_speech=False, position_ms=self.position_ms,
+                              trailing_silence_ms=self.state.trailing_silence_ms)
         if self.state.close() is not None:
             out.events.append(
                 SegmentEvent(kind=VADEvent.SPEECH_END, at_ms=self.position_ms)

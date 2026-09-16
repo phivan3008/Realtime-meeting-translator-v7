@@ -1,0 +1,69 @@
+# Từ vựng mồi cho Whisper — DANH SÁCH GỢI Ý (initial_prompt)
+#
+# Whisper nghe một cuộc họp tiếng Việt và phiên âm từ tiếng Anh thành từ
+# tiếng Việt gần âm. Đo được trên họp thật: chữ mờ nghe đúng `Slack`, câu
+# chốt biến nó thành `quạt nắp`; chữ mờ nghe đúng `solution`, câu chốt viết
+# `sau lưu sinh`. Bản dịch sau đó dịch trung thành cái vô nghĩa đó.
+#
+# `initial_prompt` là chỗ nói trước cho Whisper biết những từ nào sắp xuất
+# hiện. Nó KHÔNG ép — chỉ nghiêng cán cân khi model đang lưỡng lự.
+#
+# Chỉ lần giải mã chốt câu nhận prompt. Chữ mờ được giải mã thường gấp sáu
+# lần, và prompt có một cái giá: nó làm Whisper lấp đầy gần-im-lặng thay vì
+# để trống. ASR_PROMPT_ON_PARTIALS=1 để đo cách bố trí ngược lại.
+#
+# CÁCH THÊM: mỗi dòng một từ hoặc cụm. Dòng bắt đầu bằng # là ghi chú, dòng
+# trống bị bỏ qua. Sau khi sửa phải khởi động lại uvicorn.
+#
+# HAI QUY TẮC, CẢ HAI ĐỀU ĐÃ TRẢ GIÁ:
+#
+# 1. Chỉ thêm từ bạn đã THẤY bị nghe sai trong transcript, và ghi lại nó bị
+#    nghe thành gì. Danh sách này từng có 30 từ đoán mò (Zoom, Teams, GitHub,
+#    Jira...) và tần suất câu bịa lọt lên màn hình tăng vọt ngay sau đó.
+#
+# 2. Giữ ngắn. Whisper chỉ đọc phần đầu, và server cắt ở ASR_PROMPT_MAX_CHARS
+#    theo ranh giới từ. Một danh sách dài không kỹ hơn — phần đuôi bị bỏ qua
+#    còn sự có mặt của nó thì vẫn tốn.
+#
+# File trống nghĩa là KHÔNG có prompt. Không giống prompt rỗng: "" tự nó đã
+# là một prompt với Whisper.
+#
+# Chú thích phải nằm trên dòng riêng. Chú thích cuối dòng được cắt khi đứng
+# sau khoảng trắng, nhưng đừng dựa vào đó.
+
+# --- Đã xác nhận nghe sai trong transcript thật ----------------------------
+
+# nghe thành: quạt nắp, quạt lắc, thét quà xắt
+Slack
+# nghe thành: sau lưu sinh, sau lưu tình
+solution
+# nghe thành: vốn lượng
+dung lượng
+# nghe thành: kiếm kiếm, đi kiếm tiếp
+kiểm chứng
+# nghe thành: tôn ("cái tool" -> "cái tôn")
+tool
+# nghe thành: tem lắc, đem lắc
+template
+# nghe thành: hít, hình
+edit
+# nghe thành: quen
+review
+# nghe thành: bờ lên
+plan
+# nghe thành: マグナム, マグダ
+Markdown
+# nghe thành: x2x23, i2x23, Y2X2.3
+X203
+# nghe thành: M5.2, VLM5.2
+GLM5.2
+
+# --- Tên người -------------------------------------------------------------
+# Phần có giá trị nhất, và phần duy nhất chỉ người trong cuộc họp điền được.
+# Whisper không có cách nào đoán tên riêng tiếng Nhật.
+
+Miyake
+Miyachi
+Yamaguchi
+Kiryu
+Takahashi

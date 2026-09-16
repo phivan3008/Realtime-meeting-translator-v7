@@ -1,0 +1,78 @@
+# Câu Whisper bịa ra từ gần-im-lặng — DANH SÁCH CHẶN (khớp nguyên câu)
+#
+# Mỗi dòng là một câu. So khớp sau khi bỏ dấu câu, khoảng trắng và phân biệt
+# hoa thường, nên "Chào tạm biệt" và "chào tạm biệt." là một. Phải khớp TOÀN
+# BỘ câu: một câu thật có chứa cụm này vẫn được giữ.
+#
+# Dòng bắt đầu bằng # là ghi chú. Dòng trống bị bỏ qua.
+#
+# CÁCH THÊM: chạy real test, đọc phần "Committed sentences" và "Running text",
+# nghe lại đoạn ghi âm tương ứng. Chỉ thêm câu bạn đã xác nhận là KHÔNG AI NÓI.
+# Đoán ở đây nghĩa là âm thầm xoá tiếng nói thật.
+#
+# CẢNH BÁO: mọi thước đo thống kê của Whisper đều vô dụng với các câu này.
+# Nó viết chúng với no_speech_prob THẤP hơn và avg_logprob CAO hơn khi phiên
+# âm tiếng nói thật, vì chúng kết thúc phần lớn video trong dữ liệu huấn luyện.
+
+# --- Tiếng Việt ---------------------------------------------------------
+Cảm ơn các bạn đã theo dõi và hẹn gặp lại.
+Cảm ơn các bạn đã theo dõi.
+Hẹn gặp lại các bạn trong những video tiếp theo.
+Hãy subscribe cho kênh Ghiền Mì Gõ Để không bỏ lỡ những video hấp dẫn
+Hãy đăng ký kênh để ủng hộ kênh của mình nhé.
+Cảm ơn các bạn đã xem.
+
+# Câu chào bình thường, nhưng đã xác nhận không ai nói ở giây 55 của một lần
+# chạy thật. Đây là đánh đổi khác hẳn các câu trên: một lời chào tạm biệt
+# thật, nói đúng bằng những chữ này và không thêm gì, sẽ bị xoá.
+# "Chào tạm biệt nhé", "Thôi chào tạm biệt mọi người" vẫn được giữ.
+Chào tạm biệt.
+
+# Cùng đánh đổi: xuất hiện hai lần trong một cuộc họp một tiếng, cả hai lần
+# đều không ai nói. Chỉ chặn khi câu chỉ gồm đúng ba chữ này — "Hẹn gặp lại
+# các bạn tuần sau" hay "Thôi hẹn gặp lại nhé" vẫn được giữ.
+Hẹn gặp lại.
+
+# Lời cảm ơn trơ trọi, một câu đúng một cụm. Đây là đánh đổi ĐẮT NHẤT trong
+# file này: người thật cũng nói đúng những chữ đó. Chặn vì trên bốn lần chạy
+# thật, mọi lần chúng lên tới câu chốt đều được xác nhận là Whisper bịa lên
+# một mẩu audio ngắn.
+#
+# ĐƯỜNG LÙI: thấy mất lời cảm ơn thật thì thêm đúng dòng đó vào keep.txt —
+# keep.txt thắng file này — rồi xoá nó ở đây.
+Cảm ơn.
+Cảm ơn mọi người.
+
+# Từ một cuộc họp ba mươi phút, phát lại offline sau khi luật no_speech_prob
+# đứng một mình bị bỏ (commit 43f8ae4 trên improve-from-40c768e). Mỗi câu
+# xuất hiện trên đoạn audio 1.3-4.9 s mà chữ mờ, giải mã độc lập trên cùng
+# audio, không nói gì cả. Trước đó chúng chỉ bị chặn nhờ may.
+Cảm ơn các bạn.
+Hẹn gặp lại mọi người
+
+# --- Tiếng Nhật ---------------------------------------------------------
+ご視聴ありがとうございました。
+ご視聴ありがとうございます。
+
+# Câu kết video, xác nhận không ai nói. Một cuộc họp kết thúc bằng đúng câu
+# này thì mất — nhưng không ai chào tạm biệt đồng nghiệp bằng "video sau".
+次の動画で会いましょう。
+また次の動画でお会いしましょう。
+# Cùng họ câu, chữ ビデオ thay cho 動画. Lên được màn hình cả dưới luật cũ.
+次のビデオでお会いしましょう。
+
+# Cùng đánh đổi như "Cảm ơn." ở trên, và cùng đường lùi qua keep.txt.
+ありがとうございました。
+ありがとうございました
+最後までご視聴ありがとうございました。
+
+# --- Tiếng Anh ----------------------------------------------------------
+# Câu kết video kinh điển của Whisper. Nó viết câu này với avg_logprob CAO,
+# nên không lớp thống kê nào chặn được — chỉ danh sách này chặn được.
+Thank you for watching!
+Thank you for watching.
+Thanks for watching!
+
+# Câu trả lời của Whisper cho im lặng. Một cuộc họp mà ai đó nói đúng một từ
+# "you" và không gì khác sẽ mất một từ; đánh đổi này đáng.
+you

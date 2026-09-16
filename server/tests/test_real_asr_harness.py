@@ -65,7 +65,7 @@ class StubDecoder:
         self.invent_on_silence = invent_on_silence
         self.calls: list[dict] = []
 
-    def decode(self, samples, lang_code, beam_size):
+    def decode(self, samples, lang_code, beam_size, prompt=None):
         self.calls.append({"lang_code": lang_code, "beam_size": beam_size})
         loud = float(np.max(np.abs(samples))) if samples.size else 0.0
         if loud < 0.01:
@@ -270,8 +270,12 @@ def test_agreement_reports_what_whisper_thought_by_itself(capsys):
 def test_invented_text_over_silence_is_caught():
     """The reason the guards exist, with the real symptom."""
     report = harness.Report()
+    # Guards and lists both switched off, so the invention gets through and
+    # the check has something to catch.
     transcriber = Transcriber(decoder=StubDecoder(),
-                              no_speech_threshold=0.99)
+                              no_speech_threshold=0.99,
+                              no_speech_certain=1.0,
+                              hallucinations=(), hallucination_patterns=())
     harness.check_silence(bytes(SAMPLE_RATE * SAMPLE_WIDTH), transcriber, report)
     assert [c.name for c in report.failed] == ["Silence produces no transcript"]
 

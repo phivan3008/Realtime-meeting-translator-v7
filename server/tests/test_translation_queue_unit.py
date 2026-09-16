@@ -399,3 +399,37 @@ def test_stopping_does_not_wait_forever_on_a_stuck_translator():
         w._stopping.set()
     assert done, "the abandoned sentences said nothing at all"
     assert any("meeting ended" in d.reason for d in done)
+
+
+# ---------------------------------------------------------------------------
+# The history travels with the sentence
+# ---------------------------------------------------------------------------
+def test_a_job_carries_the_history_it_was_submitted_with():
+    queue_ = TranslationQueue()
+    queue_.submit(1, "xin chào", "vi", "Speaker_01", history=["earlier"])
+    job, _ = queue_.take()
+    assert job.history == ("earlier",)
+
+
+def test_a_job_without_a_history_says_so():
+    queue_ = TranslationQueue()
+    queue_.submit(1, "xin chào", "vi")
+    job, _ = queue_.take()
+    assert job.history is None
+
+
+def test_the_worker_hands_the_history_to_the_translator():
+    class Recording:
+        def __init__(self):
+            self.histories = []
+
+        def translate(self, text, lang_code, speaker_id="", history=None):
+            from server.pipeline.translate import Translation
+            self.histories.append(history)
+            return Translation("x", text, lang_code, "ja")
+
+    translator = Recording()
+    worker = TranslationWorker(translator, inline=True)
+    worker.submit(1, "a", "vi", history=("h",))
+    worker.submit(2, "b", "vi")
+    assert translator.histories == [("h",), None]

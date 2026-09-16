@@ -22,6 +22,15 @@ So the previous few turns go into the prompt.  Three, not thirty: enough to
 resolve a pronoun, short enough that the model cannot start summarising the
 meeting instead of translating the sentence in front of it.
 
+The history a sentence is translated with is the history *as it stood when
+the sentence was committed*. Translation runs on its own thread, behind a
+queue, so by the time a sentence is translated the meeting has moved on - and
+a history read at that moment held the sentence itself, sometimes the ones
+after it, and every translated line twice. A model shown the sentence it is
+asked to translate among "the previous lines" hands it back untranslated: on
+a thirty-minute run, half of those echoes translated on a retry without the
+history.
+
 The model will try to talk to you
 ---------------------------------
 Instruction-tuned models answer requests.  Asked to translate, they will
@@ -56,7 +65,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Sequence
 
 from server.config import (
     LANGUAGE_NAMES,
@@ -239,6 +248,10 @@ class TranslationContext:
     def remember(self, turn: Turn) -> None:
         self._turns.append(turn)
 
+    def snapshot(self) -> tuple[Turn, ...]:
+        """The turns as they stand now, for a translation that runs later."""
+        return tuple(self._turns)
+
     @property
     def turns(self) -> list[Turn]:
         return list(self._turns)
@@ -278,13 +291,18 @@ class TranslationContext:
         history is there to say what "that one" refers to, and the source
         lines carry that on their own.
         """
-        if style not in self.STYLES:
+        return self.render(self._turns, style)
+
+    @classmethod
+    def render(cls, turns: Sequence[Turn], style: str = HISTORY_STYLE) -> str:
+        """Any sequence of turns, laid out as :meth:`as_prompt` does."""
+        if style not in cls.STYLES:
             raise ValueError(f"unknown history style {style!r}, "
-                             f"expected one of {self.STYLES}")
-        if not self._turns:
+                             f"expected one of {cls.STYLES}")
+        if not turns:
             return ""
         lines = []
-        for turn in self._turns:
+        for turn in turns:
             who = turn.speaker_id or "someone"
             lines.append(f"{who} ({turn.lang_code}): {turn.source}")
             if turn.translation and style != "sources":
@@ -323,6 +341,11 @@ class TranslationStats:
     failed: int = 0
     refused_reasons: dict[str, int] = field(default_factory=dict)
     seconds: float = 0.0
+    #: Sentences the model handed straight back, and how many a second try
+    #: without the history rescued. The ratio says whether the history is
+    #: what makes it echo.
+    retried: int = 0
+    rescued: int = 0
 
     def record(self, result: Translation, failed: bool = False) -> None:
         self.seen += 1
@@ -335,6 +358,10 @@ class TranslationStats:
             self.refused_reasons[result.reason] = (
                 self.refused_reasons.get(result.reason, 0) + 1
             )
+
+
+#: The one refusal worth a second attempt: see :meth:`Translator.translate`.
+ECHOED = "the model returned the sentence untranslated"
 
 
 class Backend(Protocol):
@@ -404,7 +431,8 @@ class Translator:
 
     def build_prompt(self, source: str, lang_code: str,
                      history_style: str = "",
-                     short_line_hint: Optional[bool] = None) -> str:
+                     short_line_hint: Optional[bool] = None,
+                     history: Optional[Sequence[Turn]] = None) -> str:
         """The one user message, as text, so a test can read it.
 
         ``history_style`` overrides this translator's own, so
@@ -412,6 +440,8 @@ class Translator:
         a real model on the same history and read the answers side by side.
         ``"plain"`` leaves out the instruction repeated after the history,
         which is how the diagnosis was confirmed rather than assumed.
+
+        ``history`` is the turns to show; None means this translator's own.
         """
         style = history_style or self.history_style
         hint = self.short_line_hint if short_line_hint is None else short_line_hint
@@ -422,7 +452,8 @@ class Translator:
             target_name=target_name,
             hint=SHORT_LINE_HINT.format(target_name=target_name) if hint else "",
         )
-        history = self.context.as_prompt(style=style)
+        history = (self.context.as_prompt(style=style) if history is None
+                   else TranslationContext.render(history, style))
         if not history:
             return f"{instruction}\n\n{source}"
         if style == "plain":
@@ -441,14 +472,23 @@ class Translator:
     def build_messages(self, source: str, lang_code: str,
                        history_style: str = "",
                        short_line_hint: Optional[bool] = None,
+                       history: Optional[Sequence[Turn]] = None,
                        ) -> list[dict[str, str]]:
         """The chat messages sent to vLLM: one user turn, never a system one."""
         return [{"role": "user",
                  "content": self.build_prompt(source, lang_code, history_style,
-                                              short_line_hint)}]
+                                              short_line_hint, history)}]
 
     def translate(self, source: str, lang_code: str,
-                  speaker_id: str = "") -> Translation:
+                  speaker_id: str = "",
+                  history: Optional[Sequence[Turn]] = None) -> Translation:
+        """Translate one sentence.
+
+        ``history`` is the meeting as it stood when the sentence was
+        committed, and whoever passes it owns the history: nothing is
+        remembered here. Without it this translator keeps its own, which is
+        what a caller translating sentences one after another wants.
+        """
         target = target_language(lang_code)
         if not source.strip():
             return self._refuse("", lang_code, target, "nothing to translate")
@@ -459,9 +499,11 @@ class Translator:
             return self._refuse(source, lang_code, target,
                                 "the language was undecided")
 
-        messages = self.build_messages(source, lang_code)
+        owns_history = history is None
+        turns = self.context.snapshot() if owns_history else tuple(history)
+
         try:
-            answer = self.backend.complete(messages)
+            answer = self._ask(source, lang_code, turns)
         except TranslationError as exc:
             result = Translation("", source, lang_code, target, str(exc))
             self.stats.record(result, failed=True)
@@ -470,16 +512,40 @@ class Translator:
 
         text = clean(answer)
         reason = self._refuse_reason(source, text, target)
+        if reason == ECHOED and TranslationContext.render(
+                turns, self.history_style):
+            # Handed back untranslated. Three source lines followed by a
+            # request to translate a fourth can read as a list to continue,
+            # so ask again without them - a fix and a measurement at once.
+            self.stats.retried += 1
+            try:
+                retry = self._ask(source, lang_code, ())
+            except TranslationError as exc:
+                log.warning("Retry without the history failed: %s", exc)
+            else:
+                second = clean(retry)
+                if not self._refuse_reason(source, second, target):
+                    self.stats.rescued += 1
+                    log.info("Retried without the history and it "
+                             "translated: %r", source[:60])
+                    answer, text, reason = retry, second, ""
         if reason:
             return self._refuse(source, lang_code, target, reason, answer)
 
         result = Translation(text, source, lang_code, target, raw=answer)
         self.stats.record(result)
-        self.context.remember(
-            Turn(speaker_id=speaker_id, lang_code=lang_code, source=source,
-                 translation=text)
-        )
+        if owns_history:
+            self.context.remember(
+                Turn(speaker_id=speaker_id, lang_code=lang_code, source=source,
+                     translation=text)
+            )
         return result
+
+    def _ask(self, source: str, lang_code: str,
+             history: Sequence[Turn]) -> str:
+        """One round trip. Raises :class:`TranslationError`."""
+        return self.backend.complete(
+            self.build_messages(source, lang_code, history=history))
 
     def _refuse_reason(self, source: str, text: str,
                        target: str = "") -> str:
@@ -488,7 +554,7 @@ class Translator:
         if looks_like_echo(source, text):
             # Handed back untranslated. Showing it would put the same sentence
             # in both columns and read as though the translation succeeded.
-            return "the model returned the sentence untranslated"
+            return ECHOED
         if wrong_script(text, target):
             # Answered in the language it was asked to translate *out* of.
             # Showing it would put Japanese in the Vietnamese column, which

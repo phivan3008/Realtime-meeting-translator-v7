@@ -277,16 +277,39 @@ def test_the_partial_index_matches_the_utterance_it_will_become():
 # ---------------------------------------------------------------------------
 # Speaker change and end of stream
 # ---------------------------------------------------------------------------
-def test_a_speaker_change_finalises_the_open_utterance():
+def test_a_pause_carries_the_hangover_to_the_utterance():
+    """The final decode needs to know where the speech ended. Without this
+    it read the whole utterance as speech, and Whisper answered the last
+    half second of silence with a clause nobody said."""
+    from server.pipeline.vad import AudioSpan
+    buffer = manager()
+    buffer.push(output(span(tone(300), 0, opens=True)))
+    closing = AudioSpan(pcm=tone(500), start_ms=300, closes_segment=True,
+                        trailing_silence_ms=480)
+    utterance = buffer.push(output(closing)).finals[0]
+    assert utterance.trailing_silence_ms == 480
+    assert utterance.speech_end_ms == pytest.approx(utterance.end_ms - 480)
+
+
+def test_a_length_cut_has_no_hangover():
+    """It lands mid-speech, so every byte of it is speech."""
+    buffer = manager()
+    result = buffer.push(output(span(tone(MAX_MS + 500), 0, opens=True)))
+    assert result.finals[0].trailing_silence_ms == 0
+    assert result.finals[0].speech_end_ms == result.finals[0].end_ms
+
+
+def test_the_hangover_never_runs_past_the_start():
+    from server.pipeline.buffer import Utterance
+    tiny = Utterance(index=0, pcm=tone(100), start_ms=1_000,
+                     reason=FinalizeReason.PAUSE, trailing_silence_ms=480)
+    assert tiny.speech_end_ms == tiny.start_ms
+
+
+def test_flush_passes_the_hangover_on():
     buffer = manager()
     buffer.push(output(span(tone(400), 0, opens=True)))
-    result = buffer.notify_speaker_change()
-    assert [u.reason for u in result.finals] == [FinalizeReason.SPEAKER_CHANGE]
-    assert buffer.is_open is False
-
-
-def test_a_speaker_change_with_nothing_open_is_a_no_op():
-    assert manager().notify_speaker_change().finals == []
+    assert buffer.flush(trailing_silence_ms=96).finals[0].trailing_silence_ms == 96
 
 
 def test_flush_commits_what_is_still_open():

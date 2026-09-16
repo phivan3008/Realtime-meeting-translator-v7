@@ -14,8 +14,11 @@ things end a sentence:
     text, so the utterance is cut even though the sentence is not over.
 
 ``speaker_change``
-    Reserved for the diarization stage.  The hook exists
-    (:meth:`BufferManager.notify_speaker_change`) but nothing calls it yet.
+    Reserved. Cutting on a change of voice was built and measured on another
+    branch: one-second voiceprints do not separate speakers on meeting audio
+    (73 cuts in 137 comparisons, one unbroken distribution), so nothing here
+    cuts on it. Two languages in one utterance are cut instead - see
+    :mod:`server.pipeline.language_split`.
 
 While an utterance is open it is also handed out periodically as a *partial*
 window, which is what feeds the greyed-out running transcript.
@@ -64,6 +67,37 @@ def bytes_to_ms(size: int) -> float:
     return size / BYTES_PER_MS
 
 
+def quietest_split_point(pcm: bytes, limit: int, search: int) -> int:
+    """Byte offset of the quietest frame boundary just before ``limit``.
+
+    Cutting at exactly ``limit`` usually lands in the middle of a word, and
+    Whisper turns half a word into a different word. So the cut looks back
+    over ``search`` bytes and lands on the quietest 32 ms frame it finds -
+    the gap between words, if there is one. A plain function because the
+    language split needs the same thing at a different offset.
+    """
+    limit = min(limit, len(pcm))
+    earliest = max(FRAME_BYTES, limit - search)
+    if limit <= earliest:
+        return limit
+
+    window = np.frombuffer(pcm[earliest:limit], dtype="<i2")
+    frames = window.size // VAD_FRAME_SAMPLES
+    if frames == 0:
+        return limit
+
+    usable = frames * VAD_FRAME_SAMPLES
+    energy = (
+        window[:usable]
+        .astype(np.float32)
+        .reshape(frames, VAD_FRAME_SAMPLES)
+    )
+    quietest = int(np.argmin(np.mean(energy * energy, axis=1)))
+    # Cut after the quiet frame, so the silence stays with the first half
+    # rather than opening the next utterance with it.
+    return earliest + (quietest + 1) * FRAME_BYTES
+
+
 class FinalizeReason(str, Enum):
     PAUSE = "pause"
     MAX_DURATION = "max_duration"
@@ -80,6 +114,10 @@ class Utterance:
     start_ms: float
     reason: FinalizeReason
     continues_previous: bool = False
+    #: The VAD hangover at the end of ``pcm``: silence, forwarded while the
+    #: VAD waited to be sure the speaker had stopped. Zero for a length cut,
+    #: which lands mid-speech.
+    trailing_silence_ms: float = 0.0
 
     @property
     def duration_ms(self) -> float:
@@ -88,6 +126,11 @@ class Utterance:
     @property
     def end_ms(self) -> float:
         return self.start_ms + self.duration_ms
+
+    @property
+    def speech_end_ms(self) -> float:
+        """Where the speech itself ended, before the hangover."""
+        return self.end_ms - min(self.trailing_silence_ms, self.duration_ms)
 
 
 @dataclass(frozen=True)
@@ -231,7 +274,8 @@ class BufferManager:
 
             if span.closes_segment and self.is_open:
                 if self._pcm:
-                    result.finals.append(self._finalize(FinalizeReason.PAUSE))
+                    result.finals.append(self._finalize(
+                        FinalizeReason.PAUSE, span.trailing_silence_ms))
                 else:
                     # A length cut consumed everything just before the close.
                     self._discard_open()
@@ -241,19 +285,14 @@ class BufferManager:
             self.stats.partials += 1
         return result
 
-    def notify_speaker_change(self) -> BufferOutput:
-        """Diarization hook: a new voice means the previous sentence is done."""
-        if not self.is_open:
-            return BufferOutput()
-        return BufferOutput(finals=[self._finalize(FinalizeReason.SPEAKER_CHANGE)])
-
-    def flush(self, reason: FinalizeReason = FinalizeReason.END_OF_STREAM
-              ) -> BufferOutput:
+    def flush(self, reason: FinalizeReason = FinalizeReason.END_OF_STREAM,
+              trailing_silence_ms: float = 0.0) -> BufferOutput:
         """Commit whatever is still open, at the end of a session."""
         if not self.is_open or not self._pcm:
             self._discard_open()
             return BufferOutput()
-        return BufferOutput(finals=[self._finalize(reason)])
+        return BufferOutput(finals=[self._finalize(reason,
+                                                   trailing_silence_ms)])
 
     def reset(self) -> None:
         self._reset_state()
@@ -264,7 +303,8 @@ class BufferManager:
         self._start_ms = start_ms
         self._partial_at_ms = start_ms
 
-    def _finalize(self, reason: FinalizeReason) -> Utterance:
+    def _finalize(self, reason: FinalizeReason,
+                  trailing_silence_ms: float = 0.0) -> Utterance:
         assert self._start_ms is not None
         utterance = Utterance(
             index=self._next_index,
@@ -272,6 +312,7 @@ class BufferManager:
             start_ms=self._start_ms,
             reason=reason,
             continues_previous=self._continues,
+            trailing_silence_ms=trailing_silence_ms,
         )
         self.stats.record(reason)
         self._next_index += 1
@@ -299,27 +340,11 @@ class BufferManager:
 
     def _quietest_split_point(self) -> int:
         """Byte offset of the quietest frame boundary near the length limit."""
-        limit = ms_to_bytes(self.max_duration_ms)
-        earliest = max(FRAME_BYTES, ms_to_bytes(self.max_duration_ms
-                                                - self.split_search_ms))
-        if limit <= earliest:                       # pragma: no cover - guarded
-            return limit
-
-        window = np.frombuffer(self._pcm[earliest:limit], dtype="<i2")
-        frames = window.size // VAD_FRAME_SAMPLES
-        if frames == 0:
-            return limit
-
-        usable = frames * VAD_FRAME_SAMPLES
-        energy = (
-            window[:usable]
-            .astype(np.float32)
-            .reshape(frames, VAD_FRAME_SAMPLES)
+        return quietest_split_point(
+            bytes(self._pcm),
+            ms_to_bytes(self.max_duration_ms),
+            ms_to_bytes(self.split_search_ms),
         )
-        quietest = int(np.argmin(np.mean(energy * energy, axis=1)))
-        # Cut after the quiet frame, so the silence stays with the first half
-        # rather than opening the next utterance with it.
-        return earliest + (quietest + 1) * FRAME_BYTES
 
     def _maybe_partial(self) -> Optional[PartialWindow]:
         if not self.is_open or not self._pcm:

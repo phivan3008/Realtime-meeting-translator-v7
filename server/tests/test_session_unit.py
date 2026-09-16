@@ -490,7 +490,8 @@ class StubDecoder:
         self.lang = lang
         self.calls: list[tuple[int, str, bool]] = []
 
-    def decode(self, samples, lang_code: str = "", beam_size: int = 1):
+    def decode(self, samples, lang_code: str = "", beam_size: int = 1,
+               prompt=None):
         self.calls.append((len(samples), lang_code, beam_size))
         from server.pipeline.asr import Piece
         piece = Piece(text=self.text, no_speech_prob=0.01,
@@ -641,7 +642,7 @@ def test_the_translator_reads_the_language_the_pipeline_decided():
 
 
 def test_a_stage_that_raises_does_not_end_the_meeting():
-    """One broken sentence costs one sentence, not the connection."""
+    """A broken stage costs that stage, not the sentence or the connection."""
     class Exploding:
         def judge(self, pcm: bytes):
             raise RuntimeError("the noise filter fell over")
@@ -655,7 +656,10 @@ def test_a_stage_that_raises_does_not_end_the_meeting():
     responses = speak_then_pause(session)
     assert session.state is SessionState.STREAMING
     assert all(r.close is False for r in responses)
-    assert session.stats.pipeline_errors == 1
+    assert session.stats.stage_failures == {"noise": 1}
+    assert session.stats.pipeline_errors == 0
+    utterances = [p for r in responses for p in of_type(r, "utterance")]
+    assert utterances and utterances[0]["kept"] is True,         "the sentence was thrown away with the stage"
     # And the next chunk is still accepted.
     assert session.handle_binary(chunk()).close is False
 
@@ -759,7 +763,10 @@ def test_an_undecided_first_sentence_still_falls_back_to_the_detector():
     session, decoder, _lid = lang_session(LID_UNKNOWN)
     speak_then_pause(session)
     assert forced_languages(decoder)
-    assert set(forced_languages(decoder)) == {""}
+    assert forced_languages(decoder)[0] == ""
+    # Once Whisper has named the utterance's language, the rest of the same
+    # utterance is decoded in it: decodes in different languages never agree.
+    assert set(forced_languages(decoder)) <= {"", StubDecoder().lang}
 
 
 def test_an_undecided_sentence_does_not_overwrite_what_was_established():
@@ -784,7 +791,8 @@ class SlowDecoder(StubDecoder):
         super().__init__(**kwargs)
         self.seconds = seconds
 
-    def decode(self, samples, lang_code: str = "", beam_size: int = 1):
+    def decode(self, samples, lang_code: str = "", beam_size: int = 1,
+               prompt=None):
         time.sleep(self.seconds)
         return super().decode(samples, lang_code, beam_size)
 

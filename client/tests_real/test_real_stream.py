@@ -47,6 +47,7 @@ from client.audio.capture import (  # noqa: E402
     LoopbackCapture,
 )
 from client.net.ws_client import StreamClient  # noqa: E402
+from server.wordlists import Hallucinations  # noqa: E402
 from common.protocol import (  # noqa: E402
     CHUNK_BYTES,
     CHUNK_DURATION_MS,
@@ -495,59 +496,15 @@ def check_utterances(collected: Collected, report: Report) -> None:
     )
 
 
-# Whisper's sign-offs, listed here as well as on the server. A test that
-# trusts the thing it is testing proves nothing, and one of these reached the
-# screen on a previous run.
-KNOWN_HALLUCINATIONS = (
-    "C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i "
-    "v\u00e0 h\u1eb9n g\u1eb7p l\u1ea1i.",
-    "C\u1ea3m \u01a1n c\u00e1c b\u1ea1n \u0111\u00e3 theo d\u00f5i.",
-    "\u3054\u8996\u8074\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044"
-    "\u307e\u3057\u305f\u3002",
-    "\u3054\u8996\u8074\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044"
-    "\u307e\u3059\u3002",
-    "you",
-    # Confirmed absent from the recording it was transcribed from.
-    "Chào tạm biệt.",
-    "Hãy đăng ký kênh để "
-    "ủng hộ kênh của mình nhé.",
-    # A committed sentence at 331.4 s of a ten-minute run, scored 0.57 for
-    # speech and translated into Japanese before anybody read it.
-    "Hẹn gặp lại các bạn trong "
-    "những video tiếp theo.",
-)
-_UNSPOKEN = re.compile(
-    r"[\s.,!?;:\-\u2010-\u2015\u3001\u3002\u30fb\uff01\uff1f\uff0c\uff0e"
-    r"\"'\u2018\u2019\u201c\u201d()\[\]]+"
-)
-_INVENTED = frozenset(
-    _UNSPOKEN.sub("", phrase).casefold() for phrase in KNOWN_HALLUCINATIONS
-)
-
-
-#: The templated ones, where a channel name is a hole in the sentence. The
-#: whole-line list let "La La School" through two runs after "Ghiền Mì Gõ"
-#: was added; there is no end of channel names.
-INVENTED_PATTERNS = (
-    r"h[ãa]y subscribe cho k[êe]nh .{1,40} "
-    r"đ[ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[ữu]ng video h[ấa]p d[ẫa]n",
-    r"h[ãa]y đ[ăa]ng k[ýy] k[êe]nh( .{1,40})? đ[ểe] [ủu]ng h[ộo] "
-    r"k[êe]nh c[ủu]a m[ìi]nh( nh[ée])?",
-    # Three variants of one shape in a single ten-minute run.
-    r"c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,30}",
-)
-_PUNCTUATION = re.compile(
-    r"[.,!?;:\-‐-―、。・！？，．"
-    r"\"'‘’“”()\[\]]+"
-)
-_SHAPES = tuple(re.compile(p, re.IGNORECASE) for p in INVENTED_PATTERNS)
+# The same word lists the server uses, read from server/data. Loaded here
+# rather than copied so an entry added on one side cannot be forgotten on the
+# other - but checked separately, because a test that trusts the thing it is
+# testing proves nothing, and both sides once let the same line through.
+_INVENTED = Hallucinations()
 
 
 def is_invented(text: str) -> bool:
-    if _UNSPOKEN.sub("", text).casefold() in _INVENTED:
-        return True
-    spaced = " ".join(_PUNCTUATION.sub(" ", text).casefold().split())
-    return any(shape.fullmatch(spaced) for shape in _SHAPES)
+    return _INVENTED.is_invented(text)
 
 
 #: A translation arriving further behind its sentence than this has stopped

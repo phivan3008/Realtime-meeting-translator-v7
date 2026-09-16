@@ -259,3 +259,15 @@ def test_a_full_chunk_is_accepted():
 def test_any_other_size_is_rejected(size):
     with pytest.raises(ProtocolError, match="exactly 6400 bytes"):
         validate_audio_chunk(bytes(size))
+
+
+# ---------------------------------------------------------------------------
+# Corrected speaker labels
+# ---------------------------------------------------------------------------
+def test_corrected_labels_travel_keyed_by_sentence():
+    import json
+    from common.protocol import make_speakers
+    payload = parse_message(make_speakers({3: "Speaker_01", 12: "Speaker_02"}))
+    assert payload["type"] == "speakers"
+    assert payload["labels"] == {"3": "Speaker_01", "12": "Speaker_02"}
+    assert json.loads(make_speakers({}))["labels"] == {}

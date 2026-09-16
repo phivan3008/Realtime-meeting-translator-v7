@@ -7,35 +7,43 @@ partial
     An unstable hypothesis. The client replaces the previous partial text.
 
 committed
-    Newly stabilized text. The client appends it exactly once. Committed text
-    is immutable and is never replaced by a later decode.
+    Newly stabilized text. Committed text is immutable and is never replaced
+    by a later decode.
 
 utterance_final
-    Silero VAD has detected the end of an utterance. Only the remaining
-    unstable audio tail is decoded again. Already committed text is preserved.
+    The VAD has ended the utterance. Only the audio after the committed text
+    is decoded again, with a beam search and the vocabulary prompt, and
+    committed text is preserved.
 
-The final transcript is therefore:
+The final transcript is therefore::
 
-    append-only committed text + reconciled final unstable tail
+    append-only committed text + reconciled final tail
 
-It is not a new full-utterance decode that overwrites all previous results.
+Whisper invents text, and it does so confidently
+------------------------------------------------
+Given near-silence it returns a fluent sentence nobody said. Three statistical
+guards catch the unconfident kind - ``no_speech_prob`` (only together with a
+poor ``avg_logprob``, except on very short audio), ``avg_logprob`` and
+``compression_ratio``. The confident kind needs the word lists in
+``server/data/``. Every refusal is counted and logged with its scores.
 
-Important caller contract
--------------------------
-Partial calls must provide:
+Rendering
+---------
+Text is rebuilt from Whisper's own word strings, which already carry the
+space in front of a word in a spaced language and none in Japanese. Joining
+words with a space of our own put a space between every Japanese character
+on screen - 88% of the Japanese sentences of one real run.
 
-    utterance_id
-    pcm containing the current rolling ASR window
-    window_start_seconds relative to the utterance start
+Caller contract
+---------------
+Partial calls provide ``utterance_id``, the rolling window PCM and
+``window_start_seconds`` relative to the utterance start. The final call
+provides the same ``utterance_id``, the full utterance PCM and
+``speech_end_seconds`` - where the VAD says the speech ended, before its
+silence hangover. :meth:`StreamingTranscriber.transcribe` decodes one clip
+with no streaming state, for audio that has no running text behind it.
 
-The final call must provide:
-
-    utterance_id
-    full utterance PCM
-    utterance_start_seconds, normally 0.0
-    speech_end_seconds from Silero VAD, excluding endpoint silence
-
-All PCM must be signed PCM16 little-endian, mono, at SAMPLE_RATE.
+All PCM is signed PCM16 little-endian, mono, at SAMPLE_RATE.
 """
 
 from __future__ import annotations
@@ -44,55 +52,41 @@ import logging
 import re
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Iterable, Literal, Optional, Protocol
+from typing import Iterable, Literal, Optional, Protocol, Union
 
 import numpy as np
 
 from server.config import (
+    ASR_BEAM_SIZE_FINAL,
     ASR_BEAM_SIZE_PARTIAL,
     ASR_CACHE_DIR,
     ASR_COMPUTE_TYPE,
     ASR_CONDITION_ON_PREVIOUS,
     ASR_DEVICE,
-    ASR_HALLUCINATIONS,
-    ASR_HALLUCINATION_PATTERNS,
     ASR_LOG_PROB_THRESHOLD,
     ASR_MAX_COMPRESSION_RATIO,
     ASR_MODEL,
+    ASR_NO_SPEECH_CERTAIN,
     ASR_NO_SPEECH_THRESHOLD,
+    ASR_PROMPT_ON_PARTIALS,
+    ASR_SHORT_UTTERANCE_MS,
+    ASR_STREAM_COMMIT_MARGIN_SECONDS,
+    ASR_STREAM_FINAL_OVERLAP_SECONDS,
+    ASR_STREAM_FINAL_POST_ROLL_SECONDS,
+    ASR_STREAM_HISTORY,
+    ASR_STREAM_MIN_AGREEMENT,
+    ASR_STREAM_WORD_TOLERANCE_SECONDS,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
 )
+from server.wordlists import (
+    Hallucinations,
+    normalise_exact,
+    normalise_spaced,
+    vocabulary_prompt,
+)
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Streaming policy defaults
-# ---------------------------------------------------------------------------
-
-# A word must agree across this many consecutive hypotheses before it can be
-# treated as stable.
-DEFAULT_MIN_AGREEMENT = 2
-
-# Do not commit words too close to the newest received audio. Whisper is most
-# likely to revise words in this region.
-DEFAULT_COMMIT_MARGIN_SECONDS = 1.0
-
-# When finalizing, decode a little committed audio before the unstable tail.
-# The overlap gives Whisper enough left context without decoding the complete
-# utterance again.
-DEFAULT_FINAL_OVERLAP_SECONDS = 1.2
-
-# Keep only a short amount of audio after Silero's last speech frame. Silence
-# used to detect an endpoint must not all be sent to Whisper.
-DEFAULT_FINAL_POST_ROLL_SECONDS = 0.20
-
-# Tolerance when matching the same word between overlapping rolling windows.
-DEFAULT_WORD_TIME_TOLERANCE_SECONDS = 0.45
-
-# Number of recent hypotheses retained for consensus and diagnostics.
-DEFAULT_HISTORY_SIZE = 5
 
 
 ResultKind = Literal["partial", "committed", "utterance_final"]
@@ -108,34 +102,46 @@ class AsrError(RuntimeError):
 
 @dataclass(frozen=True)
 class Word:
-    """One timestamped word returned by faster-whisper."""
+    """One timestamped word, as faster-whisper wrote it.
+
+    ``text`` keeps Whisper's own leading space, or the lack of one.
+    """
 
     text: str
     start: float
     end: float
-    probability: float
+    probability: float = 1.0
 
     @property
     def normalized(self) -> str:
         return normalise_word(self.text)
 
+    @property
+    def center(self) -> float:
+        return (self.start + self.end) / 2.0
+
 
 @dataclass(frozen=True)
 class Piece:
-    """One segment returned by the decoder before policy filtering."""
+    """One segment returned by the decoder before policy filtering.
+
+    Times are relative to the start of the audio the decoder was given.
+    A decoder without word timestamps may leave ``words`` empty; the words
+    are then spread evenly over the segment.
+    """
 
     text: str
-    start: float
-    end: float
     avg_logprob: float
     no_speech_prob: float
     compression_ratio: float
+    start: float = 0.0
+    end: float = 0.0
     words: tuple[Word, ...] = ()
 
 
 @dataclass(frozen=True)
 class Hypothesis:
-    """A decoded rolling window expressed on the utterance timeline."""
+    """A decoded window expressed on the utterance timeline."""
 
     words: tuple[Word, ...]
     text: str
@@ -148,7 +154,7 @@ class Hypothesis:
 
 @dataclass(frozen=True)
 class Transcript:
-    """One event emitted by the stabilized streaming recognizer.
+    """One event emitted by the recognizer.
 
     ``text`` has different semantics by event type:
 
@@ -164,7 +170,7 @@ class Transcript:
 
     text: str
     lang_code: str
-    kind: ResultKind
+    kind: ResultKind = "utterance_final"
 
     # Complete immutable transcript accumulated so far.
     committed_text: str = ""
@@ -175,6 +181,10 @@ class Transcript:
     kept: tuple[Piece, ...] = ()
     dropped: tuple[tuple[Piece, str], ...] = ()
 
+    #: A final only: the language the caller asked for and did not get,
+    #: because the running text had already committed words in another one.
+    overruled_language: str = ""
+
     @property
     def is_final(self) -> bool:
         return self.kind == "utterance_final"
@@ -182,6 +192,11 @@ class Transcript:
     @property
     def has_text(self) -> bool:
         return bool(self.text.strip())
+
+    @property
+    def running_text(self) -> str:
+        """Committed and unstable text together, for a replace-only screen."""
+        return join_texts(self.committed_text, self.partial_text)
 
     def summary(self) -> str:
         return (
@@ -201,6 +216,9 @@ class AsrStats:
     dropped_reasons: dict[str, int] = field(default_factory=dict)
     decode_seconds: float = 0.0
     audio_seconds: float = 0.0
+    #: Words a final decode repeated from the committed text and that were
+    #: removed at the join.
+    duplicates_removed: int = 0
 
     @property
     def realtime_factor(self) -> float:
@@ -236,7 +254,7 @@ class UtteranceState:
     committed_words: list[Word] = field(default_factory=list)
     hypotheses: list[Hypothesis] = field(default_factory=list)
 
-    # Absolute end time, relative to utterance start, of immutable text.
+    # End time, relative to utterance start, of immutable text.
     committed_end: float = 0.0
 
     revision: int = 0
@@ -253,48 +271,105 @@ class UtteranceState:
 
 
 # ---------------------------------------------------------------------------
-# Text normalization
+# Text
 # ---------------------------------------------------------------------------
-
-_UNSPOKEN = re.compile(
-    r"[\s.,!?;:\-\u2010-\u2015\u3001\u3002\u30fb\uff01\uff1f\uff0c\uff0e"
-    r"\"'\u2018\u2019\u201c\u201d()\[\]]+"
-)
-
-_PUNCTUATION = re.compile(
-    r"[.,!?;:\-\u2010-\u2015\u3001\u3002\u30fb\uff01\uff1f\uff0c\uff0e"
-    r"\"'\u2018\u2019\u201c\u201d()\[\]]+"
-)
-
 
 def normalise_for_pattern(text: str) -> str:
     """Strip punctuation and collapse spaces for hallucination patterns."""
-    return " ".join(_PUNCTUATION.sub(" ", text).casefold().split())
+    return normalise_spaced(text)
 
 
 def normalise_for_match(text: str) -> str:
     """Strip punctuation and spacing for exact known-hallucination matching."""
-    return _UNSPOKEN.sub("", text).casefold()
+    return normalise_exact(text)
 
 
 def normalise_word(text: str) -> str:
     """Normalize one word while preserving Vietnamese diacritics."""
-    return normalise_for_pattern(text)
+    return normalise_spaced(text)
+
+
+def is_unspaced(char: str) -> bool:
+    """Whether a character belongs to a script written without spaces."""
+    code = ord(char)
+    return (
+        0x3040 <= code <= 0x30FF          # hiragana, katakana
+        or 0x3400 <= code <= 0x4DBF       # CJK extension A
+        or 0x4E00 <= code <= 0x9FFF       # CJK unified ideographs
+        or 0xF900 <= code <= 0xFAFF       # CJK compatibility ideographs
+        or 0xFF66 <= code <= 0xFF9F       # half-width katakana
+        or 0x3000 <= code <= 0x303F       # CJK punctuation
+        or 0xFF00 <= code <= 0xFF65       # full-width forms
+    )
+
+
+def _needs_space(left: str, right: str) -> bool:
+    """Whether two pieces of text written apart need a space between them."""
+    if not left or not right:
+        return False
+    if left[-1].isspace() or right[0].isspace():
+        return False
+    a, b = left[-1], right[0]
+    return (a.isalnum() and not is_unspaced(a)
+            and b.isalnum() and not is_unspaced(b))
+
+
+def join_texts(left: str, right: str) -> str:
+    """Two texts one after the other, spaced only where the script wants it.
+
+    The committed text and the unstable text come from different decodes, so
+    neither carries the space that belongs between them - and Japanese wants
+    none at all.
+    """
+    left, right = left.strip(), right.strip()
+    if not left or not right:
+        return left or right
+    return f"{left} {right}" if _needs_space(left, right) else left + right
 
 
 def render_words(words: Iterable[Word]) -> str:
-    """Render timestamped words without depending on tokenizer spacing."""
+    """Rebuild text from Whisper's own word strings.
 
-    parts = [word.text.strip() for word in words if word.text.strip()]
-    text = " ".join(parts)
+    Never adds a space between words of its own: Whisper's word strings
+    already carry the space a spaced language needs, and for Japanese it
+    splits on token boundaries - "GLM5.2" can arrive as four words that must
+    be put back together as written.
+    """
+    text = "".join(word.text for word in words if word.text.strip())
 
+    text = re.sub(r"\s+", " ", text)
     # Remove spaces before common punctuation.
-    text = re.sub(r"\s+([.,!?;:%)\]\}])", r"\1", text)
-
+    text = re.sub(r"\s+([.,!?;:%)\]\}、。！？])", r"\1", text)
     # Remove spaces after opening punctuation.
     text = re.sub(r"([(\[\{])\s+", r"\1", text)
-
     return text.strip()
+
+
+_TOKEN = re.compile(r"\s*\S+")
+
+
+def spread_words(piece: Piece, fallback_end: float) -> tuple[Word, ...]:
+    """Words for a piece whose decoder gave no word timestamps.
+
+    Split on whitespace, each token keeping a leading space unless it opens
+    with a character from an unspaced script, and spread evenly over the
+    segment - or over the whole window when the segment has no times.
+    """
+    tokens = [token.strip() for token in _TOKEN.findall(piece.text)]
+    tokens = [token for token in tokens if token]
+    if not tokens:
+        return ()
+    start = piece.start
+    end = piece.end if piece.end > piece.start else max(fallback_end, start)
+    step = (end - start) / len(tokens)
+    return tuple(
+        Word(
+            text=token if is_unspaced(token[0]) else f" {token}",
+            start=start + index * step,
+            end=start + (index + 1) * step,
+        )
+        for index, token in enumerate(tokens)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +384,7 @@ class Decoder(Protocol):
         samples: np.ndarray,
         lang_code: str,
         beam_size: int,
+        prompt: Optional[str] = None,
     ) -> tuple[list[Piece], str]:
         ...  # pragma: no cover
 
@@ -326,16 +402,19 @@ class StreamingTranscriber:
         no_speech_threshold: float = ASR_NO_SPEECH_THRESHOLD,
         log_prob_threshold: float = ASR_LOG_PROB_THRESHOLD,
         max_compression_ratio: float = ASR_MAX_COMPRESSION_RATIO,
-        hallucinations: Iterable[str] = ASR_HALLUCINATIONS,
-        hallucination_patterns: Iterable[str] = ASR_HALLUCINATION_PATTERNS,
-        min_agreement: int = DEFAULT_MIN_AGREEMENT,
-        commit_margin_seconds: float = DEFAULT_COMMIT_MARGIN_SECONDS,
-        final_overlap_seconds: float = DEFAULT_FINAL_OVERLAP_SECONDS,
-        final_post_roll_seconds: float = DEFAULT_FINAL_POST_ROLL_SECONDS,
+        short_utterance_ms: float = ASR_SHORT_UTTERANCE_MS,
+        no_speech_certain: float = ASR_NO_SPEECH_CERTAIN,
+        hallucinations: Union[Hallucinations, Iterable[str], None] = None,
+        hallucination_patterns: Optional[Iterable[str]] = None,
+        prompt: Optional[str] = None,
+        min_agreement: int = ASR_STREAM_MIN_AGREEMENT,
+        commit_margin_seconds: float = ASR_STREAM_COMMIT_MARGIN_SECONDS,
+        final_overlap_seconds: float = ASR_STREAM_FINAL_OVERLAP_SECONDS,
+        final_post_roll_seconds: float = ASR_STREAM_FINAL_POST_ROLL_SECONDS,
         word_time_tolerance_seconds: float = (
-            DEFAULT_WORD_TIME_TOLERANCE_SECONDS
+            ASR_STREAM_WORD_TOLERANCE_SECONDS
         ),
-        history_size: int = DEFAULT_HISTORY_SIZE,
+        history_size: int = ASR_STREAM_HISTORY,
     ) -> None:
         if min_agreement < 2:
             raise ValueError("min_agreement must be at least 2")
@@ -345,6 +424,8 @@ class StreamingTranscriber:
         self.no_speech_threshold = no_speech_threshold
         self.log_prob_threshold = log_prob_threshold
         self.max_compression_ratio = max_compression_ratio
+        self.short_utterance_ms = short_utterance_ms
+        self.no_speech_certain = no_speech_certain
 
         self.min_agreement = min_agreement
         self.commit_margin_seconds = commit_margin_seconds
@@ -353,22 +434,78 @@ class StreamingTranscriber:
         self.word_time_tolerance_seconds = word_time_tolerance_seconds
         self.history_size = history_size
 
-        self.hallucinations = frozenset(
-            normalise_for_match(phrase)
-            for phrase in hallucinations
-        )
+        if isinstance(hallucinations, Hallucinations):
+            self.hallucinations = hallucinations
+        else:
+            self.hallucinations = Hallucinations(
+                exact=None if hallucinations is None else list(hallucinations),
+                patterns=None if hallucination_patterns is None else tuple(
+                    re.compile(pattern, re.IGNORECASE)
+                    for pattern in hallucination_patterns
+                ),
+            )
 
-        self.hallucination_patterns = tuple(
-            re.compile(pattern, re.IGNORECASE)
-            for pattern in hallucination_patterns
-        )
+        # The meeting's own words, from server/data/vocabulary.txt. `or None`
+        # is the invariant, not tidiness: Whisper treats "" as a prompt it
+        # was given, which is not the same as no prompt.
+        self.prompt = (prompt if prompt is not None
+                       else vocabulary_prompt()) or None
+        if self.prompt:
+            log.info("Whisper vocabulary prompt (%d chars): %s",
+                     len(self.prompt), self.prompt)
 
         self._states: dict[str, UtteranceState] = {}
         self.stats = AsrStats()
 
     # ------------------------------------------------------------------
-    # Public streaming API
+    # Public API
     # ------------------------------------------------------------------
+
+    def has_committed(self, utterance_id: str) -> bool:
+        """Whether the running text has already committed words here."""
+        state = self._states.get(utterance_id)
+        return bool(state and state.committed_words)
+
+    def transcribe(
+        self,
+        pcm: bytes,
+        lang_code: str = "",
+        is_final: bool = True,
+    ) -> Transcript:
+        """Decode one clip on its own, with no streaming state.
+
+        For audio no running text was kept for - the halves of an utterance
+        cut on a language change - and for the real tests, which put the
+        model and the guards to a recording one sentence at a time.
+        """
+        self._validate_pcm(pcm)
+        kind: ResultKind = "utterance_final" if is_final else "partial"
+        if not pcm:
+            transcript = Transcript(text="", lang_code=lang_code, kind=kind)
+            self.stats.record(transcript)
+            return transcript
+
+        samples = self._pcm_to_samples(pcm)
+        hypothesis = self._decode_hypothesis(
+            samples=samples,
+            requested_language=lang_code,
+            beam_size=ASR_BEAM_SIZE_FINAL if is_final else ASR_BEAM_SIZE_PARTIAL,
+            window_start_seconds=0.0,
+            utterance_ms=samples.size / SAMPLE_RATE * 1000.0,
+            prompt=self._prompt_for(is_final),
+        )
+        text = hypothesis.text
+        transcript = Transcript(
+            text=text,
+            lang_code=hypothesis.lang_code,
+            kind=kind,
+            committed_text=text if is_final else "",
+            partial_text="" if is_final else text,
+            kept=hypothesis.pieces,
+            dropped=hypothesis.dropped,
+        )
+        self.stats.record(transcript)
+        return transcript
 
     def process_partial(
         self,
@@ -392,10 +529,7 @@ class StreamingTranscriber:
 
         state = self._states.setdefault(
             utterance_id,
-            UtteranceState(
-                utterance_id=utterance_id,
-                lang_code=lang_code,
-            ),
+            UtteranceState(utterance_id=utterance_id, lang_code=lang_code),
         )
 
         if lang_code:
@@ -409,12 +543,15 @@ class StreamingTranscriber:
             return (partial,)
 
         samples = self._pcm_to_samples(pcm)
+        window_seconds = samples.size / SAMPLE_RATE
 
         hypothesis = self._decode_hypothesis(
             samples=samples,
             requested_language=state.lang_code,
             beam_size=ASR_BEAM_SIZE_PARTIAL,
             window_start_seconds=window_start_seconds,
+            utterance_ms=(window_start_seconds + window_seconds) * 1000.0,
+            prompt=self._prompt_for(False),
         )
 
         if not state.lang_code:
@@ -460,22 +597,29 @@ class StreamingTranscriber:
         complete utterance audio.
 
         ``speech_end_seconds`` is relative to the utterance timeline and should
-        come from the upstream Silero VAD. Endpoint silence beyond the
-        configured post-roll is excluded from Whisper input.
+        come from the VAD, excluding its silence hangover. Audio beyond the
+        configured post-roll is not given to Whisper.
+
+        ``lang_code`` is used unless the running text has already committed
+        words in another language: those words were decoded in that language,
+        and a sentence whose language disagrees with its running text was
+        measured three to four times as likely to be unrelated to what was
+        said. The language that lost is reported as ``overruled_language``.
         """
 
         self._validate_pcm(full_pcm)
 
         state = self._states.setdefault(
             utterance_id,
-            UtteranceState(
-                utterance_id=utterance_id,
-                lang_code=lang_code,
-            ),
+            UtteranceState(utterance_id=utterance_id, lang_code=lang_code),
         )
 
+        overruled = ""
         if lang_code:
-            state.lang_code = lang_code
+            if not state.committed_words or not state.lang_code:
+                state.lang_code = lang_code
+            elif lang_code != state.lang_code:
+                overruled = lang_code
 
         if not full_pcm:
             final = Transcript(
@@ -483,6 +627,7 @@ class StreamingTranscriber:
                 lang_code=state.lang_code,
                 kind="utterance_final",
                 committed_text=state.committed_text,
+                overruled_language=overruled,
             )
             self.stats.record(final)
             self._states.pop(utterance_id, None)
@@ -512,15 +657,11 @@ class StreamingTranscriber:
 
         start_index = max(
             0,
-            int(round(
-                (tail_start - utterance_start_seconds) * SAMPLE_RATE
-            )),
+            int(round((tail_start - utterance_start_seconds) * SAMPLE_RATE)),
         )
         end_index = min(
             full_samples.size,
-            int(round(
-                (tail_end - utterance_start_seconds) * SAMPLE_RATE
-            )),
+            int(round((tail_end - utterance_start_seconds) * SAMPLE_RATE)),
         )
 
         tail_samples = full_samples[start_index:end_index]
@@ -531,8 +672,14 @@ class StreamingTranscriber:
             final_hypothesis = self._decode_hypothesis(
                 samples=tail_samples,
                 requested_language=state.lang_code,
-                beam_size=ASR_BEAM_SIZE_PARTIAL,
+                # The sentence the viewer keeps is worth a beam search. Greedy
+                # decoding here doubled the repeated words on a real meeting.
+                beam_size=ASR_BEAM_SIZE_FINAL,
                 window_start_seconds=tail_start,
+                # The whole utterance, hangover included: that is the length
+                # the short-audio rule was measured on.
+                utterance_ms=audio_duration * 1000.0,
+                prompt=self._prompt_for(True),
             )
 
             if not state.lang_code:
@@ -543,13 +690,10 @@ class StreamingTranscriber:
             final_hypothesis=final_hypothesis,
             speech_end_seconds=effective_speech_end,
         )
+        final_tail = self._drop_repeat_at_join(state.committed_words,
+                                               final_tail)
 
-        final_words = [
-            *state.committed_words,
-            *final_tail,
-        ]
-
-        final_text = render_words(final_words)
+        final_text = join_texts(state.committed_text, render_words(final_tail))
 
         final = Transcript(
             text=final_text,
@@ -567,6 +711,7 @@ class StreamingTranscriber:
                 if final_hypothesis is not None
                 else ()
             ),
+            overruled_language=overruled,
         )
 
         self.stats.record(final)
@@ -586,6 +731,14 @@ class StreamingTranscriber:
     # Decode and filtering
     # ------------------------------------------------------------------
 
+    def _prompt_for(self, is_final: bool) -> Optional[str]:
+        """The vocabulary prompt, for the decodes that should carry it.
+
+        The running text is decoded six times more often than a sentence, and
+        a prompt makes Whisper fill near-silence rather than leave it.
+        """
+        return self.prompt if (is_final or ASR_PROMPT_ON_PARTIALS) else None
+
     def _decode_hypothesis(
         self,
         *,
@@ -593,6 +746,8 @@ class StreamingTranscriber:
         requested_language: str,
         beam_size: int,
         window_start_seconds: float,
+        utterance_ms: float,
+        prompt: Optional[str] = None,
     ) -> Hypothesis:
         started = perf_counter()
 
@@ -600,6 +755,7 @@ class StreamingTranscriber:
             samples,
             requested_language,
             beam_size,
+            prompt,
         )
 
         self.stats.decode_seconds += perf_counter() - started
@@ -609,22 +765,35 @@ class StreamingTranscriber:
         dropped: list[tuple[Piece, str]] = []
 
         for piece in pieces:
-            reason = self._refuse(piece)
+            reason = self._refuse(piece, utterance_ms)
             if reason is None:
                 kept.append(piece)
             else:
                 dropped.append((piece, reason))
 
         if dropped:
+            # Scores included: they are the evidence for where the thresholds
+            # belong, and a guard that hides what it refused turns one bug
+            # into two.
             log.info(
                 "ASR dropped %d segment(s): %s",
                 len(dropped),
                 [
-                    (reason, piece.text.strip()[:60])
+                    (reason, round(piece.no_speech_prob, 2),
+                     round(piece.avg_logprob, 2), piece.text.strip()[:60])
                     for piece, reason in dropped
                 ],
             )
+        for piece in kept:
+            if piece.no_speech_prob > self.no_speech_threshold:
+                # The segments the no_speech_prob-alone rule would have thrown
+                # away. Logged so the threshold can be placed from a meeting.
+                log.info("ASR kept a segment scored as silence: "
+                         "no_speech %.2f, logprob %.2f, %r",
+                         piece.no_speech_prob, piece.avg_logprob,
+                         piece.text.strip()[:60])
 
+        window_seconds = samples.size / SAMPLE_RATE
         absolute_words = tuple(
             Word(
                 text=word.text,
@@ -633,38 +802,39 @@ class StreamingTranscriber:
                 probability=word.probability,
             )
             for piece in kept
-            for word in piece.words
+            for word in (piece.words or spread_words(piece, window_seconds))
             if word.text.strip()
-        )
-
-        window_end = (
-            window_start_seconds + samples.size / SAMPLE_RATE
         )
 
         return Hypothesis(
             words=absolute_words,
             text=render_words(absolute_words),
             window_start=window_start_seconds,
-            window_end=window_end,
+            window_end=window_start_seconds + window_seconds,
             lang_code=requested_language or detected,
             pieces=tuple(kept),
             dropped=tuple(dropped),
         )
 
-    def _refuse(self, piece: Piece) -> Optional[str]:
-        """Return why a segment is rejectedf it is accepted."""
+    def _refuse(self, piece: Piece,
+                utterance_ms: float = float("inf")) -> Optional[str]:
+        """Why a segment should not be shown, or None to keep it."""
 
         if not piece.text.strip():
             return "empty"
 
-        if (
-            piece.no_speech_prob > self.no_speech_threshold
-            and piece.avg_logprob < self.log_prob_threshold
-        ):
-            return "no speech"
-
-        if piece.no_speech_prob > 0.95:
-            return "very high no speech"
+        if piece.no_speech_prob > self.no_speech_threshold:
+            # faster-whisper's own rule needs both signals: "don't skip if the
+            # logprob is high enough, despite the no_speech_prob". Read alone
+            # it refused 68 confidently decoded segments of one meeting.
+            #
+            # But that benefit of the doubt belongs to audio long enough to
+            # hold a sentence. Every invention confirmed on a real meeting
+            # came from a scrap under ASR_SHORT_UTTERANCE_MS.
+            if (utterance_ms < self.short_utterance_ms
+                    or piece.avg_logprob <= self.log_prob_threshold
+                    or piece.no_speech_prob > self.no_speech_certain):
+                return "no speech"
 
         if piece.avg_logprob < self.log_prob_threshold:
             return "low confidence"
@@ -672,20 +842,26 @@ class StreamingTranscriber:
         if piece.compression_ratio > self.max_compression_ratio:
             return "repetition"
 
-        if normalise_for_match(piece.text) in self.hallucinations:
+        if self.hallucinations.is_invented(piece.text):
+            # Nothing above catches these: Whisper writes its sign-offs with
+            # more confidence than it writes real speech. See server/data/.
             return "known hallucination"
-
-        spaced = normalise_for_pattern(piece.text)
-
-        for pattern in self.hallucination_patterns:
-            if pattern.fullmatch(spaced):
-                return "known hallucination"
 
         return None
 
     # ------------------------------------------------------------------
     # Stabilization
     # ------------------------------------------------------------------
+
+    def _after_committed(self, word: Word, state: UtteranceState) -> bool:
+        """Whether a word lies past the committed text.
+
+        Judged on the word's middle, not its end. Two decodes place the same
+        word a little differently, and a word that merely *ends* past the
+        boundary is usually the last committed word again - which is how a
+        word came to be shown twice in 45% of one run's sentences.
+        """
+        return word.center > state.committed_end + 0.01
 
     def _commit_stable_prefix(
         self,
@@ -702,10 +878,7 @@ class StreamingTranscriber:
         candidates = [
             word
             for word in current.words
-            if (
-                word.end > state.committed_end + 0.01
-                and word.end <= cutoff
-            )
+            if self._after_committed(word, state) and word.end <= cutoff
         ]
 
         newly_committed: list[Word] = []
@@ -714,10 +887,7 @@ class StreamingTranscriber:
             if not word.normalized:
                 continue
 
-            agreement = self._agreement_count(
-                state=state,
-                candidate=word,
-            )
+            agreement = self._agreement_count(state=state, candidate=word)
 
             if agreement < self.min_agreement:
                 # Only commit a contiguous stable prefix. Once one word is
@@ -727,15 +897,14 @@ class StreamingTranscriber:
             if (
                 newly_committed
                 and word.start
-                < (
-                    newly_committed[-1].end
-                    - self.word_time_tolerance_seconds
-                )
+                < newly_committed[-1].end - self.word_time_tolerance_seconds
             ):
                 continue
 
             newly_committed.append(word)
 
+        newly_committed = self._drop_repeat_at_join(state.committed_words,
+                                                    newly_committed)
         if newly_committed:
             state.committed_words.extend(newly_committed)
             state.committed_end = max(
@@ -752,6 +921,24 @@ class StreamingTranscriber:
 
         return newly_committed
 
+    def _drop_repeat_at_join(self, committed: list[Word],
+                             following: list[Word]) -> list[Word]:
+        """Remove the committed text's last word where the next text repeats it.
+
+        A second decode of the same audio places a word a little earlier or
+        later, and its copy of the last committed word can still land past the
+        boundary. It is the same word said once.
+        """
+        following = list(following)
+        while (committed and following
+               and following[0].normalized
+               and following[0].normalized == committed[-1].normalized
+               and following[0].start
+               <= committed[-1].end + self.word_time_tolerance_seconds):
+            following.pop(0)
+            self.stats.duplicates_removed += 1
+        return following
+
     def _agreement_count(
         self,
         *,
@@ -763,10 +950,7 @@ class StreamingTranscriber:
         count = 0
 
         for hypothesis in reversed(state.hypotheses):
-            if self._find_matching_word(
-                hypothesis.words,
-                candidate,
-            ) is not None:
+            if self._find_matching_word(hypothesis.words, candidate) is not None:
                 count += 1
             else:
                 # Require consecutive agreement rather than arbitrary votes
@@ -780,7 +964,7 @@ class StreamingTranscriber:
         words: Iterable[Word],
         target: Word,
     ) -> Optional[Word]:
-        """e normalized word at approximately the same time."""
+        """The same normalized word at approximately the same time."""
 
         target_text = target.normalized
         if not target_text:
@@ -810,20 +994,16 @@ class StreamingTranscriber:
         self,
         state: UtteranceState,
     ) -> list[Word]:
-        """Return words in the latest hypothesis that are not committed yet."""
+        """Words in the latest hypothesis that are not committed yet."""
 
         hypothesis = state.last_hypothesis
 
         if hypothesis is None:
             return []
 
-        unstable_words: list[Word] = []
-
-        for word in hypothesis.words:
-            if word.end > state.committed_end + 0.01:
-                unstable_words.append(word)
-
-        return unstable_words
+        unstable = [word for word in hypothesis.words
+                    if self._after_committed(word, state)]
+        return self._drop_repeat_at_join(state.committed_words, unstable)
 
     def _unstable_text(self, state: UtteranceState) -> str:
         return render_words(self._unstable_words(state))
@@ -869,19 +1049,13 @@ class StreamingTranscriber:
         if final_hypothesis is None:
             final_words: list[Word] = []
         else:
-            final_words = []
-
-            for word in final_hypothesis.words:
-                is_after_committed = (
-                    word.end > state.committed_end + 0.01
-                )
-                is_inside_speech_boundary = (
-                    word.start
-                    <= speech_end_seconds + self.final_post_roll_seconds
-                )
-
-                if is_after_committed and is_inside_speech_boundary:
-                    final_words.append(word)
+            final_words = [
+                word
+                for word in final_hypothesis.words
+                if self._after_committed(word, state)
+                and word.start
+                <= speech_end_seconds + self.final_post_roll_seconds
+            ]
 
         if not historical:
             return self._deduplicate_words(final_words)
@@ -953,12 +1127,7 @@ class StreamingTranscriber:
             if not self._overlaps_any(word, merged):
                 merged.append(word)
 
-        merged.sort(
-            key=lambda item: (
-                item.start,
-                item.end,
-            )
-        )
+        merged.sort(key=lambda item: (item.start, item.end))
 
         return self._deduplicate_words(merged)
 
@@ -966,30 +1135,18 @@ class StreamingTranscriber:
         self,
         state: UtteranceState,
     ) -> list[tuple[Word, int]]:
-        """Return newest unstable words with consecutive agreement counts."""
+        """Newest unstable words with their consecutive agreement counts."""
 
         newest = state.last_hypothesis
         if newest is None:
             return []
 
-        result: list[tuple[Word, int]] = []
+        return [
+            (word, self._agreement_count(state=state, candidate=word))
+            for word in newest.words
+            if self._after_committed(word, state)
+        ]
 
-        for word in newest.words:
-            if word.end <= state.committed_end + 0.01:
-                continue
-
-            result.append(
-                (
-                    word,
-                    self._agreement_count(
-                        state=state,
-                        candidate=word,
-                    ),
-                )
-            )
-
-        return result
-    
     def _nearest_time_index(
         self,
         words: list[Word],
@@ -1000,19 +1157,13 @@ class StreamingTranscriber:
 
         best_index: Optional[int] = None
         best_score = float("inf")
-        
+
         for index, word in enumerate(words):
             if index in excluded:
                 continue
 
-            overlap = min(word.end, target.end) - max(
-                word.start,
-                target.start,
-            )
-
-            center_word = (word.start + word.end) / 2.0
-            center_target = (target.start + target.end) / 2.0
-            center_distance = abs(center_word - center_target)
+            overlap = min(word.end, target.end) - max(word.start, target.start)
+            center_distance = abs(word.center - target.center)
 
             is_near_same_time = (
                 overlap >= -self.word_time_tolerance_seconds
@@ -1088,15 +1239,8 @@ class StreamingTranscriber:
             )
 
     def _pcm_to_samples(self, pcm: bytes) -> np.ndarray:
-        samples = np.frombuffer(
-            pcm,
-            dtype="<i2",
-        ).astype(np.float32)
-
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
         samples /= 32768.0
-
-        if samples.ndim != 1:
-            raise AsrError("ASR audio must be mono")
 
         if not np.all(np.isfinite(samples)):
             raise AsrError("ASR audio contains non-finite samples")
@@ -1104,7 +1248,7 @@ class StreamingTranscriber:
         return samples
 
 
-# Backward-friendly name for code importing Transcriber.
+# The name the rest of the pipeline imports.
 Transcriber = StreamingTranscriber
 
 
@@ -1127,30 +1271,21 @@ class WhisperDecoder:
         except ImportError as exc:  # pragma: no cover
             raise AsrError(
                 "faster-whisper is not installed. Run "
-                "`python3.11 -m pip install -r "
-                "server/requirements.txt`."
+                "`python3.11 -m pip install -r server/requirements.txt`."
             ) from exc
 
         self.model_id = model_id or ASR_MODEL
 
         chosen = device or ASR_DEVICE
         if not chosen:
-            chosen = (
-                "cuda"
-                if torch.cuda.is_available()
-                else "cpu"
-            )
+            chosen = "cuda" if torch.cuda.is_available() else "cpu"
 
         self.device = chosen
 
         self.compute_type = (
             compute_type
             or ASR_COMPUTE_TYPE
-            or (
-                "float16"
-                if self.device.startswith("cuda")
-                else "int8"
-            )
+            or ("float16" if self.device.startswith("cuda") else "int8")
         )
 
         try:
@@ -1179,10 +1314,7 @@ class WhisperDecoder:
         """Pay the first-decode cost before processing real speech."""
 
         self.decode(
-            np.zeros(
-                int(seconds * SAMPLE_RATE),
-                dtype=np.float32,
-            ),
+            np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32),
             "",
             ASR_BEAM_SIZE_PARTIAL,
         )
@@ -1192,30 +1324,27 @@ class WhisperDecoder:
         samples: np.ndarray,
         lang_code: str,
         beam_size: int,
+        prompt: Optional[str] = None,
     ) -> tuple[list[Piece], str]:
         segments, info = self._model.transcribe(
             samples,
             language=lang_code or None,
             task="transcribe",
-
-            # Deterministic decoding. Final quality is produced by
-            # stabilization and reconciliation rather than a separate
-            # full-utterance beam-search pass.
             beam_size=beam_size,
             temperature=0.0,
-
+            # None, not "". An empty string is itself a prompt as far as
+            # Whisper is concerned.
+            initial_prompt=prompt or None,
             condition_on_previous_text=ASR_CONDITION_ON_PREVIOUS,
-
             no_speech_threshold=ASR_NO_SPEECH_THRESHOLD,
             log_prob_threshold=ASR_LOG_PROB_THRESHOLD,
             compression_ratio_threshold=ASR_MAX_COMPRESSION_RATIO,
-
             # Timestamps are essential for local agreement and for protecting
             # stable words from a final regression.
             without_timestamps=False,
             word_timestamps=True,
-
-            # Silero already runs upstream.
+            # Silero already runs upstream, and a second VAD eats the pre-roll
+            # that holds the word onsets.
             vad_filter=False,
         )
 
@@ -1236,20 +1365,16 @@ class WhisperDecoder:
             pieces.append(
                 Piece(
                     text=segment.text,
-                    start=float(segment.start),
-                    end=float(segment.end),
                     avg_logprob=float(segment.avg_logprob),
                     no_speech_prob=float(segment.no_speech_prob),
-                    compression_ratio=float(
-                        segment.compression_ratio
-                    ),
+                    compression_ratio=float(segment.compression_ratio),
+                    start=float(segment.start),
+                    end=float(segment.end),
                     words=words,
                 )
             )
 
-        detected = str(
-            getattr(info, "language", "") or ""
-        )
+        detected = str(getattr(info, "language", "") or "")
 
         return pieces, detected
 

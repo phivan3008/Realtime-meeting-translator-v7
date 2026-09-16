@@ -10,6 +10,17 @@ The session is a small state machine::
     AWAITING_HELLO --hello ok--> STREAMING --bye/disconnect--> CLOSED
           |                          |
           +--- bad hello ---> CLOSED +--- bad chunk ---> CLOSED
+
+Streaming ASR
+-------------
+The open utterance is decoded every ``PARTIAL_INTERVAL_MS`` on its last
+``PARTIAL_WINDOW_SECONDS``, and words consecutive decodes agree on are
+committed (:mod:`server.pipeline.asr`). The partial and the final of one
+utterance share an ASR id built from the session id and the buffer's
+utterance index, which the buffer keeps the same for both. The language of
+the running text is decided once per utterance, on the first confident LID
+answer, so consecutive decodes are decoded in the same language and can
+agree at all.
 """
 
 from __future__ import annotations
@@ -17,9 +28,11 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable, Optional
+
+import numpy as np
 
 from common.protocol import (
     ClientMessage,
@@ -27,21 +40,24 @@ from common.protocol import (
     ProtocolError,
     make_error,
     make_final,
-    make_translation,
     make_partial,
     make_ready,
+    make_speakers,
+    make_translation,
     make_utterance,
     make_vad,
     parse_message,
     validate_audio_chunk,
 )
-from server.config import PARTIAL_WINDOW_SECONDS, SAMPLE_RATE
-from server.pipeline.asr import Transcriber
+from server.config import LANGUAGE_SPLIT, PARTIAL_WINDOW_SECONDS, SAMPLE_RATE
+from server.pipeline.asr import Transcriber, Transcript
 from server.pipeline.buffer import BufferManager, BufferOutput, FinalizeReason
 from server.pipeline.diarization import SpeakerIdentifier
+from server.pipeline.language_split import LanguageSplitter
 from server.pipeline.lid import LanguageIdentifier
 from server.pipeline.noise import NoiseFilter
 from server.pipeline.overlap import OverlapResolver
+from server.pipeline.reclustering import SpeakerHistory
 from server.pipeline.translate import Translator, Turn
 from server.pipeline.translation_queue import TranslationWorker
 from server.pipeline.vad import VADSegmenter
@@ -75,7 +91,17 @@ class ServerSessionStats:
     utterances_shaped: int = 0
     utterances_identified: int = 0
     utterances_with_language: int = 0
+    #: Utterances cut in two because they held two languages.
+    language_splits: int = 0
+    #: Sentences the LID wanted in one language while their running text had
+    #: already committed words in the other.
+    language_flips: int = 0
+    #: Labels the live matcher got wrong and clustering put right.
+    speaker_corrections: int = 0
+    #: Committed sentences with text. Running texts are counted apart:
+    #: folded together this read as several sentences a second.
     transcripts: int = 0
+    running_texts: int = 0
     translations: int = 0
     #: Sentences that went out without a translation: refused by the model,
     #: or given up on because the answer would have arrived too late to read.
@@ -84,17 +110,20 @@ class ServerSessionStats:
     worst_translation_lag: float = 0.0
     partials: int = 0
     protocol_errors: int = 0
-    #: Sentences lost because a pipeline stage raised. Not protocol errors:
-    #: the client did nothing wrong and the meeting carries on without them.
+    #: Batches lost to a bug outside any stage. Not protocol errors: the
+    #: client did nothing wrong and the meeting carries on without them.
     pipeline_errors: int = 0
+    #: How many times each stage raised, and which were switched off.
+    stage_failures: dict = field(default_factory=dict)
+    stages_disabled: list = field(default_factory=list)
     #: Seconds spent in each stage, summed over the meeting, and the worst
     #: single sentence. Every stage runs on the thread that reads audio, so
     #: this is exactly the time the socket was not being read.
     stage_seconds: dict = field(default_factory=dict)
     slowest_utterance_seconds: float = 0.0
-    #: The same for the running text, counted apart. It runs every 600 ms on
-    #: the whole open utterance, so it does far more decoding than the finals
-    #: do, and folding the two together hides which one is slow.
+    #: The same for the running text, counted apart. It runs every 600 ms,
+    #: so it does far more decoding than the finals do, and folding the two
+    #: together hides which one is slow.
     slowest_partial_seconds: float = 0.0
 
     @property
@@ -102,10 +131,66 @@ class ServerSessionStats:
         return self.bytes_received / 2 / 16_000
 
 
+@dataclass
+class Stages:
+    """The models a session runs audio through.
+
+    Every one is optional: a pod missing one still runs without it.
+    ``/health`` reports which are loaded.
+    """
+
+    noise_filter: Optional[NoiseFilter] = None
+    overlap_resolver: Optional[OverlapResolver] = None
+    speaker_identifier: Optional[SpeakerIdentifier] = None
+    language_identifier: Optional[LanguageIdentifier] = None
+    transcriber: Optional[Transcriber] = None
+    translator: Optional[Translator] = None
+
+
+@dataclass
+class Analysis:
+    """What the pipeline worked out about one utterance."""
+
+    audio: bytes                    # shaped, for the ASR
+    keep: bool = True
+    label: str = ""                 # what it sounded like, when dropped
+    speech_score: float = 0.0
+    speaker_id: str = ""
+    #: Kept for reclustering the meeting later, not used by any other stage.
+    voiceprint: Optional[np.ndarray] = None
+    lang_code: str = ""
+    transcript: Optional[Transcript] = None
+
+
 #: A sentence taking longer than this stalls the whole connection, because
 #: every stage runs on the thread that reads audio. At 200 ms per chunk, one
 #: second is five chunks the socket did not get to.
 SLOW_UTTERANCE_SECONDS = 1.0
+
+#: A stage that raises this many times in a row is switched off for the rest
+#: of the meeting. One failure is a bad sentence; the same failure on every
+#: sentence is a broken stage, and calling it again only buries the evidence.
+STAGE_FAILURE_LIMIT = 3
+
+#: A failure naming any of these is a broken device, not a bad sentence, and
+#: the stage goes off on the first one. On the pod a cuDNN error raised
+#: cleanly, CUDA kept working for five more seconds, and the process died on
+#: the next call into the same stage - so going back in is what kills it.
+DEVICE_FAILURES = ("cuda", "cudnn", "cublas", "out of memory")
+
+#: Which attributes a broken stage switches off. Everything that reads the
+#: same model goes with it.
+STAGE_ATTRIBUTES = {
+    "noise": ("noise_filter",),
+    "overlap": ("overlap_resolver",),
+    "speaker": ("speaker_identifier", "speaker_history"),
+    "recluster": ("speaker_history",),
+    "language": ("language_identifier", "language_splitter"),
+    "partial_language": ("language_identifier", "language_splitter"),
+    "language_split": ("language_splitter",),
+    "asr": ("transcriber",),
+    "partial_asr": ("transcriber",),
+}
 
 
 class ServerSession:
@@ -115,31 +200,35 @@ class ServerSession:
         self,
         segmenter_factory: Callable[[], VADSegmenter],
         buffer_factory: Callable[[], BufferManager] = BufferManager,
-        noise_filter: Optional[NoiseFilter] = None,
-        overlap_resolver: Optional[OverlapResolver] = None,
-        speaker_identifier: Optional[SpeakerIdentifier] = None,
-        language_identifier: Optional[LanguageIdentifier] = None,
-        transcriber: Optional[Transcriber] = None,
-        translator: Optional[Translator] = None,
+        stages: Optional[Stages] = None,
         translation_inline: bool = False,
         strict_chunk_size: bool = True,
+        **models,
     ) -> None:
         self._segmenter_factory = segmenter_factory
         self._buffer_factory = buffer_factory
-        # Optional: a pod without the classifier still runs, it just
-        # transcribes the coughs too. /health reports which mode it is in.
-        self.noise_filter = noise_filter
-        self.overlap_resolver = overlap_resolver
-        self.speaker_identifier = speaker_identifier
-        self.language_identifier = language_identifier
-        self.transcriber = transcriber
-        self.translator = translator
-        # Translation runs off the thread that reads audio. `inline` puts it
-        # back on, which is what the unit tests use so nothing here depends on
-        # thread scheduling.
+        self.stages = stages if stages is not None else Stages(**models)
+        self.noise_filter = self.stages.noise_filter
+        self.overlap_resolver = self.stages.overlap_resolver
+        self.speaker_identifier = self.stages.speaker_identifier
+        #: Second thoughts about the labels the live matcher gave out.
+        self.speaker_history: Optional[SpeakerHistory] = (
+            SpeakerHistory() if self.speaker_identifier is not None else None)
+        self.language_identifier = self.stages.language_identifier
+        # Two languages in one utterance means one of them is lost rather
+        # than mistranslated.
+        self.language_splitter: Optional[LanguageSplitter] = (
+            LanguageSplitter(self.language_identifier)
+            if self.language_identifier is not None and LANGUAGE_SPLIT
+            else None
+        )
+        self.transcriber = self.stages.transcriber
+        self.translator = self.stages.translator
+        # `inline` runs translation on the calling thread instead of its own,
+        # which is what the unit tests use.
         self.worker: Optional[TranslationWorker] = (
-            TranslationWorker(translator, inline=translation_inline)
-            if translator is not None else None
+            TranslationWorker(self.translator, inline=translation_inline)
+            if self.translator is not None else None
         )
         self._strict_chunk_size = strict_chunk_size
         self.state = SessionState.AWAITING_HELLO
@@ -150,19 +239,14 @@ class ServerSession:
         #: The last language this meeting was confidently in, used when the
         #: LID cannot decide. See :meth:`_language_for`.
         self._last_language = ""
+        #: Consecutive failures per stage, and what to tell the client about
+        #: the ones that were switched off.
+        self._stage_failures: dict[str, int] = {}
+        self._stage_notices: list[str] = []
         #: Counts sentences within this session so a translation can be
-        #: matched to its sentence. Utterance indexes restart with each speech
-        #: segment, so they cannot be used for it.
+        #: matched to its sentence.
         self._sentences = 0
-
-        # Streaming ASR state.
-        #
-        # Buffer utterance indexes restart for each speech segment, so include the
-        # session ID when constructing the ASR utterance ID. The same ID must be used
-        # for every rolling partial and for the corresponding final utterance.
-        self._active_asr_utterance_id = ""
-        self._active_asr_utterance_index: Optional[int] = None
-        self._active_asr_start_ms: Optional[int] = None
+        self._clear_open()
 
     @property
     def session_id(self) -> str:
@@ -181,9 +265,8 @@ class ServerSession:
             log.info("Session %s said bye: %s", self.session_id, reason)
             # A clean goodbye can still land mid-sentence. Close the segment
             # here, while the socket is open and the event can still be
-            # delivered, or the last sentence of the meeting never gets an
-            # end and never gets finalised - and wait for its translation
-            # too, because after this the socket is gone.
+            # delivered, and wait for its translation too, because after
+            # this the socket is gone.
             messages = self._finalise()
             self.state = SessionState.CLOSED
             return Response(messages=messages, close=True,
@@ -213,19 +296,13 @@ class ServerSession:
         self.segmenter = self._segmenter_factory()
         self.segmenter.reset()
         self.buffer = self._buffer_factory()
-        if self.speaker_identifier is not None:
-            # A new meeting starts with nobody known.
-            self.speaker_identifier.reset()
-        if self.language_identifier is not None:
-            self.language_identifier.reset()
-        if self.transcriber is not None:
-            self.transcriber.reset()
-        self._active_asr_utterance_id = ""
-        self._active_asr_utterance_index = None
-        self._active_asr_start_ms = None
-        if self.translator is not None:
-            # A new meeting carries none of the last one's context.
-            self.translator.reset()
+        for resettable in (self.speaker_identifier, self.speaker_history,
+                           self.language_identifier, self.language_splitter,
+                           self.transcriber, self.translator):
+            # A new meeting starts with nobody known and nothing said.
+            if resettable is not None:
+                resettable.reset()
+        self._clear_open()
         if self.worker is not None:
             self.worker.start()
         self.state = SessionState.STREAMING
@@ -264,16 +341,11 @@ class ServerSession:
     def _language_for(self, decision) -> str:
         """The language to force on the ASR when the LID could not decide.
 
-        A meeting holds two languages, and the LID is asked about clips as
-        short as 400 ms, where it often cannot separate them. Passing "" hands
-        the choice to Whisper's own detector, which is choosing between
-        ninety-nine - on a live run it answered Swedish (0.66), Finnish (0.50),
-        Chinese (0.18) and English (0.29) for a Vietnamese-Japanese meeting,
-        and a sentence decoded as Swedish is worthless.
-
+        Passing "" hands the choice to Whisper's own detector, which is
+        choosing between ninety-nine - on a live run it answered Swedish,
+        Finnish, Chinese and English for a Vietnamese-Japanese meeting.
         Falling back to the last language this meeting was confidently in is
-        wrong at worst half the time, and only at the moment a speaker
-        switches. Whisper's guess was wrong every time.
+        wrong at worst half the time, and only when a speaker switches.
         """
         if decision.known:
             return decision.lang_code
@@ -284,14 +356,11 @@ class ServerSession:
         return self._last_language
 
     def _safely_announce(self, result: BufferOutput) -> list[str]:
-        """Run the pipeline, and let the meeting outlive a bug in one sentence.
+        """Run the pipeline, and let the meeting outlive a bug outside a stage.
 
-        A bug that reaches here is a bug in this project, not bad input, so it
-        is logged with its traceback and counted rather than swallowed. What it
-        must not do is end the connection: an ``AttributeError`` on one line
-        once killed a 60 s meeting seven times over, and each reconnect threw
-        away the audio queued behind it. Losing one sentence beats losing the
-        rest of the meeting.
+        Each stage already survives its own failures (:meth:`_stage`). What
+        reaches here is a bug in the glue between them; it is logged with its
+        traceback and counted, and it must not end the connection.
         """
         try:
             return self._announce(result)
@@ -304,14 +373,53 @@ class ServerSession:
             return []
 
     @contextmanager
+    def _stage(self, name: str, into: dict):
+        """Time one stage, and let the meeting outlive a stage that breaks.
+
+        A stage that raises leaves :class:`Analysis` at its defaults, which
+        are what the pipeline does when that stage is absent - so the sentence
+        carries on through the rest of it instead of being thrown away. On the
+        pod, a cuDNN failure in one stage killed every sentence for two
+        minutes and the client had no way to tell that from silence.
+        """
+        try:
+            with self._timed(name, into):
+                yield
+        except Exception as exc:
+            self._stage_broke(name, exc)
+        else:
+            self._stage_failures.pop(name, None)
+
+    def _stage_broke(self, name: str, exc: BaseException) -> None:
+        count = self._stage_failures.get(name, 0) + 1
+        self._stage_failures[name] = count
+        self.stats.stage_failures[name] = (
+            self.stats.stage_failures.get(name, 0) + 1)
+        log.exception("Session %s: stage %r raised (%d in a row)",
+                      self.session_id or "?", name, count)
+
+        message = str(exc).lower()
+        device = any(word in message for word in DEVICE_FAILURES)
+        if name in self.stats.stages_disabled:
+            return
+        if not device and count < STAGE_FAILURE_LIMIT:
+            return
+        for attribute in STAGE_ATTRIBUTES.get(name, ()):
+            setattr(self, attribute, None)
+        self.stats.stages_disabled.append(name)
+        self._stage_notices.append(
+            f"tầng {name} đã bị tắt vì lỗi CUDA/thiết bị; cuộc họp vẫn chạy "
+            f"nhưng thiếu tầng này"
+            if device else
+            f"tầng {name} đã bị tắt sau {count} lần lỗi liên tiếp; "
+            f"cuộc họp vẫn chạy nhưng thiếu tầng này")
+
+    @contextmanager
     def _timed(self, stage: str, into: dict):
         """Charge the wall time of one stage to that stage.
 
         Everything here runs on the thread that reads the socket, so these
-        numbers are not curiosity: they are the time the connection spent not
-        reading audio. A run where one sentence took 12 s showed up on the
-        client as VAD events arriving 12 s late, and nothing in the pipeline
-        said which stage had taken it.
+        numbers are the time the connection spent not reading audio.
         """
         started = time.perf_counter()
         try:
@@ -322,280 +430,250 @@ class ServerSession:
             self.stats.stage_seconds[stage] = (
                 self.stats.stage_seconds.get(stage, 0.0) + spent)
 
-    def _asr_utterance_id(self, utterance) -> str:
-        """Return a stable ID shared by partials and the matching final.
+    # -- the open utterance ---------------------------------------------------
+    def _asr_id(self, index: int) -> str:
+        """One id for the partials and the final of an utterance.
 
-        Buffer objects are expected to expose ``index``. The session ID prevents
-        collisions between separate WebSocket sessions.
+        Buffer indexes restart for every session, so the session id keeps
+        two meetings apart.
         """
-
-        index = getattr(utterance, "index", None)
-
-        if index is None:
-            # A partial should normally carry the same index as its final. This
-            # fallback keeps one stable ID for the currently open utterance if an
-            # older BufferManager implementation does not expose partial.index.
-            if self._active_asr_utterance_id:
-                return self._active_asr_utterance_id
-
-            index = self.stats.utterances + 1
-
         return f"{self.session_id or 'session'}:{index}"
 
+    def _clear_open(self) -> None:
+        self._open_asr_id = ""
+        #: The running text's language, fixed at the first confident answer.
+        self._open_language = ""
+        #: What the screen is showing as running text, so an emptied one is
+        #: cleared once rather than sent on every interval.
+        self._open_running = ""
 
-    def _remember_active_asr_utterance(self, utterance) -> str:
-        """Remember the identity and timeline origin of an open utterance."""
+    def _forget(self, asr_id: str) -> None:
+        """Drop any streaming state kept for an utterance that is done."""
+        if self.transcriber is not None:
+            self.transcriber.cancel_utterance(asr_id)
+        if asr_id == self._open_asr_id:
+            self._clear_open()
 
-        utterance_id = self._asr_utterance_id(utterance)
-        index = getattr(utterance, "index", None)
-        start_ms = getattr(utterance, "start_ms", None)
-
-        if (
-            self._active_asr_utterance_id
-            and utterance_id != self._active_asr_utterance_id
-            and self.transcriber is not None
-        ):
-            # Defensive cleanup. Normally BufferManager finishes one utterance
-            # before opening another, but stale ASR state must not leak between
-            # utterances.
-            self.transcriber.cancel_utterance(
-                self._active_asr_utterance_id
-            )
-
-        self._active_asr_utterance_id = utterance_id
-        self._active_asr_utterance_index = index
-
-        # Preserve the earliest known start. Calling tail() may move start_ms to
-        # the beginning of the rolling window, so that value cannot replace the
-        # original utterance origin.
-        if self._active_asr_start_ms is None:
-            self._active_asr_start_ms = start_ms
-        elif start_ms is not None:
-            self._active_asr_start_ms = min(
-                self._active_asr_start_ms,
-                start_ms,
-            )
-
-        return utterance_id
-
-
-    def _partial_window_start_seconds(
-        self,
-        partial,
-        window,
-    ) -> float:
-        """Return rolling-window start relative to the utterance origin."""
-
-        utterance_start_ms = self._active_asr_start_ms
-        window_start_ms = getattr(window, "start_ms", None)
-
-        if (
-            utterance_start_ms is not None
-            and window_start_ms is not None
-        ):
-            return max(
-                0.0,
-                (window_start_ms - utterance_start_ms) / 1000.0,
-            )
-
-        # Compatibility fallback for buffer objects that do not preserve start_ms
-        # when tail() is called. The rolling window ends at the newest received
-        # audio, so its relative start is total duration minus window duration.
-        full_duration_seconds = len(partial.pcm) / 2 / SAMPLE_RATE
-        window_duration_seconds = len(window.pcm) / 2 / SAMPLE_RATE
-
-        return max(
-            0.0,
-            full_duration_seconds - window_duration_seconds,
-        )
-
-
-    def _final_speech_end_seconds(self, utterance, pcm: bytes) -> float:
-        """Return Silero speech end relative to the utterance PCM start.
-
-        BufferManager finals are expected to end at the VAD speech boundary. When
-        timeline metadata is unavailable, use the PCM duration.
-        """
-
-        start_ms = getattr(utterance, "start_ms", None)
-        end_ms = getattr(utterance, "end_ms", None)
-
-        if start_ms is not None and end_ms is not None:
-            return max(
-                0.0,
-                (end_ms - start_ms) / 1000.0,
-            )
-
-        return len(pcm) / 2 / SAMPLE_RATE
-
-
-    def _clear_active_asr_utterance(self, utterance_id: str) -> None:
-        """Clear session-side state after finalization."""
-
-        if utterance_id != self._active_asr_utterance_id:
-            return
-
-        self._active_asr_utterance_id = ""
-        self._active_asr_utterance_index = None
-        self._active_asr_start_ms = None
-
-
-    @staticmethod
-    def _running_transcript_text(transcript) -> str:
-        """Render complete running text for the existing replace-only protocol.
-
-        StreamingTranscriber emits committed text and unstable text separately.
-        The current WebSocket protocol has only ``make_partial()``, whose text
-        replaces the previous running text, so send their complete combination.
-        """
-
-        return " ".join(
-            part.strip()
-            for part in (
-                transcript.committed_text,
-                transcript.partial_text,
-            )
-            if part and part.strip()
-        )
-
+    # -- committed sentences ----------------------------------------------------
     def _announce(self, result: BufferOutput) -> list[str]:
-        """Classify each finished sentence, then put it on the wire."""
+        """Run each finished sentence through the pipeline and send it."""
         messages = []
-        for utterance in result.finals:
-            spent: dict[str, float] = {}
-            keep, label, score = True, "", 0.0
-            if self.noise_filter is not None:
-                with self._timed("noise", spent):
-                    verdict = self.noise_filter.judge(utterance.pcm)
-                keep = verdict.keep
-                label = verdict.classification.noise_label if not keep else ""
-                score = verdict.classification.speech_score
-                if not keep:
-                    self.stats.utterances_dropped += 1
-            audio = utterance.pcm
-            if keep and self.overlap_resolver is not None:
-                # Only what survives is worth shaping; a dropped sentence goes
-                # nowhere. The shaped audio is what the ASR stage will read.
-                with self._timed("overlap", spent):
-                    shaped = self.overlap_resolver.resolve(audio)
-                audio = shaped.pcm
-                if shaped.shaped:
-                    self.stats.utterances_shaped += 1
-
-            speaker_id = ""
-            if keep and self.speaker_identifier is not None:
-                # Identified from the *raw* utterance, not the shaped one.
-                # Measured on two single-speaker recordings, gating first cost
-                # 0.06 of same-speaker cosine (0.677 raw against 0.616 shaped):
-                # the gate removes quiet syllables inside a sentence, and those
-                # carry voice. The resolver is there to help the ASR, and the
-                # bleed it removes is not worth a known loss of identity.
-                with self._timed("speaker", spent):
-                    assignment = self.speaker_identifier.identify(utterance.pcm)
-                speaker_id = assignment.speaker_id
-                self.stats.utterances_identified += 1
-
-            lang_code = ""
-            if keep and self.language_identifier is not None:
-                # Raw audio again, for the same reason: the gate removes quiet
-                # phonemes, and those carry the cues that tell the two
-                # languages apart.
-                with self._timed("language", spent):
-                    decision = self.language_identifier.identify(utterance.pcm)
-                if decision.known:
-                    self.stats.utterances_with_language += 1
-                    self._last_language = decision.lang_code
-                lang_code = self._language_for(decision)
-
-            transcript = None
-            asr_utterance_id = self._asr_utterance_id(utterance)
-
-            if keep and self.transcriber is not None:
-                # Use the same utterance ID that was used by rolling partial calls.
-                #
-                # finish_utterance() preserves already committed text and decodes only
-                # the remaining endpoint tail with a short overlap for left context.
-                with self._timed("asr", spent):
-                    transcript = self.transcriber.finish_utterance(
-                        audio,
-                        utterance_id=asr_utterance_id,
-                        utterance_start_seconds=0.0,
-                        speech_end_seconds=self._final_speech_end_seconds(
-                            utterance,
-                            audio,
-                        ),
-                        lang_code=lang_code,
-                    )
-
-                self._clear_active_asr_utterance(asr_utterance_id)
-
-                if transcript.has_text:
-                    self.stats.transcripts += 1
-
-            elif self.transcriber is not None:
-                # The utterance was rejected by the noise stage. Remove any stabilization
-                # state created by its earlier partial calls.
-                self.transcriber.cancel_utterance(asr_utterance_id)
-                self._clear_active_asr_utterance(asr_utterance_id)
-
-            messages.append(
-                make_utterance(
-                    index=utterance.index,
-                    start_ms=utterance.start_ms,
-                    end_ms=utterance.end_ms,
-                    reason=utterance.reason.value,
-                    continues_previous=utterance.continues_previous,
-                    kept=keep,
-                    label=label,
-                    speech_score=score,
-                    speaker_id=speaker_id,
-                    lang_code=lang_code,
-                )
-            )
-            if transcript is not None and transcript.has_text:
-                self._sentences += 1
-                sentence_id = self._sentences
-                # The sentence goes out now. Waiting for a translation before
-                # saying anything is what put every VAD event 12 s late on the
-                # seventh end-to-end run: an LLM call sat on the thread that
-                # reads audio, and everything behind it waited too.
-                messages.append(make_final(
-                    sentence_id=sentence_id,
-                    speaker_id=speaker_id,
-                    lang_code=transcript.lang_code,
-                    transcript=transcript.text,
-                    speech_score=score,
-                ))
-                if self.worker is not None:
-                    # The history is remembered here rather than inside the
-                    # translator, so a sentence whose translation is dropped
-                    # still leaves its source behind for the next one to read.
-                    # HISTORY_STYLE is "sources", so that is all it needs.
-                    self.worker.translator.context.remember(Turn(
-                        speaker_id=speaker_id,
-                        lang_code=transcript.lang_code,
-                        source=transcript.text,
-                        translation="",
-                    ))
-                    self.worker.submit(sentence_id, transcript.text,
-                                       transcript.lang_code, speaker_id)
-            self._report_if_slow(utterance, spent)
-        self.stats.utterances += len(result.finals)
+        for whole in result.finals:
+            whole_id = self._asr_id(whole.index)
+            parts = self._by_language(whole)
+            for utterance, language in parts:
+                spent: dict[str, float] = {}
+                # After a split the running text belongs to the whole span,
+                # so each half is decoded on its own.
+                found = self._analyse(
+                    utterance, spent,
+                    asr_id=whole_id if len(parts) == 1 else None,
+                    language=language)
+                messages.append(self._utterance_message(utterance, found))
+                if found.transcript is not None and found.transcript.has_text:
+                    messages += self._commit_sentence(found)
+                self._report_if_slow(utterance, spent)
+            self._forget(whole_id)
 
         if result.partial is not None:
             self.stats.partials += 1
             messages += self._transcribe_partial(result.partial)
 
+        messages += self._recluster_speakers()
+        while self._stage_notices:
+            messages.append(make_error(self._stage_notices.pop(0), fatal=False))
+        self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
         return messages
 
-    def _report_if_slow(self, utterance, spent: dict) -> None:
-        """Name the stage that stalled the connection, while it is still known.
+    def _by_language(self, utterance) -> list[tuple]:
+        """One utterance, or its two halves when it holds two languages.
 
-        Without this a slow sentence is invisible on the server and shows up
-        on the client only as VAD events arriving late - which says the
-        connection stalled but not on what.
+        Each part comes with the language already decided for it, or "" to
+        let the LID decide. A split hands each half the language the review
+        probes found for that half.
         """
+        if self.language_splitter is None:
+            return [(utterance, "")]
+        split = None
+        with self._stage("language_split", {}):
+            split = self.language_splitter.find(
+                utterance.pcm, hangover_ms=utterance.trailing_silence_ms)
+        if split is None:
+            return [(utterance, "")]
+
+        self.stats.language_splits += 1
+        log.info("Session %s: utterance %d holds two languages (%s then %s); "
+                 "cutting at %.0f ms of %.0f",
+                 self.session_id or "?", utterance.index, split.first,
+                 split.second, split.at_ms, utterance.duration_ms)
+        return [
+            (replace(utterance, pcm=utterance.pcm[:split.at],
+                     trailing_silence_ms=0.0), split.first),
+            (replace(utterance, pcm=utterance.pcm[split.at:],
+                     start_ms=utterance.start_ms + split.at_ms,
+                     continues_previous=False), split.second),
+        ]
+
+    def _recluster_speakers(self) -> list[str]:
+        """Cluster the meeting again and send back the labels that moved."""
+        if self.speaker_history is None or not self.speaker_history.due:
+            return []
+        corrections: dict = {}
+        with self._stage("recluster", {}):
+            corrections = self.speaker_history.recluster()
+        if not corrections:
+            return []
+        self.stats.speaker_corrections += len(corrections)
+        return [make_speakers(corrections)]
+
+    def _analyse(self, utterance, spent: dict, asr_id: Optional[str] = None,
+                 language: str = "") -> Analysis:
+        """Every stage that reads audio, in order, for one utterance.
+
+        Each stage owns the whole of its block, result included: a stage that
+        raises must leave :class:`Analysis` at the defaults, which are what
+        the pipeline does when that stage is absent.
+
+        ``asr_id`` names the streaming state the running text left for this
+        utterance; None decodes it whole. ``language`` is a decision already
+        made, which the LID is then not asked to repeat.
+        """
+        found = Analysis(audio=utterance.pcm)
+
+        if self.noise_filter is not None:
+            with self._stage("noise", spent):
+                verdict = self.noise_filter.judge(utterance.pcm)
+                found.keep = verdict.keep
+                found.speech_score = verdict.classification.speech_score
+                if not verdict.keep:
+                    found.label = verdict.classification.noise_label
+                    self.stats.utterances_dropped += 1
+        if not found.keep:
+            return found
+
+        # Shaping is for the ASR. Speaker and language read the raw audio:
+        # the gate removes quiet syllables, and those carry both voice (0.06
+        # cosine, measured) and the cues that tell the two languages apart.
+        if self.overlap_resolver is not None:
+            with self._stage("overlap", spent):
+                shaped = self.overlap_resolver.resolve(found.audio)
+                found.audio = shaped.pcm
+                if shaped.shaped:
+                    self.stats.utterances_shaped += 1
+
+        if self.speaker_identifier is not None:
+            with self._stage("speaker", spent):
+                assignment = self.speaker_identifier.identify(utterance.pcm)
+                found.speaker_id = assignment.speaker_id
+                found.voiceprint = assignment.embedding
+                self.stats.utterances_identified += 1
+                # The score is what decides whether two turns are one person.
+                log.info("utterance %d speaker %s similarity %.3f (%s)",
+                         utterance.index, assignment.speaker_id,
+                         assignment.similarity, assignment.reason)
+
+        if language:
+            found.lang_code = language
+            self.stats.utterances_with_language += 1
+            self._last_language = language
+        elif self.language_identifier is not None:
+            with self._stage("language", spent):
+                decision = self.language_identifier.identify(utterance.pcm)
+                if decision.known:
+                    self.stats.utterances_with_language += 1
+                    self._last_language = decision.lang_code
+                found.lang_code = self._language_for(decision)
+        else:
+            found.lang_code = self._last_language
+
+        if self.transcriber is not None:
+            with self._stage("asr", spent):
+                found.transcript = self._decode(utterance, found, asr_id)
+                if found.transcript.has_text:
+                    self.stats.transcripts += 1
+        return found
+
+    def _decode(self, utterance, found: Analysis,
+                asr_id: Optional[str]) -> Transcript:
+        """The committed sentence: the running text's work, finished."""
+        assert self.transcriber is not None
+        if asr_id is None:
+            return self.transcriber.transcribe(found.audio, found.lang_code,
+                                               is_final=True)
+        transcript = self.transcriber.finish_utterance(
+            found.audio,
+            utterance_id=asr_id,
+            utterance_start_seconds=0.0,
+            # Where the speech ended, not where the VAD's hangover did.
+            # Whisper answers that half second of silence with words.
+            speech_end_seconds=(utterance.speech_end_ms
+                                - utterance.start_ms) / 1000.0,
+            lang_code=found.lang_code,
+        )
+        if transcript.overruled_language:
+            self.stats.language_flips += 1
+            why = (self.language_splitter.stats.last
+                   if self.language_splitter else "no splitter")
+            log.info("utterance %d: the LID said %r but the running text had "
+                     "committed words in %r; kept %r. The splitter said: %s",
+                     utterance.index, transcript.overruled_language,
+                     transcript.lang_code, transcript.lang_code,
+                     why or "nothing")
+        return transcript
+
+    def _utterance_message(self, utterance, found: Analysis) -> str:
+        """The verdict on one utterance, sent whether it was kept or not."""
+        return make_utterance(
+            index=utterance.index,
+            start_ms=utterance.start_ms,
+            end_ms=utterance.end_ms,
+            reason=utterance.reason.value,
+            continues_previous=utterance.continues_previous,
+            kept=found.keep,
+            label=found.label,
+            speech_score=found.speech_score,
+            speaker_id=found.speaker_id,
+            lang_code=found.lang_code,
+        )
+
+    def _commit_sentence(self, found: Analysis) -> list[str]:
+        """Send the sentence now and queue its translation to follow."""
+        self._sentences += 1
+        if self.speaker_history is not None and found.voiceprint is not None:
+            self.speaker_history.add(self._sentences, found.voiceprint,
+                                     found.speaker_id)
+        transcript = found.transcript
+        assert transcript is not None
+        messages = [make_final(
+            sentence_id=self._sentences,
+            speaker_id=found.speaker_id,
+            lang_code=transcript.lang_code,
+            transcript=transcript.text,
+            speech_score=found.speech_score,
+        )]
+        if self.worker is not None:
+            # The history this sentence is translated with is the meeting as
+            # it stands now - taken before the sentence joins it, because the
+            # translation runs later, on another thread, when the history
+            # would already hold this sentence and the ones after it. The
+            # session owns the history; the translator adds nothing to it, so
+            # a dropped translation still leaves its source behind.
+            context = self.worker.translator.context
+            history = context.snapshot()
+            context.remember(Turn(
+                speaker_id=found.speaker_id,
+                lang_code=transcript.lang_code,
+                source=transcript.text,
+                translation="",
+            ))
+            self.worker.submit(self._sentences, transcript.text,
+                               transcript.lang_code, found.speaker_id,
+                               history=history)
+        return messages
+
+    def _report_if_slow(self, utterance, spent: dict) -> None:
+        """Name the stage that stalled the connection, while it is still known."""
         total = sum(spent.values())
         self.stats.slowest_utterance_seconds = max(
             self.stats.slowest_utterance_seconds, total)
@@ -611,82 +689,67 @@ class ServerSession:
             {stage: round(value, 2) for stage, value in spent.items()},
         )
 
+    # -- running text -----------------------------------------------------------
     def _transcribe_partial(self, partial) -> list[str]:
-        """Decode and stabilize the current rolling ASR window.
+        """Decode the rolling window and send the running text.
 
-        The StreamingTranscriber can emit a committed delta followed by a partial
-        event. The existing protocol does not expose a separate committed event,
-        so this method sends one replace-only partial containing:
-
-            complete committed text + complete unstable suffix
+        The protocol has one replace-only running text, so it carries the
+        committed text and the unstable text together. No speaker label goes
+        out with it: showing a name and then correcting it reads worse than
+        showing none.
         """
-
         if self.transcriber is None:
             return []
 
-        utterance_id = self._remember_active_asr_utterance(partial)
+        utterance_id = self._asr_id(partial.index)
+        if utterance_id != self._open_asr_id:
+            if self._open_asr_id:
+                # The buffer finishes one utterance before opening the next,
+                # so this is stale state that must not leak.
+                self._forget(self._open_asr_id)
+            self._open_asr_id = utterance_id
 
-        # Keep only the configured rolling tail. The ASR still needs the position
-        # of that tail relative to the beginning of the complete utterance.
         window = partial.tail(PARTIAL_WINDOW_SECONDS)
-        window_start_seconds = self._partial_window_start_seconds(
-            partial,
-            window,
-        )
+        window_start_seconds = max(
+            0.0, (window.start_ms - partial.start_ms) / 1000.0)
 
         spent: dict[str, float] = {}
-        lang_code = ""
-
-        if self.language_identifier is not None:
-            # A partial is shorter than a final utterance, so use the last known
-            # meeting language whenever LID cannot make a confident decision.
-            with self._timed("partial_language", spent):
+        lang_code = self._open_language
+        if not lang_code and self.language_identifier is not None:
+            # Asked until it answers confidently, then not again for this
+            # utterance: consecutive decodes forced into different languages
+            # never agree, so nothing would ever be committed.
+            with self._stage("partial_language", spent):
                 decision = self.language_identifier.identify(window.pcm)
+                if decision.known:
+                    self._open_language = decision.lang_code
+                lang_code = self._language_for(decision)
+        elif not lang_code:
+            lang_code = self._last_language
 
-            if decision.known:
-                self._last_language = decision.lang_code
-
-            lang_code = self._language_for(decision)
-
-        with self._timed("partial_asr", spent):
+        events: tuple = ()
+        with self._stage("partial_asr", spent):
             events = self.transcriber.process_partial(
                 window.pcm,
                 utterance_id=utterance_id,
                 window_start_seconds=window_start_seconds,
                 lang_code=lang_code,
             )
-
         self._report_if_partial_slow(window, spent)
 
-        # process_partial() normally returns an optional committed event followed
-        # by exactly one partial event. Only the latest partial should be placed on
-        # the replace-only WebSocket channel.
-        partial_event = next(
-            (
-                event
-                for event in reversed(events)
-                if event.kind == "partial"
-            ),
-            None,
-        )
-
-        if partial_event is None:
+        latest = next((event for event in reversed(events)
+                       if event.kind == "partial"), None)
+        if latest is None:
             return []
 
-        running_text = self._running_transcript_text(partial_event)
-
-        # An empty partial is meaningful: it clears an older unstable hypothesis.
-        # Therefore do not suppress the message merely because running_text is
-        # empty.
-        self.stats.transcripts += int(bool(running_text.strip()))
-
-        return [
-            make_partial(
-                "",
-                partial_event.lang_code,
-                running_text,
-            )
-        ]
+        running = latest.running_text
+        if not running and not self._open_running:
+            return []
+        self._open_running = running
+        if running:
+            self.stats.running_texts += 1
+        # An empty one is sent once, to clear what the screen still shows.
+        return [make_partial("", latest.lang_code, running)]
 
     def _report_if_partial_slow(self, partial, spent: dict) -> None:
         """Say so when the running text is what held up the connection."""
@@ -718,16 +781,9 @@ class ServerSession:
     def _finalise(self) -> list[str]:
         """Close the last segment and settle every outstanding translation.
 
-        Used by both ``bye`` and ``finish``, and it has to be, because the
-        socket closes as soon as ``bye`` is answered. The last sentence of a
-        meeting is committed here and queued for translation here; if the
-        answer is collected any later there is nowhere left to send it. On the
-        run that found this, the final sentence arrived and its translation
-        never did - the connection was already shut.
-
-        Stopping the worker waits for the sentence in flight (about 0.2 s) and
-        accounts for anything still queued, so every sentence gets an answer
-        even if the answer is "the meeting ended first".
+        Used by both ``bye`` and ``finish``, because the socket closes as
+        soon as ``bye`` is answered: the last sentence of a meeting is
+        committed here and its translation collected here, or never sent.
         """
         messages = self._close_segment()
         if self.worker is not None:
@@ -764,7 +820,8 @@ class ServerSession:
         self.stats.events_sent += len(messages)
         if self.buffer is not None:
             messages += self._safely_announce(
-                self.buffer.flush(FinalizeReason.END_OF_STREAM)
+                self.buffer.flush(FinalizeReason.END_OF_STREAM,
+                                  out.trailing_silence_ms)
             )
         return messages
 

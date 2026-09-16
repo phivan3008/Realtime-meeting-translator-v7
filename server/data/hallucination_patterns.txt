@@ -1,0 +1,55 @@
+# Câu Whisper bịa ra — DANH SÁCH CHẶN THEO MẪU (biểu thức chính quy)
+#
+# Dùng khi cùng một câu bịa xuất hiện với một chỗ thay đổi được — thường là
+# tên kênh. Khớp nguyên câu sau khi bỏ dấu câu và gộp khoảng trắng; chữ hoa
+# chữ thường không phân biệt.
+#
+# VÌ SAO CẦN: danh sách nguyên câu để lọt "Hãy subscribe cho kênh La La School
+# Để không bỏ lỡ những video hấp dẫn" hai lần chạy sau khi bản "Ghiền Mì Gõ"
+# đã được thêm. Tên kênh là một cái khe, và tên kênh thì vô hạn.
+#
+# CÁCH VIẾT AN TOÀN:
+#   - Neo cả câu. Mẫu được khớp bằng fullmatch, đừng thêm .* ở hai đầu.
+#   - Giới hạn độ dài khe: .{1,40} chứ không phải .*  — nếu không mẫu sẽ nuốt
+#     cả những câu dài không liên quan.
+#   - Giữ đủ phần đuôi đặc trưng. "hãy đăng ký kênh .*" một mình sẽ chặn cả
+#     "Hãy đăng ký kênh Teams cho dự án này", là câu họp hợp lệ.
+#   - Viết cả biến thể có dấu và không dấu: [ãa], [ểe], [ủu]... vì Whisper
+#     thường bỏ dấu khi nghe không rõ. Nhớ cả phụ âm: đ -> [đd], vì bỏ
+#     dấu tiếng Việt bỏ luôn gạch ngang của đ.
+#
+# THỬ TRƯỚC KHI THÊM:
+#   python3.11 -c "import sys; sys.path.insert(0,'.'); \
+#     from server.pipeline.asr import Transcriber, Piece; \
+#     t=Transcriber(decoder=object()); \
+#     print(t._refuse(Piece(text='CÂU CẦN THỬ', avg_logprob=-0.15, \
+#       no_speech_prob=0.02, compression_ratio=1.5)))"
+#   In ra 'known hallucination' nghĩa là bị chặn.
+
+# Thấy hai lần, hai tên kênh khác nhau. Có thể mở đầu bằng một lời gọi -
+# "Các bạn hãy ..." xuất hiện hai lần trong một cuộc họp, và mẫu neo cả câu
+# nên chỉ hai chữ ở đầu là đủ để lọt.
+((c[áa]c b[ạa]n|m[ọo]i ng[ưu][ờo]i) )?h[ãa]y subscribe cho k[êe]nh .{1,40} [đd][ểe] kh[ôo]ng b[ỏo] l[ỡo] nh[ữu]ng video h[ấa]p d[ẫa]n
+
+# Thấy một lần. Tên kênh là tuỳ chọn — bản gặp phải không có tên nào.
+# Lý do đăng ký cũng là một khe: đã gặp "để ủng hộ kênh của mình" và "để nhận
+# thêm nhiều video". Cả hai được viết rõ thay vì để khe tự do, vì "Hãy đăng ký
+# kênh Teams để nhận báo cáo" là câu một cuộc họp có thể nói.
+((c[áa]c b[ạa]n|m[ọo]i ng[ưu][ờo]i) )?h[ãa]y [đd][ăa]ng k[ýy] k[êe]nh( .{1,40})? [đd][ểe] ([ủu]ng h[ộo] k[êe]nh c[ủu]a m[ìi]nh|nh[ậa]n th[êe]m nhi[ềe]u video)( nh[ée])?
+
+# Ba biến thể nữa lọt qua mẫu trên trong một lần chạy: "Các bạn nhớ đăng ký...",
+# "Các bạn hãy đăng ký...", và "...ủng hộ kênh mình nhé" (không có "của").
+# Mẫu trên neo vào chữ "hãy" ở đầu câu và đòi đúng "của mình", nên phần mở đầu
+# thay đổi được là lọt. Phần bất biến nằm ở hai cụm giữa và cuối, nên neo vào
+# đó và cho phần đầu tự do trong giới hạn.
+.{0,30}[đd][ăa]ng k[ýy] k[êe]nh.{0,45}[ủu]ng h[ộo] k[êe]nh.{0,20}m[ìi]nh.{0,10}
+
+# Ba biến thể trong cùng một lần chạy mười phút. Khe nằm ở mệnh đề giữa
+# ("like, share và đăng ký kênh" / "like và share video này" / "đăng ký kênh").
+c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,30}
+
+# Cùng một câu kết video với đủ kiểu đuôi, gặp trong một lần chạy:
+# "...đã xem.", "...đã xem video.", "...đã xem video này.". Đuôi bị giới hạn
+# vào đúng những kiểu đã gặp, nên "Cảm ơn các bạn đã xem bản demo này" —
+# một câu họp hợp lệ — vẫn được giữ.
+c[ảa]m [ơo]n c[áa]c b[ạa]n [đd][ãa] (xem|theo d[õo]i)( video( n[àa]y)?| v[àa] h[ẹe]n g[ặa]p l[ạa]i)?

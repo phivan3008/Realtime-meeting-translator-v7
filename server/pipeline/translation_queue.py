@@ -59,7 +59,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from server.config import (
     TRANSLATION_MAX_LAG_SECONDS,
@@ -79,6 +79,9 @@ class Job:
     speaker_id: str
     #: When the sentence was committed, on the queue's clock.
     submitted_at: float
+    #: The meeting as it stood when the sentence was committed, or None for
+    #: a translator that keeps its own.
+    history: Optional[tuple] = None
 
     def age(self, now: float) -> float:
         return now - self.submitted_at
@@ -134,13 +137,16 @@ class TranslationQueue:
         return len(self._waiting)
 
     def submit(self, sentence_id: int, text: str, lang_code: str,
-               speaker_id: str = "") -> Optional[Done]:
+               speaker_id: str = "",
+               history: Optional[Sequence] = None) -> Optional[Done]:
         """Accept a sentence, or say why it was not accepted.
 
         Returns a :class:`Done` when the sentence is refused outright, so the
         client hears about it in the same breath as the sentence itself.
         """
         self.stats.submitted += 1
+        job = Job(sentence_id, text, lang_code, speaker_id, self.clock(),
+                  None if history is None else tuple(history))
         if len(self._waiting) >= self.depth:
             # The oldest is the least useful, so it goes rather than the
             # newest: dropping the newest would keep a backlog nobody can
@@ -151,8 +157,7 @@ class TranslationQueue:
                 "Translation queue full at %d; dropping sentence %d "
                 "(waited %.1f s)",
                 self.depth, evicted.sentence_id, evicted.age(self.clock()))
-            self._waiting.append(
-                Job(sentence_id, text, lang_code, speaker_id, self.clock()))
+            self._waiting.append(job)
             self.stats.deepest = max(self.stats.deepest, len(self._waiting))
             return Done(
                 sentence_id=evicted.sentence_id,
@@ -160,8 +165,7 @@ class TranslationQueue:
                 lag_seconds=evicted.age(self.clock()),
             )
 
-        self._waiting.append(
-            Job(sentence_id, text, lang_code, speaker_id, self.clock()))
+        self._waiting.append(job)
         self.stats.deepest = max(self.stats.deepest, len(self._waiting))
         return None
 
@@ -251,9 +255,11 @@ class TranslationWorker:
         self._thread.start()
 
     def submit(self, sentence_id: int, text: str, lang_code: str,
-               speaker_id: str = "") -> None:
+               speaker_id: str = "",
+               history: Optional[Sequence] = None) -> None:
         with self._lock:
-            refused = self.queue.submit(sentence_id, text, lang_code, speaker_id)
+            refused = self.queue.submit(sentence_id, text, lang_code,
+                                        speaker_id, history)
         if refused is not None:
             self._done.put(refused)
         if self.inline:
@@ -313,8 +319,13 @@ class TranslationWorker:
         if job is None:
             return False
         try:
-            result = self.translator.translate(job.text, job.lang_code,
-                                               job.speaker_id)
+            if job.history is None:
+                result = self.translator.translate(job.text, job.lang_code,
+                                                   job.speaker_id)
+            else:
+                result = self.translator.translate(job.text, job.lang_code,
+                                                   job.speaker_id,
+                                                   history=job.history)
         except Exception:
             # A bug here must not take the worker down with it: the meeting
             # would then lose every translation after this one, silently.

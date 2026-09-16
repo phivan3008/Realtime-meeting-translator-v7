@@ -795,3 +795,129 @@ def test_an_unknown_target_is_not_judged_on_length():
     """No measurements exist for it, and borrowing another pair's number
     would be a guess."""
     assert make("x").length_limit("x" * 10, "de") == float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Echoes, and the retry that diagnoses them
+#
+# On a thirty-minute run 18 sentences came back untranslated with a history
+# in the prompt, and 9 of them translated on a second try without it.
+# ---------------------------------------------------------------------------
+from server.pipeline.translate import HISTORY_HEADER  # noqa: E402
+
+
+def last_line(messages) -> str:
+    return messages[-1]["content"].rsplit("\n", 1)[-1]
+
+
+class EchoesWithHistory:
+    """Hands the sentence back when the prompt carries earlier lines."""
+
+    def __init__(self, answer: str = "こんにちは") -> None:
+        self.answer = answer
+        self.prompts: list[str] = []
+
+    def complete(self, messages) -> str:
+        self.prompts.append(messages[-1]["content"])
+        if HISTORY_HEADER in messages[-1]["content"]:
+            return last_line(messages)
+        return self.answer
+
+
+class AlwaysEchoes:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages) -> str:
+        self.calls += 1
+        return last_line(messages)
+
+
+def with_history(backend) -> Translator:
+    made = Translator(backend=backend)
+    made.context.remember(Turn("Speaker_01", "vi", "Câu một.", ""))
+    made.context.remember(Turn("Speaker_01", "vi", "Câu hai.", ""))
+    return made
+
+
+def test_an_echo_is_retried_without_the_history():
+    backend = EchoesWithHistory()
+    result = with_history(backend).translate("Bác đang làm một cái tool.", "vi")
+    assert result.text == "こんにちは"
+    assert len(backend.prompts) == 2
+    assert HISTORY_HEADER not in backend.prompts[1]
+
+
+def test_a_rescued_translation_is_counted():
+    made = with_history(EchoesWithHistory())
+    made.translate("Bác đang làm một cái tool.", "vi")
+    assert made.stats.retried == 1
+    assert made.stats.rescued == 1
+
+
+def test_a_sentence_the_model_will_not_translate_is_still_refused():
+    backend = AlwaysEchoes()
+    made = with_history(backend)
+    result = made.translate("Bác đang làm một cái tool.", "vi")
+    assert result.text == ""
+    assert backend.calls == 2, "it retried more than once"
+    assert made.stats.rescued == 0
+
+
+def test_nothing_is_retried_when_there_was_no_history_to_remove():
+    """A second identical call would cost a round trip and learn nothing."""
+    backend = AlwaysEchoes()
+    Translator(backend=backend).translate("Bác đang làm một cái tool.", "vi")
+    assert backend.calls == 1
+
+
+def test_a_refusal_that_is_not_an_echo_is_not_retried():
+    class Rambles:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages):
+            self.calls += 1
+            return "Sure! " + "very long explanation " * 40
+
+    backend = Rambles()
+    with_history(backend).translate("Bác đang làm một cái tool.", "vi")
+    assert backend.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# The history a queued sentence is translated with
+# ---------------------------------------------------------------------------
+def test_a_given_history_is_the_one_shown():
+    backend = StubBackend("はい")
+    made = Translator(backend=backend)
+    made.context.remember(Turn("Speaker_09", "vi", "Không được thấy.", ""))
+    made.translate("Vâng.", "vi",
+                   history=[Turn("Speaker_01", "vi", "Câu trước.", "")])
+    prompt = backend.calls[0][-1]["content"]
+    assert "Câu trước." in prompt
+    assert "Không được thấy." not in prompt
+
+
+def test_a_given_history_is_not_added_to():
+    """Whoever passes the history owns it. Remembering here as well put every
+    translated line into the history twice."""
+    made = Translator(backend=StubBackend("はい"))
+    made.translate("Vâng.", "vi", history=[])
+    assert made.context.turns == []
+
+
+def test_an_empty_given_history_means_no_history():
+    backend = StubBackend("はい")
+    made = Translator(backend=backend)
+    made.context.remember(Turn("Speaker_01", "vi", "Câu một.", ""))
+    made.translate("Vâng.", "vi", history=())
+    assert HISTORY_HEADER not in backend.calls[0][-1]["content"]
+
+
+def test_the_snapshot_does_not_follow_later_changes():
+    context = TranslationContext()
+    context.remember(Turn("Speaker_01", "vi", "một", ""))
+    taken = context.snapshot()
+    context.remember(Turn("Speaker_01", "vi", "hai", ""))
+    assert [turn.source for turn in taken] == ["một"]
