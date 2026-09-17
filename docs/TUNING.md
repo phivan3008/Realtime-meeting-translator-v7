@@ -701,7 +701,8 @@ Hai điều nữa đổi so với lần chạy đó:
 Ba luật, mỗi luật có test dựng lại từ đúng những câu đó:
 
 - **Ngôn ngữ của chữ mờ** được chốt khi `ASR_STREAM_LANGUAGE_VOTES` cửa sổ
-  liên tiếp cùng chắc chắn một ngôn ngữ, và **đổi** khi chừng ấy cửa sổ cùng
+  liên tiếp cùng **chắc chắn** (biên ≥ `ASR_LANGUAGE_OVERRIDE_MARGIN`) một
+  ngôn ngữ — câu trả lời yếu không được bỏ phiếu, và **đổi** khi chừng ấy cửa sổ cùng
   chắc chắn ngôn ngữ kia — chữ mờ khi đó bắt đầu lại (`running texts restarted
   in another language`). LID vẫn chạy mỗi cửa sổ; nó rẻ (vài giây cho 30 phút).
 - **Chỉ các lần giải mã cùng ngôn ngữ** được so khớp và hợp nhất với nhau. Câu
@@ -743,6 +744,22 @@ của cả câu, và lần chạy 09-16 cho thấy đúng điều đó.
 - `ASR_STREAM_LANGUAGE_VOTES` tăng: chốt chắc hơn, chữ mờ ở đầu câu đổi ngôn
   ngữ lâu hơn và chữ chốt tới muộn hơn.
 
+- **Phép cắt ở cuối câu phải khớp với chữ mờ.** Mỗi cửa sổ chữ mờ có câu trả
+  lời LID chắc chắn được ghi lại kèm khoảng thời gian của nó. Nếu đa số cửa sổ
+  (tính theo điểm giữa) nằm trong một nửa nói ngôn ngữ khác với ngôn ngữ phép
+  cắt gán cho nửa đó, câu **không bị cắt** (`refused by the running text`).
+  Nửa không có cửa sổ chắc chắn nào thì không có gì để phản bác.
+
+> **Đo được (09-17 lần 2):** `lost_turns` 21 → 9, câu lệch ngôn ngữ 24 → 14.
+> Còn lại trong bản phát lại: câu #2 có chữ mờ tiếng Việt đúng từ 10.6 s tới
+> 16.0 s sau một cửa sổ tiếng Nhật, và câu chốt chỉ còn `はい、で、ウェル` —
+> phép cắt cuối câu đã tin vài lần thăm dò của nó hơn bảy cửa sổ chữ mờ. Và
+> #32 bị đếm là mất lượt chỉ vì chữ mờ tiếng Nhật mang nhãn `[vi]`: số đo giờ
+> xét ngôn ngữ theo **chữ viết**, không theo nhãn.
+
+Bản phát lại ghi thêm `streaming.server.log` cạnh nhật ký: mọi lần cắt, lần từ
+chối cắt, lần đổi ngôn ngữ và nửa cắt ra rỗng đều nằm ở đó.
+
 - `ASR_LANGUAGE_OVERRIDE_MARGIN` giảm: LID của cả câu thắng chữ mờ thường hơn,
   kể cả khi nó sai; tăng: câu thật sự đổi ngôn ngữ ở cuối bị giữ ngôn ngữ đầu.
 
@@ -750,7 +767,9 @@ của cả câu, và lần chạy 09-16 cho thấy đúng điều đó.
 họp, hoặc `server/tests_real/test_real_streaming.py` trên pod. Hai dòng của
 bảng dành cho đúng chuyện này: `mixed_language` (câu có cả tiếng Nhật lẫn chữ
 tiếng Việt) và `lost_turns` (câu mà chữ mờ đã hiện ít nhất ba lần một ngôn ngữ
-khác, mỗi lần từ sáu ký tự trở lên — tiếng đệm không tính). Mốc: 09-11 có 11
+khác, mỗi lần từ sáu ký tự trở lên — tiếng đệm không tính). Ngôn ngữ của một
+dòng chữ mờ được xét theo chữ viết (kana/kanji, hoặc chữ có dấu tiếng Việt),
+không theo nhãn. Mốc: 09-11 có 11
 `lost_turns`, 09-16 có 11, 09-17 có 21.
 
 - `ASR_STREAM_MIN_AGREEMENT` tăng: chữ chốt chắc hơn và chậm hơn — mỗi bậc thêm

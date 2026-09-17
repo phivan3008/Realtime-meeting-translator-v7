@@ -352,3 +352,34 @@ def test_a_turn_the_running_text_showed_and_the_sentence_lost_is_found(
     run = debuglog.parse(path)
     assert [final.lost_turn for final in run.finals] == ["vi", ""]
     assert debuglog.measure(run)["lost_turns"] == 1
+
+
+SCRIPT_TAGGED = """\
+08:00:00.000      0.0s  start       session=?
+08:00:01.000    167.2s  partial     [vi] Nói mẹ
+08:00:01.000    170.4s  partial     [vi] ベンマックの戦略として
+08:00:01.000    171.0s  partial     [vi] マップの制作として
+08:00:01.000    171.2s  partial     [vi] マップの制作として
+08:00:01.000    171.4s  final       #32 Speaker_01 [ja] マの択として
+"""
+
+
+def test_a_running_text_is_judged_by_its_script_not_its_tag(tmp_path):
+    """09-17 replay #32: Japanese running text tagged [vi], which counted as
+    a lost Vietnamese turn."""
+    path = tmp_path / "tagged.debug.txt"
+    path.write_text(SCRIPT_TAGGED, encoding="utf-8")
+    final = debuglog.parse(path).finals[0]
+    assert final.lost_turn == ""
+    assert final.partial_language == "ja"
+    assert not final.language_disagrees
+
+
+@pytest.mark.parametrize("text, tag, language", [
+    ("マップの制作として", "vi", "ja"),
+    ("Đi kiểm chứng tiếp", "ja", "vi"),
+    ("OK", "vi", "vi"),
+    ("", "ja", "ja"),
+])
+def test_the_script_decides_the_language(text, tag, language):
+    assert debuglog.written_in(text, tag) == language

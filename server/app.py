@@ -329,10 +329,11 @@ def _log_summary(session: ServerSession) -> None:
         log.info("Session %s language splits: %d of %d utterances held two "
                  "languages (%d one language, %d undecided at an end, "
                  "%d too short, %d would leave a fragment, %d refused on "
-                 "review), %d probes",
+                 "review, %d refused by the running text), %d probes",
                  session.session_id or "?", split.split, split.checked,
                  split.one_language, split.undecided, split.too_short,
-                 split.sliver, split.refused_on_review, split.probes)
+                 split.sliver, split.refused_on_review,
+                 stats.language_splits_refused, split.probes)
     if stats.language_flips or stats.running_language_changes:
         log.warning("Session %s: %d sentence(s) decoded whole again in the "
                     "language the LID was sure of; %d running text(s) "

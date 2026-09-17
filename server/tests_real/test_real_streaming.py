@@ -43,6 +43,7 @@ confirmed to be the same meeting, and only on the stretch the replay covers.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 import wave
@@ -205,7 +206,9 @@ def check(session: ServerSession, debug_path: Path, audio_seconds: float,
     report.note("sentences", f"{found['sentences']} from "
                 f"{stats.utterances} utterances, {stats.running_texts} "
                 f"running texts")
-    report.note("language", f"{stats.language_splits} utterances split, "
+    report.note("language", f"{stats.language_splits} utterances split "
+                f"({stats.language_splits_refused} refused by the running "
+                f"text), "
                 f"{stats.language_flips} sentences decoded again in the "
                 f"LID's language, {stats.running_language_changes} running "
                 f"texts changed language, {stats.running_language_cuts} "
@@ -344,13 +347,29 @@ def main() -> int:
             raise RuntimeError("cannot replay without the VAD and Whisper")
 
         clock = [0.0]
+        # What the session decided and why, next to the replayed log: the
+        # splits, the language changes and the empty halves are only here.
+        server_log = args.out.with_name(args.out.stem.split(".")[0]
+                                        + ".server.log")
+        server_log.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(server_log, mode="w", encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        server_logger = logging.getLogger("server")
+        server_logger.addHandler(handler)
+        server_logger.setLevel(logging.INFO)
+        print(f"  server log at {server_log}")
         # Written by the server package itself: the pod does not need the
         # client package to replay a meeting.
         recorder = LogWriter(args.out, clock=lambda: clock[0])
         print("\nReplaying:")
         started = time.perf_counter()
-        session = replay(pcm, loaded, recorder, clock)
-        recorder.close()
+        try:
+            session = replay(pcm, loaded, recorder, clock)
+        finally:
+            recorder.close()
+            server_logger.removeHandler(handler)
+            handler.close()
         print(f"  done in {time.perf_counter() - started:.1f} s; "
               f"log at {args.out}")
 

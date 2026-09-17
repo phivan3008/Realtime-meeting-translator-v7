@@ -717,3 +717,106 @@ def test_a_sure_window_is_used_before_the_language_is_fixed():
     speak(session, 4)
     decoder = session.transcriber.decoder
     assert [c["lang"] for c in decoder.calls if c["beam"] == 1] == ["ja"]
+
+
+# ---------------------------------------------------------------------------
+# The cut at the end of a sentence has to agree with the running text
+#
+# 09-17 replay #2: "Tắt cấp tắt quân quay... thì vẫn đang bending" in the
+# running text from 10.6 s to 16.0 s, one Japanese window before it, and a
+# sentence of "はい、で、ウェル" with nothing after it.
+# ---------------------------------------------------------------------------
+class EndSplitter:
+    """Declines while the utterance is open; cuts it when it is finished."""
+
+    def __init__(self, first, second, at_ms):
+        from server.pipeline.language_split import SplitStats
+        self.stats = SplitStats()
+        self.first, self.second, self.at_ms = first, second, at_ms
+
+    def find(self, pcm, hangover_ms=0.0):
+        if hangover_ms == 0.0:
+            return None                  # the live cut: not this test
+        return Split(at=int(self.at_ms * 32), first=self.first,
+                     second=self.second, probes=7)
+
+    def reset(self):
+        pass
+
+
+def ending_session(windows, splitter):
+    lid = ScriptedLID(*windows)
+    session = session_with(vad_script=[0.9] * 150 + [0.02] * 30,
+                           transcriber=Transcriber(decoder=Decoder(), prompt=""),
+                           language_identifier=lid)
+    session.language_splitter = splitter
+    return session
+
+
+def test_a_cut_the_running_text_contradicts_is_refused():
+    session = ending_session(("ja", "vi", "vi", "vi", "vi", "vi", "vi", "vi"),
+                             EndSplitter("ja", "vi", at_ms=4000))
+    finals = of_type(speak(session, 32), "final")
+    assert len(finals) == 1, "the sentence was cut anyway"
+    assert finals[0]["lang_code"] == "vi"
+    assert session.stats.language_splits == 0
+    assert session.stats.language_splits_refused == 1
+
+
+def test_a_cut_the_running_text_agrees_with_is_taken():
+    session = ending_session(("vi", "vi", "vi", "vi", "ja", "ja", "ja", "ja"),
+                             EndSplitter("vi", "ja", at_ms=2600))
+    finals = of_type(speak(session, 32), "final")
+    assert [f["lang_code"] for f in finals] == ["vi", "ja"]
+    assert session.stats.language_splits == 1
+    assert session.stats.language_splits_refused == 0
+
+
+def test_a_cut_over_a_half_the_running_text_never_heard_is_taken():
+    """A short last turn has no sure window of its own."""
+    session = ending_session(("vi",) * 8, EndSplitter("vi", "ja", at_ms=4700))
+    finals = of_type(speak(session, 32), "final")
+    assert [f["lang_code"] for f in finals] == ["vi", "ja"]
+
+
+def test_unsure_windows_are_not_evidence_against_a_cut():
+    class Unsure(ScriptedLID):
+        def identify(self, pcm: bytes) -> LanguageDecision:
+            self.calls += 1
+            return LanguageDecision("ja", 0.6, 0.35, "weak")
+
+    session = session_with(vad_script=[0.9] * 150 + [0.02] * 30,
+                           transcriber=Transcriber(decoder=Decoder(), prompt=""),
+                           language_identifier=Unsure())
+    session.language_splitter = EndSplitter("vi", "ja", at_ms=2600)
+    finals = of_type(speak(session, 32), "final")
+    assert len(finals) == 2
+    assert session.stats.language_splits_refused == 0
+
+
+def test_the_windows_are_forgotten_with_their_utterance():
+    session = ending_session(("vi",), EndSplitter("vi", "ja", at_ms=1000))
+    speak(session, 32)
+    assert session._open_windows == []
+
+
+# ---------------------------------------------------------------------------
+# Only sure answers fix the running text's language
+# ---------------------------------------------------------------------------
+def test_weak_answers_do_not_fix_the_running_texts_language():
+    """09-17 replay #32: two weak Vietnamese answers fixed Vietnamese over a
+    Japanese speaker, and the running text invented a sentence in it."""
+    class Weak(ScriptedLID):
+        def identify(self, pcm: bytes) -> LanguageDecision:
+            self.calls += 1
+            return LanguageDecision("vi", 0.6, 0.35, "weak")
+
+    session = session_with(vad_script=[0.9] * 200,
+                           transcriber=Transcriber(decoder=Decoder(), prompt=""),
+                           language_identifier=Weak())
+    session.language_splitter = None
+    session._last_language = "ja"
+    speak(session, 15)
+    assert session._open_language == ""
+    decoder = session.transcriber.decoder
+    assert set(c["lang"] for c in decoder.calls if c["beam"] == 1) == {"ja"}

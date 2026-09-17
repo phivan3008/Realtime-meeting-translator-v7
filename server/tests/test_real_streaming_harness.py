@@ -176,3 +176,14 @@ def test_a_sentence_mixing_the_languages_is_caught(monkeypatch, tmp_path,
     run_main(monkeypatch, tmp_path, "これは| có| thểです")
     out = capsys.readouterr().out
     assert "[FAIL] No sentence mixes Japanese and Vietnamese" in out
+
+
+
+def test_the_replay_keeps_the_servers_own_log(monkeypatch, tmp_path, capsys):
+    """The splits and the empty halves are only in the server's log."""
+    run_main(monkeypatch, tmp_path, "今日は会議です")
+    log = tmp_path / "out" / "streaming.server.log"
+    assert log.exists()
+    import logging
+    assert not any(isinstance(handler, logging.FileHandler)
+                   for handler in logging.getLogger("server").handlers)

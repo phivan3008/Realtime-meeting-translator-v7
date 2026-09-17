@@ -160,7 +160,8 @@ hết cộng 200 ms.
   từng chữ.
 - Một từ thuộc phần đã chốt hay chưa được xét theo **điểm giữa** của nó, và bản
   sao của từ chốt cuối ở chỗ nối bị bỏ — không thì 45% câu mang một từ lặp đôi.
-- Ngôn ngữ của chữ mờ được chốt khi **hai cửa sổ liên tiếp** cùng chắc chắn, và
+- Ngôn ngữ của chữ mờ được chốt khi **hai cửa sổ liên tiếp** cùng chắc chắn (biên
+  ≥ 0.50), và
   đổi khi hai cửa sổ cùng chắc chắn ngôn ngữ kia (chữ mờ bắt đầu lại). Chốt ở
   một cửa sổ ngắn làm khoảng 30 câu tiếng Nhật hiện chữ mờ tiếng Việt bịa.
 - Chỉ các lần giải mã **cùng ngôn ngữ** được so khớp và hợp nhất — không còn câu
@@ -171,6 +172,8 @@ hết cộng 200 ms.
 - **Chữ mờ đổi ngôn ngữ thì cắt câu ngay tại đó** nếu phép cắt theo ngôn ngữ
   tìm được ranh giới: lượt đầu được chốt thành câu riêng, lượt sau đi tiếp.
   Chờ tới cuối câu mới cắt thì lượt kia thường mất.
+- Phép cắt **ở cuối câu** bị từ chối khi các cửa sổ chữ mờ chắc chắn nằm trong
+  một nửa nói ngôn ngữ khác với ngôn ngữ phép cắt gán cho nửa đó.
 - Khoảng trắng Whisper đặt giữa hai ký tự tiếng Nhật bị bỏ.
 - Hai nửa của một câu bị cắt theo ngôn ngữ được giải mã **nguyên nửa**, bằng
   ngôn ngữ phép thăm dò đã tìm cho nửa đó.

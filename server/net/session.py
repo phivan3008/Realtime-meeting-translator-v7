@@ -111,6 +111,9 @@ class ServerSessionStats:
     #: how many of those were cut there into two sentences.
     running_language_changes: int = 0
     running_language_cuts: int = 0
+    #: Cuts at the end of a sentence refused because the running text's sure
+    #: windows heard another language over one of the halves.
+    language_splits_refused: int = 0
     #: Labels the live matcher got wrong and clustering put right.
     speaker_corrections: int = 0
     #: Committed sentences with text. Running texts are counted apart:
@@ -467,6 +470,9 @@ class ServerSession:
         self._open_language = ""
         #: The run of confident window answers: (language, how many in a row).
         self._language_run: tuple = ("", 0)
+        #: Sure LID answers on the running text's windows, as (start, end in
+        #: ms from the utterance start, language).
+        self._open_windows: list = []
         #: What the screen is showing as running text, so an emptied one is
         #: cleared once rather than sent on every interval.
         self._open_running = ""
@@ -512,6 +518,13 @@ class ServerSession:
         messages = [self._utterance_message(utterance, found)]
         if found.transcript is not None and found.transcript.has_text:
             messages += self._commit_sentence(found)
+        elif language and found.transcript is not None:
+            # A half of a cut that says nothing is a turn lost to the cut.
+            log.info("Session %s: utterance %d (%.0f ms, %s, %s) came back "
+                     "empty; dropped %s", self.session_id or "?",
+                     utterance.index, utterance.duration_ms, language,
+                     utterance.reason.value,
+                     [reason for _piece, reason in found.transcript.dropped])
         self._report_if_slow(utterance, spent)
         return messages
 
@@ -530,6 +543,18 @@ class ServerSession:
                 utterance.pcm, hangover_ms=utterance.trailing_silence_ms)
         if split is None:
             return [(utterance, "")]
+        heard = self._window_languages(utterance.index, split.at_ms)
+        if heard[0] not in ("", split.first) or heard[1] not in ("", split.second):
+            # The running text heard something else over one of the halves,
+            # window after window. On a real meeting a cut like this put six
+            # seconds of Vietnamese into a half decoded as Japanese
+            # ("はい、で、ウェル") and nothing came out of the other.
+            self.stats.language_splits_refused += 1
+            log.info("Session %s: utterance %d: the cut heard %s then %s but "
+                     "the running text heard %s then %s; left whole",
+                     self.session_id or "?", utterance.index, split.first,
+                     split.second, heard[0] or "?", heard[1] or "?")
+            return [(utterance, "")]
 
         self.stats.language_splits += 1
         log.info("Session %s: utterance %d holds two languages (%s then %s); "
@@ -543,6 +568,28 @@ class ServerSession:
                      start_ms=utterance.start_ms + split.at_ms,
                      continues_previous=False), split.second),
         ]
+
+    def _window_languages(self, index: int, at_ms: float) -> tuple:
+        """What the running text's sure windows heard before and after a cut.
+
+        Each window counts for the side its middle falls on. Returns the
+        majority on each side, or "" where no sure window fell or the vote
+        was tied.
+        """
+        if self._open_asr_id != self._asr_id(index):
+            return "", ""
+        sides: tuple = ({}, {})
+        for start, end, lang in self._open_windows:
+            side = sides[0] if (start + end) / 2.0 < at_ms else sides[1]
+            side[lang] = side.get(lang, 0) + 1
+        found = []
+        for side in sides:
+            ranked = sorted(side.items(), key=lambda kv: -kv[1])
+            if not ranked or (len(ranked) > 1 and ranked[0][1] == ranked[1][1]):
+                found.append("")
+            else:
+                found.append(ranked[0][0])
+        return tuple(found)
 
     def _recluster_speakers(self) -> list[str]:
         """Cluster the meeting again and send back the labels that moved."""
@@ -767,6 +814,11 @@ class ServerSession:
         if self.language_identifier is not None:
             with self._stage("partial_language", spent):
                 decision = self.language_identifier.identify(window.pcm)
+                if self._sure(decision):
+                    self._open_windows.append((
+                        window.start_ms - partial.start_ms,
+                        window.end_ms - partial.start_ms,
+                        decision.lang_code))
                 lang_code, changed_from = self._running_language(
                     decision, utterance_id)
 
@@ -809,14 +861,17 @@ class ServerSession:
     def _running_language(self, decision, utterance_id: str) -> tuple:
         """The language for this window, and the one it replaced, if any.
 
-        Fixed once ``ASR_STREAM_LANGUAGE_VOTES`` confident answers in a row
+        Fixed once ``ASR_STREAM_LANGUAGE_VOTES`` sure answers in a row
         agree, and changed when as many agree on another language. Before it
         is fixed a window uses its own answer only when that answer is sure;
         otherwise the meeting's last language, because a weak answer forced
         on Whisper produced inventions in a language nobody was speaking.
         """
         changed_from = ""
-        if decision.known:
+        if self._sure(decision):
+            # Only sure answers vote. Two weak ones fixed Vietnamese over a
+            # Japanese speaker once, and the running text invented a sentence
+            # in it ("Bên mặt của nó sẽ là").
             language, count = self._language_run
             count = count + 1 if language == decision.lang_code else 1
             self._language_run = (decision.lang_code, count)
@@ -871,9 +926,14 @@ class ServerSession:
             messages += self._emit(utterance, None, before)
         self.stats.utterances += len(extra.finals)
         self._forget(old_id)
-        # The turn that has just begun keeps the votes it already won.
+        # The turn that has just begun keeps the votes it already won, and
+        # the windows that heard it, moved to its own timeline.
+        windows = [(start - split.at_ms, end - split.at_ms, lang)
+                   for start, end, lang in self._open_windows
+                   if (start + end) / 2.0 >= split.at_ms]
         self._open_language = after
         self._language_run = (after, ASR_STREAM_LANGUAGE_VOTES)
+        self._open_windows = windows
         self._report_if_partial_slow(partial, spent)
         return messages
 

@@ -93,7 +93,9 @@ class Final:
         forcing the wrong one does not fail loudly, it produces fluent text
         in a language nobody spoke.
         """
-        languages = [lang for lang, text, _at in self.partials if lang and text]
+        languages = [written_in(text, lang)
+                     for lang, text, _at in self.partials if text]
+        languages = [lang for lang in languages if lang]
         if not languages:
             return ""
         return Counter(languages).most_common(1)[0][0]
@@ -108,7 +110,8 @@ class Final:
         it. Short backchannels ("ừ ừ" for うん) do not count.
         """
         counts: dict = {}
-        for lang, text, _at in self.partials:
+        for tag, text, _at in self.partials:
+            lang = written_in(text, tag)
             if lang and lang != self.lang and len(text.replace(" ", "")) >= 6:
                 counts[lang] = counts.get(lang, 0) + 1
         for lang, count in counts.items():
@@ -257,6 +260,21 @@ def is_cjk(text: str) -> bool:
 
 #: A letter only Vietnamese writes: Latin with a diacritic, including đ.
 _VIETNAMESE = re.compile("[À-ɏḀ-ỿ]")
+
+
+def written_in(text: str, tag: str = "") -> str:
+    """The language a line is written in, judged from its script.
+
+    The tag a running text carries is the language it was decoded in, and
+    Whisper forced into Vietnamese still writes Japanese audio as Japanese
+    now and then: "マップの制作として" arrived tagged [vi]. The script says
+    what was on screen. Lines in neither script keep their tag.
+    """
+    if is_cjk(text):
+        return "ja"
+    if _VIETNAMESE.search(text):
+        return "vi"
+    return tag
 
 
 def is_mixed(text: str) -> bool:
