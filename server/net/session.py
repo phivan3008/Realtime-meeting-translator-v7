@@ -491,11 +491,18 @@ class ServerSession:
         for whole in result.finals:
             whole_id = self._asr_id(whole.index)
             parts = self._by_language(whole)
+            streamed = self._stream_language(whole_id) if len(parts) > 1 else ""
             for utterance, language in parts:
-                # After a split the running text belongs to the whole span,
-                # so each half is decoded on its own.
+                # A half in the running text's language is finished from the
+                # running text, like a whole sentence; the other half has
+                # nothing there and is decoded on its own.
+                use_stream = len(parts) == 1 or (bool(streamed)
+                                                 and language == streamed)
+                if use_stream:
+                    streamed = ""
                 messages += self._emit(
-                    utterance, whole_id if len(parts) == 1 else None, language)
+                    utterance, whole_id if use_stream else None, language,
+                    offset_ms=utterance.start_ms - whole.start_ms)
             self._forget(whole_id)
 
         if result.partial is not None:
@@ -509,12 +516,22 @@ class ServerSession:
         self.stats.events_sent += len(messages)
         return messages
 
-    def _emit(self, utterance, asr_id: Optional[str],
-              language: str) -> list[str]:
-        """One committed utterance through the pipeline and onto the wire."""
+    def _stream_language(self, asr_id: str) -> str:
+        if self.transcriber is None:
+            return ""
+        return self.transcriber.stream_language(asr_id)
+
+    def _emit(self, utterance, asr_id: Optional[str], language: str,
+              offset_ms: float = 0.0) -> list[str]:
+        """One committed utterance through the pipeline and onto the wire.
+
+        ``offset_ms`` is where the utterance starts on the timeline of the
+        running text named by ``asr_id``: non-zero for the second half of a
+        cut.
+        """
         spent: dict[str, float] = {}
         found = self._analyse(utterance, spent, asr_id=asr_id,
-                              language=language)
+                              language=language, offset_ms=offset_ms)
         messages = [self._utterance_message(utterance, found)]
         if found.transcript is not None and found.transcript.has_text:
             messages += self._commit_sentence(found)
@@ -610,7 +627,7 @@ class ServerSession:
         return [make_speakers(corrections)]
 
     def _analyse(self, utterance, spent: dict, asr_id: Optional[str] = None,
-                 language: str = "") -> Analysis:
+                 language: str = "", offset_ms: float = 0.0) -> Analysis:
         """Every stage that reads audio, in order, for one utterance.
 
         Each stage owns the whole of its block, result included: a stage that
@@ -674,13 +691,14 @@ class ServerSession:
 
         if self.transcriber is not None:
             with self._stage("asr", spent):
-                found.transcript = self._decode(utterance, found, asr_id)
+                found.transcript = self._decode(utterance, found, asr_id,
+                                                offset_ms)
                 if found.transcript.has_text:
                     self.stats.transcripts += 1
         return found
 
-    def _decode(self, utterance, found: Analysis,
-                asr_id: Optional[str]) -> Transcript:
+    def _decode(self, utterance, found: Analysis, asr_id: Optional[str],
+                offset_ms: float = 0.0) -> Transcript:
         """The committed sentence: the running text's work, finished."""
         assert self.transcriber is not None
         if asr_id is None:
@@ -695,10 +713,10 @@ class ServerSession:
         transcript = self.transcriber.finish_utterance(
             found.audio,
             utterance_id=asr_id,
-            utterance_start_seconds=0.0,
+            utterance_start_seconds=offset_ms / 1000.0,
             # Where the speech ended, not where the VAD's hangover did.
             # Whisper answers that half second of silence with words.
-            speech_end_seconds=(utterance.speech_end_ms
+            speech_end_seconds=(offset_ms + utterance.speech_end_ms
                                 - utterance.start_ms) / 1000.0,
             lang_code=found.lang_code,
         )
@@ -921,9 +939,13 @@ class ServerSession:
         old_id = self._asr_id(partial.index)
         messages = []
         for utterance in extra.finals:
-            # Decoded whole: the running text of the head was decoded in two
-            # languages and is dropped with it.
-            messages += self._emit(utterance, None, before)
+            # The running text is still in the language of the head - it has
+            # not been decoded in the new one yet - so the head is finished
+            # from it. Decoded again from nothing, a head once came back as
+            # an invented sign-off and was dropped.
+            streamed = self._stream_language(old_id) == before
+            messages += self._emit(utterance, old_id if streamed else None,
+                                   before)
         self.stats.utterances += len(extra.finals)
         self._forget(old_id)
         # The turn that has just begun keeps the votes it already won, and

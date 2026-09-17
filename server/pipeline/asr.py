@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import perf_counter
 from typing import Iterable, Literal, Optional, Protocol, Union
 
@@ -633,8 +633,12 @@ class StreamingTranscriber:
     ) -> Transcript:
         """Finalize one utterance without re-decoding committed audio.
 
-        ``full_pcm`` must start at ``utterance_start_seconds`` and contain the
-        complete utterance audio.
+        ``full_pcm`` must start at ``utterance_start_seconds``. It may be only
+        part of what the running text covered - one half of an utterance cut
+        in two - and then only the running text's words inside that part are
+        kept: a half decoded again from nothing once came back as
+        "TACCAP, TACCAP, ..." and was dropped, while the running text held the
+        right words all along.
 
         ``speech_end_seconds`` is relative to the utterance timeline and should
         come from the VAD, excluding its silence hangover. Audio beyond the
@@ -678,6 +682,7 @@ class StreamingTranscriber:
         full_samples = self._pcm_to_samples(full_pcm)
         audio_duration = full_samples.size / SAMPLE_RATE
         audio_end_seconds = utterance_start_seconds + audio_duration
+        self._keep_within(state, utterance_start_seconds, audio_end_seconds)
 
         effective_speech_end = (
             min(speech_end_seconds, audio_end_seconds)
@@ -760,6 +765,23 @@ class StreamingTranscriber:
         self._states.pop(utterance_id, None)
 
         return final
+
+    def _keep_within(self, state: UtteranceState, start: float,
+                     end: float) -> None:
+        """Keep only the running text's words whose middle lies in a span."""
+        def inside(word: Word) -> bool:
+            return start <= word.center <= end
+
+        state.committed_words = [word for word in state.committed_words
+                                 if inside(word)]
+        state.committed_end = (state.committed_words[-1].end
+                               if state.committed_words else start)
+        state.hypotheses = [
+            replace(hypothesis,
+                    words=tuple(word for word in hypothesis.words
+                                if inside(word)))
+            for hypothesis in state.hypotheses
+        ]
 
     def _restart(self, state: UtteranceState) -> None:
         """Forget what an utterance's running text worked out."""

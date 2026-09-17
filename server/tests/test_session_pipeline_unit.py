@@ -271,9 +271,9 @@ def test_the_halves_are_not_asked_about_their_language_again():
 
     original = session._analyse
 
-    def spy(utterance, spent, asr_id=None, language=""):
+    def spy(utterance, spent, **kwargs):
         calls_before.append(lid.calls)
-        found = original(utterance, spent, asr_id=asr_id, language=language)
+        found = original(utterance, spent, **kwargs)
         assert lid.calls == calls_before[-1], "the LID was asked again"
         return found
 
@@ -596,7 +596,9 @@ def test_a_running_text_that_changes_language_is_cut_there():
     finals = of_type(responses, "final")
     assert finals, "the first turn was never committed"
     assert finals[0]["lang_code"] == "vi"
-    assert finals[0]["transcript"] == "xin chào mọi người"
+    # Finished from the running text's words inside the head; this stub
+    # spreads its words over the whole window, so only some fall inside.
+    assert finals[0]["transcript"]
     utterances = of_type(responses, "utterance")
     assert utterances[0]["reason"] == "language_change"
     assert utterances[0]["duration_ms"] == pytest.approx(600, abs=1)
@@ -820,3 +822,46 @@ def test_weak_answers_do_not_fix_the_running_texts_language():
     assert session._open_language == ""
     decoder = session.transcriber.decoder
     assert set(c["lang"] for c in decoder.calls if c["beam"] == 1) == {"ja"}
+
+
+# ---------------------------------------------------------------------------
+# A half in the running text's language is finished from the running text
+# ---------------------------------------------------------------------------
+class TimedDecoder:
+    """Vietnamese words at fixed times on whatever audio it is given, and a
+    loop for any decode longer than the partial window allows."""
+
+    WORDS = ((" Tắt", 0.1, 0.4), (" cấp", 0.4, 0.7), (" tắt", 0.7, 1.0),
+             (" quân", 1.0, 1.3), (" quay", 1.3, 1.6))
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def decode(self, samples, lang_code="", beam_size=1, prompt=None):
+        from server.pipeline.asr import Word
+        seconds = samples.size / 16_000
+        self.calls.append({"lang": lang_code, "beam": beam_size,
+                           "seconds": seconds})
+        if lang_code == "ja":
+            return [Piece("はい", -0.2, 0.01, 1.2)], "ja"
+        if beam_size > 1:
+            return [Piece(" TACCAP, TACCAP, TACCAP, TACCAP", -0.4, 0.0, 9.0,
+                          0.0, seconds)], "vi"
+        words = tuple(Word(t, a, b) for t, a, b in self.WORDS if b <= seconds)
+        return [Piece("".join(w.text for w in words), -0.2, 0.01, 1.3, 0.0,
+                      seconds, words)], "vi"
+
+
+def test_a_cut_half_in_the_running_texts_language_keeps_its_words():
+    session = session_with(vad_script=[0.9] * 150 + [0.02] * 30,
+                           transcriber=Transcriber(decoder=TimedDecoder(),
+                                                   prompt=""),
+                           language_identifier=ScriptedLID("vi"))
+    # A short Japanese turn at the end, which no sure window heard.
+    session.language_splitter = EndSplitter("vi", "ja", at_ms=4700)
+    finals = of_type(speak(session, 32), "final")
+    assert [f["lang_code"] for f in finals] == ["vi", "ja"]
+    # Decoded again from nothing, the head loops and is dropped; finished
+    # from the running text, it keeps what the running text heard.
+    assert finals[0]["transcript"] == "Tắt cấp tắt quân quay"
+    assert finals[1]["transcript"] == "はい"

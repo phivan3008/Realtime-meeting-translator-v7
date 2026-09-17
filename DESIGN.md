@@ -175,8 +175,10 @@ hết cộng 200 ms.
 - Phép cắt **ở cuối câu** bị từ chối khi các cửa sổ chữ mờ chắc chắn nằm trong
   một nửa nói ngôn ngữ khác với ngôn ngữ phép cắt gán cho nửa đó.
 - Khoảng trắng Whisper đặt giữa hai ký tự tiếng Nhật bị bỏ.
-- Hai nửa của một câu bị cắt theo ngôn ngữ được giải mã **nguyên nửa**, bằng
-  ngôn ngữ phép thăm dò đã tìm cho nửa đó.
+- Mỗi nửa của một câu bị cắt theo ngôn ngữ mang ngôn ngữ phép thăm dò tìm cho
+  nó. Nửa cùng ngôn ngữ với chữ mờ được **chốt từ chữ mờ** (chỉ giữ các từ nằm
+  trong nửa đó); nửa kia được giải mã nguyên nửa. Giải mã lại từ đầu, một nửa
+  tiếng Việt từng ra `TACCAP, TACCAP, …` và mất trắng.
 
 **Whisper bịa, và bịa tự tin hơn khi phiên âm thật** — nên `no_speech_prob`
 **không được phép** tự nó loại đoạn nào, phải kèm điều kiện `avg_logprob`, đúng

@@ -717,7 +717,7 @@ Ba luật, mỗi luật có test dựng lại từ đúng những câu đó:
 - **Chữ mờ đổi ngôn ngữ thì cắt câu ở đó.** Ngay lúc đổi, phép cắt theo ngôn
   ngữ (mục 6) được hỏi trên phần audio đang mở; nếu nó thấy đúng cặp ngôn ngữ
   chữ mờ vừa thấy, nửa đầu được chốt thành câu riêng (lý do
-  `language_change`, giải mã nguyên nửa) và phần sau đi tiếp trong ngôn ngữ mới
+  `language_change`) và phần sau đi tiếp trong ngôn ngữ mới
   (`running texts changed language, N cut there`).
 
 > **Đo được (09-17, sau ba luật đầu):** câu lệch ngôn ngữ 37 → 24, câu trộn
@@ -756,6 +756,16 @@ của cả câu, và lần chạy 09-16 cho thấy đúng điều đó.
 > phép cắt cuối câu đã tin vài lần thăm dò của nó hơn bảy cửa sổ chữ mờ. Và
 > #32 bị đếm là mất lượt chỉ vì chữ mờ tiếng Nhật mang nhãn `[vi]`: số đo giờ
 > xét ngôn ngữ theo **chữ viết**, không theo nhãn.
+
+**Nửa câu cùng ngôn ngữ với chữ mờ được chốt từ chữ mờ**, như một câu không bị
+cắt: giữ những từ chữ mờ đã chốt có điểm giữa nằm trong nửa đó, chỉ giải mã lại
+phần đuôi. Nửa kia chữ mờ không có gì nên được giải mã nguyên nửa.
+
+> **Đo được (09-17 lần 3, `streaming.server.log`):** phép cắt đúng — `vi then
+> ja; cutting at 5556 ms` — nhưng nửa tiếng Việt giải mã lại từ đầu ra
+> `TACCAP, TACCAP, …`, bị lọc vì lặp, và mất trắng; chữ mờ đã chốt đúng
+> `Tắt cấp tắt quân quay một thì vẫn đang`. Một lần cắt lúc chữ mờ đổi ngôn ngữ
+> cũng vậy: nửa đầu 2.1 s ra `Cảm ơn các bạn đã theo dõi…` và bị chặn.
 
 Bản phát lại ghi thêm `streaming.server.log` cạnh nhật ký: mọi lần cắt, lần từ
 chối cắt, lần đổi ngôn ngữ và nửa cắt ra rỗng đều nằm ở đó.

@@ -418,3 +418,53 @@ def test_a_short_scrap_is_judged_on_no_speech_prob_alone_while_streaming():
     assert events[-1].running_text == ""
     final = transcriber.finish_utterance(audio(0.5), utterance_id="u")
     assert final.text == ""
+
+
+# ---------------------------------------------------------------------------
+# Finishing one half of an utterance from its running text
+#
+# 09-17 replay, utterance 1: cut into Vietnamese then Japanese, correctly; the
+# Vietnamese half decoded again from nothing came back as
+# "TACCAP, TACCAP, ..." and was dropped, while the running text held
+# "Tắt cấp tắt quân quay một thì vẫn đang".
+# ---------------------------------------------------------------------------
+LOOP = Piece(" TACCAP, TACCAP, TACCAP, TACCAP, TACCAP, TACCAP", -0.39, 0.0,
+             9.0, 0.0, 2.0)
+HEAD = ((" Tắt", 0.0, 0.3), (" cấp", 0.3, 0.6), (" tắt", 0.6, 0.9),
+        (" quân", 0.9, 1.2), (" quay", 1.2, 1.5))
+AFTER = (("はい", 3.0, 3.3), ("です", 3.3, 3.6))
+
+
+def test_the_head_keeps_the_running_texts_words_when_its_decode_loops():
+    transcriber, _ = make([piece(*HEAD, *AFTER)], [piece(*HEAD, *AFTER)],
+                          [LOOP])
+    for _ in range(2):
+        transcriber.process_partial(audio(4.0), utterance_id="u",
+                                    window_start_seconds=0.0, lang_code="vi")
+    final = transcriber.finish_utterance(audio(2.5), utterance_id="u",
+                                         speech_end_seconds=2.5,
+                                         lang_code="vi")
+    assert final.text == "Tắt cấp tắt quân quay"
+    assert "はい" not in final.text
+
+
+def test_the_tail_keeps_only_the_running_texts_words_after_the_cut():
+    words = HEAD + ((" thì", 2.6, 2.9), (" vẫn", 2.9, 3.2), (" đang", 3.2, 3.5))
+    transcriber, decoder = make([piece(*words)], [piece(*words)], [])
+    for _ in range(2):
+        transcriber.process_partial(audio(5.0), utterance_id="u",
+                                    window_start_seconds=0.0, lang_code="vi")
+    final = transcriber.finish_utterance(audio(1.5), utterance_id="u",
+                                         utterance_start_seconds=2.5,
+                                         speech_end_seconds=4.0,
+                                         lang_code="vi")
+    assert final.text == "thì vẫn đang"
+    # The tail was decoded from its own start, not from the head's.
+    assert decoder.calls[-1]["seconds"] == pytest.approx(1.5)
+
+
+def test_a_whole_utterance_is_untouched_by_the_span():
+    transcriber, _ = make([piece(*SENTENCE)])
+    committed_twice(transcriber)
+    final = transcriber.finish_utterance(audio(2.0), utterance_id="u")
+    assert final.text == "Hôm nay thì bác nói"
