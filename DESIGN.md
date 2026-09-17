@@ -165,8 +165,12 @@ hết cộng 200 ms.
   một cửa sổ ngắn làm khoảng 30 câu tiếng Nhật hiện chữ mờ tiếng Việt bịa.
 - Chỉ các lần giải mã **cùng ngôn ngữ** được so khớp và hợp nhất — không còn câu
   trộn hai thứ tiếng.
-- Câu chốt theo **LID của cả câu khi nó chắc chắn**; chữ mờ ở ngôn ngữ khác thì
-  bị bỏ và cả câu được giải mã lại. LID không chắc thì ngôn ngữ của chữ mờ đứng.
+- Câu chốt theo **LID của cả câu khi nó chắc chắn** (biên ≥ 0.50); chữ mờ ở
+  ngôn ngữ khác thì bị bỏ và cả câu được giải mã lại. Dưới đó thì ngôn ngữ của
+  chữ mờ đứng. Trước khi chốt, cửa sổ chỉ dùng câu trả lời LID có biên ≥ 0.50.
+- **Chữ mờ đổi ngôn ngữ thì cắt câu ngay tại đó** nếu phép cắt theo ngôn ngữ
+  tìm được ranh giới: lượt đầu được chốt thành câu riêng, lượt sau đi tiếp.
+  Chờ tới cuối câu mới cắt thì lượt kia thường mất.
 - Khoảng trắng Whisper đặt giữa hai ký tự tiếng Nhật bị bỏ.
 - Hai nửa của một câu bị cắt theo ngôn ngữ được giải mã **nguyên nửa**, bằng
   ngôn ngữ phép thăm dò đã tìm cho nửa đó.

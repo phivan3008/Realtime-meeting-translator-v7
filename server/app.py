@@ -336,9 +336,10 @@ def _log_summary(session: ServerSession) -> None:
     if stats.language_flips or stats.running_language_changes:
         log.warning("Session %s: %d sentence(s) decoded whole again in the "
                     "language the LID was sure of; %d running text(s) "
-                    "changed language part way",
+                    "changed language part way, %d cut there",
                     session.session_id or "?", stats.language_flips,
-                    stats.running_language_changes)
+                    stats.running_language_changes,
+                    stats.running_language_cuts)
     if session.transcriber is not None:
         asr = session.transcriber.stats
         log.info("Session %s ASR: %d finals (%d empty), %d commits, "

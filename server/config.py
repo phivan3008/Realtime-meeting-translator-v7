@@ -405,6 +405,14 @@ ASR_STREAM_HISTORY = 5
 #: thông tin về các bài hát...") while the LID on the whole sentence got the
 #: language right.
 ASR_STREAM_LANGUAGE_VOTES = 2
+#: The LID margin a language decision needs to overrule the running text: to
+#: decode a committed sentence again in another language, or to force a
+#: window before the running text's language is fixed. The same bar as a
+#: language cut. At the LID's own 0.30, a sentence whose running text had
+#: shown six seconds of correct Vietnamese was decoded again as Japanese
+#: ("はい、で、ウェル"); and single unsure windows put Vietnamese inventions over
+#: Japanese speech ("Bên mặt của nó sẽ là").
+ASR_LANGUAGE_OVERRIDE_MARGIN = 0.50
 
 # --- 8. Translation (DESIGN.md section 3.8) ---------------------------------
 # vLLM runs as its own process behind its OpenAI-compatible API, and this

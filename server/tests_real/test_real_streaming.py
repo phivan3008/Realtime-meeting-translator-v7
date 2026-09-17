@@ -78,6 +78,9 @@ MIN_UPDATE_SURVIVAL = 0.50
 #: sliding-window run of the same meeting sat at 2.7%; the first streaming
 #: run, with the language fixed on one window, at 12.8%.
 MAX_DISAGREE_SHARE = 0.05
+#: ... or this many sentences, whichever is more: on a three-minute replay of
+#: 35 sentences, 5% is a single one.
+MAX_DISAGREE_COUNT = 2
 #: Translations refused, with --translate. The baseline refused 3%.
 MAX_REFUSED_SHARE = 0.06
 
@@ -205,7 +208,8 @@ def check(session: ServerSession, debug_path: Path, audio_seconds: float,
     report.note("language", f"{stats.language_splits} utterances split, "
                 f"{stats.language_flips} sentences decoded again in the "
                 f"LID's language, {stats.running_language_changes} running "
-                f"texts changed language")
+                f"texts changed language, {stats.running_language_cuts} "
+                f"cut there")
     if session.language_splitter is not None:
         split = session.language_splitter.stats
         report.note("language split", f"{split.split}/{split.checked} cut; "
@@ -252,9 +256,18 @@ def check(session: ServerSession, debug_path: Path, audio_seconds: float,
                f"{found['mixed_language']} sentences")
     disagree = found["language_disagrees"] / max(found["sentences"], 1)
     report.add("Sentences mostly keep their running text's language",
-               disagree <= MAX_DISAGREE_SHARE,
+               disagree <= MAX_DISAGREE_SHARE
+               or found["language_disagrees"] <= MAX_DISAGREE_COUNT,
                f"{found['language_disagrees']} sentences ({disagree:.1%}), "
-               f"limit {MAX_DISAGREE_SHARE:.0%}")
+               f"limit {MAX_DISAGREE_SHARE:.0%} or {MAX_DISAGREE_COUNT}")
+    lost = [final for final in run.finals if final.lost_turn]
+    report.add("No turn the running text showed is missing from its sentence",
+               not lost,
+               f"{len(lost)} sentences"
+               + "".join(f"\n        #{final.sentence} [{final.lang}] "
+                         f"{final.text[:40]!r} lost [{final.lost_turn}] "
+                         f"{final.partials[-1][1][:40]!r}"
+                         for final in lost[:5]))
     report.add("The running text keeps what the reader is reading",
                found["update_survival"] >= MIN_UPDATE_SURVIVAL,
                f"{found['update_survival']:.1%} kept per update, "

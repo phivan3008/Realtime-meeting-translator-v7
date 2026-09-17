@@ -458,3 +458,36 @@ def test_flushing_leaves_no_half_open_state():
     manager.flush()
     assert not manager.is_open
     assert manager.flush().finals == []
+
+
+# ---------------------------------------------------------------------------
+# A cut where a second turn began
+# ---------------------------------------------------------------------------
+def test_a_cut_commits_the_head_and_keeps_the_tail_open():
+    buffer = manager()
+    original = ramp(800)
+    buffer.push(output(span(original, 1_000, opens=True)))
+    result = buffer.cut_at(300)
+    assert len(result.finals) == 1
+    head = result.finals[0]
+    assert head.reason is FinalizeReason.LANGUAGE_CHANGE
+    assert head.start_ms == 1_000
+    assert head.duration_ms == pytest.approx(300)
+    assert head.continues_previous is False
+    tail = buffer.flush().finals[0]
+    assert tail.start_ms == pytest.approx(1_300)
+    assert tail.continues_previous is False, "two people, not one sentence"
+    assert head.pcm + tail.pcm == original
+    assert tail.index == head.index + 1
+
+
+@pytest.mark.parametrize("offset", [0, -5, 800, 5_000])
+def test_a_cut_outside_the_utterance_does_nothing(offset):
+    buffer = manager()
+    buffer.push(output(span(tone(800), 0, opens=True)))
+    assert buffer.cut_at(offset).finals == []
+    assert buffer.open_duration_ms == pytest.approx(800)
+
+
+def test_a_cut_with_nothing_open_does_nothing():
+    assert manager().cut_at(100).finals == []

@@ -326,3 +326,29 @@ def test_the_replay_writer_speaks_the_clients_format(tmp_path):
 ])
 def test_a_sentence_mixing_the_two_languages_is_recognised(text, mixed):
     assert debuglog.is_mixed(text) is mixed
+
+
+LOST = """\
+08:00:00.000      0.0s  start       session=?
+08:00:01.000     42.9s  partial     [vi] Đi kìa
+08:00:01.000     43.4s  partial     [vi] Đi kiểm chứng tiếp
+08:00:01.000     44.2s  partial     [vi] Đi kiểm chứng đi Đấy, để xét tui
+08:00:01.000     45.0s  partial     [vi] Đi kiểm chứng đi Để step 019
+08:00:01.000     46.7s  partial     [ja] はい、ステップ011の方は今
+08:00:01.000     49.2s  final       #6 Speaker_02 [ja] ステップ011の方は今エピデの方がペンディング中です
+08:00:01.000     50.0s  partial     [vi] ừ ừ
+08:00:01.000     50.5s  partial     [vi] ừ
+08:00:01.000     51.0s  partial     [vi] ừ ừ
+08:00:01.000     51.5s  final       #7 Speaker_02 [ja] はい
+"""
+
+
+def test_a_turn_the_running_text_showed_and_the_sentence_lost_is_found(
+        tmp_path):
+    """#6 of the 09-17 run. #7 is a backchannel heard as Vietnamese, which is
+    not a lost turn."""
+    path = tmp_path / "lost.debug.txt"
+    path.write_text(LOST, encoding="utf-8")
+    run = debuglog.parse(path)
+    assert [final.lost_turn for final in run.finals] == ["vi", ""]
+    assert debuglog.measure(run)["lost_turns"] == 1

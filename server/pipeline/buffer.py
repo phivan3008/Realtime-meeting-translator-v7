@@ -102,6 +102,7 @@ class FinalizeReason(str, Enum):
     PAUSE = "pause"
     MAX_DURATION = "max_duration"
     SPEAKER_CHANGE = "speaker_change"
+    LANGUAGE_CHANGE = "language_change"
     END_OF_STREAM = "end_of_stream"
 
 
@@ -320,6 +321,32 @@ class BufferManager:
         self._start_ms = None
         self._continues = False
         return utterance
+
+    def cut_at(self, offset_ms: float,
+               reason: FinalizeReason = FinalizeReason.LANGUAGE_CHANGE
+               ) -> BufferOutput:
+        """End the open utterance ``offset_ms`` into it and keep the rest open.
+
+        For a second turn found inside a sentence that is still going: the
+        head is committed now, the tail becomes the next utterance. The offset
+        is taken as given - the caller has already placed it on a quiet frame.
+        Nothing is cut when the offset does not fall strictly inside.
+        """
+        if not self.is_open:
+            return BufferOutput()
+        cut = ms_to_bytes(offset_ms)
+        if cut <= 0 or cut >= len(self._pcm):
+            return BufferOutput()
+        assert self._start_ms is not None
+        head, tail = bytes(self._pcm[:cut]), bytes(self._pcm[cut:])
+        start_ms = self._start_ms
+        self._pcm = bytearray(head)
+        utterance = self._finalize(reason)
+        self._open(start_ms + bytes_to_ms(len(head)))
+        self._pcm = bytearray(tail)
+        # Two people, not one sentence in two halves.
+        self._continues = False
+        return BufferOutput(finals=[utterance])
 
     def _cut_for_length(self) -> Utterance:
         """Commit the first part of an over-long utterance and keep the rest."""

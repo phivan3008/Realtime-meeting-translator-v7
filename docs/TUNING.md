@@ -652,6 +652,7 @@ prompt cho câu sau, đúng cơ chế biến **một câu bịa thành cả đo�
 | `ASR_STREAM_WORD_TOLERANCE_SECONDS` | `0.45` | Hai lần giải mã đặt cùng một từ lệch nhau tối đa ngần này |
 | `ASR_STREAM_HISTORY` | `5` | Số lần giải mã giữ lại để so |
 | `ASR_STREAM_LANGUAGE_VOTES` | `2` | Số cửa sổ liên tiếp phải chắc chắn cùng một ngôn ngữ để chốt, hoặc đổi, ngôn ngữ của chữ mờ |
+| `ASR_LANGUAGE_OVERRIDE_MARGIN` | `0.50` | Biên LID cần có để lấn chữ mờ: giải mã lại câu chốt, hoặc ép một cửa sổ khi ngôn ngữ chưa chốt |
 | `ASR_STREAM_FINAL_OVERLAP_SECONDS` | `1.2` | Audio đã chốt được giải mã lại phía trước phần đuôi, làm ngữ cảnh |
 | `ASR_STREAM_FINAL_POST_ROLL_SECONDS` | `0.20` | Audio giữ lại sau chỗ tiếng nói kết thúc |
 
@@ -705,9 +706,34 @@ Ba luật, mỗi luật có test dựng lại từ đúng những câu đó:
   in another language`). LID vẫn chạy mỗi cửa sổ; nó rẻ (vài giây cho 30 phút).
 - **Chỉ các lần giải mã cùng ngôn ngữ** được so khớp và hợp nhất với nhau. Câu
   trộn hai ngôn ngữ không còn đường nào để xuất hiện.
-- **Câu chốt theo LID của cả câu khi LID chắc chắn.** Nếu chữ mờ đang ở ngôn ngữ
-  khác, mọi thứ chữ mờ đã làm bị bỏ và **cả câu được giải mã lại** (đếm vào
-  `language_flips`). LID không chắc thì ngôn ngữ của chữ mờ đứng.
+- **Câu chốt theo LID của cả câu khi LID chắc chắn** — biên từ
+  `ASR_LANGUAGE_OVERRIDE_MARGIN` trở lên. Nếu chữ mờ đang ở ngôn ngữ khác, mọi
+  thứ chữ mờ đã làm bị bỏ và **cả câu được giải mã lại** (đếm vào
+  `language_flips`). Dưới biên đó thì ngôn ngữ của chữ mờ đứng.
+- **Trước khi ngôn ngữ được chốt**, một cửa sổ chỉ dùng câu trả lời của chính
+  nó khi biên ≥ `ASR_LANGUAGE_OVERRIDE_MARGIN`; không thì dùng ngôn ngữ gần
+  nhất của cuộc họp.
+- **Chữ mờ đổi ngôn ngữ thì cắt câu ở đó.** Ngay lúc đổi, phép cắt theo ngôn
+  ngữ (mục 6) được hỏi trên phần audio đang mở; nếu nó thấy đúng cặp ngôn ngữ
+  chữ mờ vừa thấy, nửa đầu được chốt thành câu riêng (lý do
+  `language_change`, giải mã nguyên nửa) và phần sau đi tiếp trong ngôn ngữ mới
+  (`running texts changed language, N cut there`).
+
+> **Đo được (09-17, sau ba luật đầu):** câu lệch ngôn ngữ 37 → 24, câu trộn
+> 2 → 0. Đọc từng câu trong 24:
+>
+> - khoảng 13 là **hai lượt nói hai thứ tiếng trong một câu, lượt kia mất**
+>   (`Đi kiểm chứng tiếp` ba giây rồi `ステップ011の方は…`, câu chốt chỉ còn tiếng
+>   Nhật). Chữ mờ đã đổi ngôn ngữ 35 lần trong câu, nhưng phép cắt ở cuối câu từ
+>   chối gần hết — thăm dò ở cuối cả câu thì phải đọc qua lượt kia. Hỏi ngay lúc
+>   đổi thì đuôi audio chính là lượt vừa bắt đầu. Nên luật cắt ở trên.
+> - khoảng 7 là **chữ mờ bịa sai ngôn ngữ** ở vài cửa sổ đầu, từ những câu trả
+>   lời LID không chắc (`Bên mặt của nó sẽ là` trên nền tiếng Nhật). Nên biên
+>   0.50 trước khi chốt.
+> - khoảng 5 là tiếng đệm (`ừ ừ` cho `うん`) — vô hại.
+> - Một câu phát lại có sáu giây chữ mờ tiếng Việt đúng bị giải mã lại thành
+>   `はい、で、ウェル` trên một câu trả lời LID biên 0.30. Nên biên 0.50 để lấn chữ
+>   mờ.
 
 Luật cũ — giữ ngôn ngữ của chữ mờ khi đã có chữ chốt — dựa trên phép đo của
 nhánh improve (câu lệch ngôn ngữ với chữ mờ sai gấp 3–4 lần), nhưng chữ mờ ở
@@ -717,8 +743,15 @@ của cả câu, và lần chạy 09-16 cho thấy đúng điều đó.
 - `ASR_STREAM_LANGUAGE_VOTES` tăng: chốt chắc hơn, chữ mờ ở đầu câu đổi ngôn
   ngữ lâu hơn và chữ chốt tới muộn hơn.
 
+- `ASR_LANGUAGE_OVERRIDE_MARGIN` giảm: LID của cả câu thắng chữ mờ thường hơn,
+  kể cả khi nó sai; tăng: câu thật sự đổi ngôn ngữ ở cuối bị giữ ngôn ngữ đầu.
+
 Đo lại bằng `python -m server.analysis.compare_logs` trên nhật ký của cùng cuộc
-họp, hoặc `server/tests_real/test_real_streaming.py` trên pod.
+họp, hoặc `server/tests_real/test_real_streaming.py` trên pod. Hai dòng của
+bảng dành cho đúng chuyện này: `mixed_language` (câu có cả tiếng Nhật lẫn chữ
+tiếng Việt) và `lost_turns` (câu mà chữ mờ đã hiện ít nhất ba lần một ngôn ngữ
+khác, mỗi lần từ sáu ký tự trở lên — tiếng đệm không tính). Mốc: 09-11 có 11
+`lost_turns`, 09-16 có 11, 09-17 có 21.
 
 - `ASR_STREAM_MIN_AGREEMENT` tăng: chữ chốt chắc hơn và chậm hơn — mỗi bậc thêm
   một nhịp `PARTIAL_INTERVAL_MS`.

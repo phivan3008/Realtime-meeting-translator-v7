@@ -52,4 +52,18 @@ c[áa]c b[ạa]n c[óo] th[ểe] nh[ớo] .{1,60} [ủu]ng h[ộo] k[êe]nh.{0,3
 # "...đã xem.", "...đã xem video.", "...đã xem video này.". Đuôi bị giới hạn
 # vào đúng những kiểu đã gặp, nên "Cảm ơn các bạn đã xem bản demo này" —
 # một câu họp hợp lệ — vẫn được giữ.
-c[ảa]m [ơo]n c[áa]c b[ạa]n [đd][ãa] (xem|theo d[õo]i)( video( n[àa]y)?| v[àa] h[ẹe]n g[ặa]p l[ạa]i)?
+c[ảa]m [ơo]n (c[áa]c b[ạa]n|qu[ýy] v[ịi]) [đd][ãa] (xem|theo d[õo]i)( video( n[àa]y)?| v[àa] h[ẹe]n g[ặa]p l[ạa]i)?
+
+# "Cảm ơn quý vị đã theo dõi." cũng đi theo mẫu trên (quý vị thay cho các bạn):
+# hai lần trên nền người nói tiếng Nhật, cuộc họp 09-17.
+
+# Lời kêu gọi của kênh video, trên nền người nói tiếng Nhật khi chữ mờ bị ép
+# sang tiếng Việt - hơn hai mươi lần trong hai cuộc họp 09-16 và 09-17:
+#   "Các bạn có thể nhận thêm những bài hát của mình trong phần bình luận."
+#   "Các bạn có thể nhận thêm thông tin về các bài hát của chúng tôi trên kênh
+#    youtube của chúng tôi."
+#   "Các bạn có thể nhìn thấy các bài tập này ở phần bình luận."
+# Neo vào những thứ một cuộc họp không nói: phần bình luận, kênh youtube, bài
+# hát, bài học "của chúng tôi". "Các bạn có thể nhìn thấy các tài liệu ở đây"
+# và "Các bạn có thể xem phần review này" vẫn được giữ.
+c[áa]c b[ạa]n c[óo] th[ểe] .{0,60}(ph[ầa]n b[ìi]nh lu[ậa]n|k[êe]nh youtube|b[àa]i h[áa]t|b[àa]i h[ọo]c c[ủu]a ch[úu]ng t[ôo]i)( .{0,50})?

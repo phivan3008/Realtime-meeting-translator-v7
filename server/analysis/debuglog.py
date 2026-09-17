@@ -60,6 +60,9 @@ _CJK_ANY = re.compile(f"[{_CJK}]")
 #: it they are unrelated, and about a third of those are inventions.
 FAR = 0.6
 
+#: Running texts in another language that make a dropped turn.
+LOST_TURN_PARTIALS = 3
+
 
 @dataclass
 class Final:
@@ -94,6 +97,24 @@ class Final:
         if not languages:
             return ""
         return Counter(languages).most_common(1)[0][0]
+
+    @property
+    def lost_turn(self) -> str:
+        """A language the running text spoke at length and the sentence lacks.
+
+        Three running texts of some length in a language the sentence is not
+        in is a second turn the sentence dropped: "Đi kiểm chứng tiếp" shown
+        for three seconds, then a sentence holding only the Japanese after
+        it. Short backchannels ("ừ ừ" for うん) do not count.
+        """
+        counts: dict = {}
+        for lang, text, _at in self.partials:
+            if lang and lang != self.lang and len(text.replace(" ", "")) >= 6:
+                counts[lang] = counts.get(lang, 0) + 1
+        for lang, count in counts.items():
+            if count >= LOST_TURN_PARTIALS:
+                return lang
+        return ""
 
     @property
     def language_disagrees(self) -> bool:
@@ -328,6 +349,7 @@ def measure(run: Run) -> dict:
         "far_from_partial": sum(1 for value in rewrites if value > FAR),
         "language_disagrees": len(disagreed),
         "mixed_language": sum(1 for final in finals if is_mixed(final.text)),
+        "lost_turns": sum(1 for final in finals if final.lost_turn),
         "far_and_language_disagrees": len(far_and_disagreed),
         "summary": run.summary,
     }

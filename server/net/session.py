@@ -54,6 +54,7 @@ from common.protocol import (
     validate_audio_chunk,
 )
 from server.config import (
+    ASR_LANGUAGE_OVERRIDE_MARGIN,
     ASR_STREAM_LANGUAGE_VOTES,
     LANGUAGE_SPLIT,
     PARTIAL_WINDOW_SECONDS,
@@ -106,8 +107,10 @@ class ServerSessionStats:
     #: Sentences decoded whole again because the LID was sure of a language
     #: other than the one their running text was decoded in.
     language_flips: int = 0
-    #: Open utterances whose running text changed language part way.
+    #: Open utterances whose running text changed language part way, and
+    #: how many of those were cut there into two sentences.
     running_language_changes: int = 0
+    running_language_cuts: int = 0
     #: Labels the live matcher got wrong and clustering put right.
     speaker_corrections: int = 0
     #: Committed sentences with text. Running texts are counted apart:
@@ -171,8 +174,10 @@ class Analysis:
     #: Kept for reclustering the meeting later, not used by any other stage.
     voiceprint: Optional[np.ndarray] = None
     lang_code: str = ""
-    #: Whether ``lang_code`` is a decision rather than a fallback.
+    #: Whether ``lang_code`` is a decision rather than a fallback, and whether
+    #: it is sure enough to overrule the running text.
     lang_known: bool = False
+    lang_sure: bool = False
     transcript: Optional[Transcript] = None
 
 
@@ -481,17 +486,10 @@ class ServerSession:
             whole_id = self._asr_id(whole.index)
             parts = self._by_language(whole)
             for utterance, language in parts:
-                spent: dict[str, float] = {}
                 # After a split the running text belongs to the whole span,
                 # so each half is decoded on its own.
-                found = self._analyse(
-                    utterance, spent,
-                    asr_id=whole_id if len(parts) == 1 else None,
-                    language=language)
-                messages.append(self._utterance_message(utterance, found))
-                if found.transcript is not None and found.transcript.has_text:
-                    messages += self._commit_sentence(found)
-                self._report_if_slow(utterance, spent)
+                messages += self._emit(
+                    utterance, whole_id if len(parts) == 1 else None, language)
             self._forget(whole_id)
 
         if result.partial is not None:
@@ -503,6 +501,18 @@ class ServerSession:
             messages.append(make_error(self._stage_notices.pop(0), fatal=False))
         self.stats.utterances += len(result.finals)
         self.stats.events_sent += len(messages)
+        return messages
+
+    def _emit(self, utterance, asr_id: Optional[str],
+              language: str) -> list[str]:
+        """One committed utterance through the pipeline and onto the wire."""
+        spent: dict[str, float] = {}
+        found = self._analyse(utterance, spent, asr_id=asr_id,
+                              language=language)
+        messages = [self._utterance_message(utterance, found)]
+        if found.transcript is not None and found.transcript.has_text:
+            messages += self._commit_sentence(found)
+        self._report_if_slow(utterance, spent)
         return messages
 
     def _by_language(self, utterance) -> list[tuple]:
@@ -600,7 +610,7 @@ class ServerSession:
 
         if language:
             found.lang_code = language
-            found.lang_known = True
+            found.lang_known = found.lang_sure = True
             self.stats.utterances_with_language += 1
             self._last_language = language
         elif self.language_identifier is not None:
@@ -611,6 +621,7 @@ class ServerSession:
                     self._last_language = decision.lang_code
                 found.lang_code = self._language_for(decision)
                 found.lang_known = decision.known
+                found.lang_sure = self._sure(decision)
         else:
             found.lang_code = self._last_language
 
@@ -629,9 +640,10 @@ class ServerSession:
             return self.transcriber.transcribe(found.audio, found.lang_code,
                                                is_final=True)
         streamed = self.transcriber.stream_language(asr_id)
-        if streamed and not found.lang_known:
-            # The LID could not tell. The running text's language was agreed
-            # by several windows, which beats a fallback to the last sentence.
+        if streamed and not found.lang_sure:
+            # The LID is not sure enough. The running text's language was
+            # agreed by several windows, which beats a weak answer or a
+            # fallback to the last sentence.
             found.lang_code = streamed
         transcript = self.transcriber.finish_utterance(
             found.audio,
@@ -751,10 +763,18 @@ class ServerSession:
 
         spent: dict[str, float] = {}
         lang_code = self._open_language or self._last_language
+        changed_from = ""
         if self.language_identifier is not None:
             with self._stage("partial_language", spent):
                 decision = self.language_identifier.identify(window.pcm)
-                lang_code = self._running_language(decision, utterance_id)
+                lang_code, changed_from = self._running_language(
+                    decision, utterance_id)
+
+        if changed_from:
+            cut = self._cut_on_language_change(partial, changed_from,
+                                               lang_code, spent)
+            if cut is not None:
+                return cut
 
         events: tuple = ()
         with self._stage("partial_asr", spent):
@@ -780,14 +800,22 @@ class ServerSession:
         # An empty one is sent once, to clear what the screen still shows.
         return [make_partial("", latest.lang_code, running)]
 
-    def _running_language(self, decision, utterance_id: str) -> str:
-        """The language to decode this window of the running text in.
+    @staticmethod
+    def _sure(decision) -> bool:
+        """Sure enough to overrule what the running text agreed on."""
+        return (decision.known
+                and decision.margin >= ASR_LANGUAGE_OVERRIDE_MARGIN)
+
+    def _running_language(self, decision, utterance_id: str) -> tuple:
+        """The language for this window, and the one it replaced, if any.
 
         Fixed once ``ASR_STREAM_LANGUAGE_VOTES`` confident answers in a row
-        agree, and changed when as many agree on another language - which
-        starts the running text again, since decodes in two languages never
-        agree. Until then each window uses its own answer.
+        agree, and changed when as many agree on another language. Before it
+        is fixed a window uses its own answer only when that answer is sure;
+        otherwise the meeting's last language, because a weak answer forced
+        on Whisper produced inventions in a language nobody was speaking.
         """
+        changed_from = ""
         if decision.known:
             language, count = self._language_run
             count = count + 1 if language == decision.lang_code else 1
@@ -795,14 +823,59 @@ class ServerSession:
             if (count >= ASR_STREAM_LANGUAGE_VOTES
                     and decision.lang_code != self._open_language):
                 if self._open_language:
+                    changed_from = self._open_language
                     self.stats.running_language_changes += 1
                     log.info("utterance %s: the running text changes from %r "
                              "to %r", utterance_id, self._open_language,
                              decision.lang_code)
                 self._open_language = decision.lang_code
         if self._open_language:
-            return self._open_language
-        return self._language_for(decision)
+            return self._open_language, changed_from
+        if self._sure(decision):
+            return decision.lang_code, changed_from
+        return self._last_language, changed_from
+
+    def _cut_on_language_change(self, partial, before: str, after: str,
+                                spent: dict) -> Optional[list]:
+        """Cut the open utterance where its language changed, if it can.
+
+        The running text is the only stage that sees a second turn while it
+        is happening: on a real meeting it changed language 35 times inside a
+        sentence, and the cut at the end found few of those - its probes near
+        the end of the whole sentence had the other turn to contend with. Asked
+        now, the tail of the audio is the turn that has just begun.
+
+        Returns the messages for the committed head, or None to carry on with
+        the whole utterance.
+        """
+        if self.language_splitter is None or self.buffer is None:
+            return None
+        split = None
+        with self._stage("language_split", spent):
+            split = self.language_splitter.find(partial.pcm, hangover_ms=0.0)
+        if split is None or split.first != before or split.second != after:
+            return None
+        extra = self.buffer.cut_at(split.at_ms)
+        if not extra.finals:
+            return None
+        self.stats.running_language_cuts += 1
+        log.info("Session %s: utterance %d changed from %s to %s; committing "
+                 "the first %.0f ms as its own sentence",
+                 self.session_id or "?", partial.index, before, after,
+                 split.at_ms)
+        old_id = self._asr_id(partial.index)
+        messages = []
+        for utterance in extra.finals:
+            # Decoded whole: the running text of the head was decoded in two
+            # languages and is dropped with it.
+            messages += self._emit(utterance, None, before)
+        self.stats.utterances += len(extra.finals)
+        self._forget(old_id)
+        # The turn that has just begun keeps the votes it already won.
+        self._open_language = after
+        self._language_run = (after, ASR_STREAM_LANGUAGE_VOTES)
+        self._report_if_partial_slow(partial, spent)
+        return messages
 
     def _report_if_partial_slow(self, partial, spent: dict) -> None:
         """Say so when the running text is what held up the connection."""

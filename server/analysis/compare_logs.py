@@ -36,6 +36,7 @@ ROWS = (
     ("far_from_partial", "{:d}"),
     ("language_disagrees", "{:d}"),
     ("mixed_language", "{:d}"),
+    ("lost_turns", "{:d}"),
     ("update_survival", "{:.1%}"),
     ("updates_wiping_half", "{:.1%}"),
 )

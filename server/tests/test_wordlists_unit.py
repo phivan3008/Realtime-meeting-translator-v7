@@ -334,3 +334,31 @@ def test_the_prompt_is_cut_on_a_term_boundary(tmp_path, monkeypatch):
         "solution\ndung lượng\nkiểm chứng\n", encoding="utf-8")
     monkeypatch.setattr(module, "DATA_DIR", tmp_path)
     assert module.vocabulary_prompt(limit=22) == "solution, dung lượng"
+
+
+@pytest.mark.parametrize("text", [
+    "Các bạn có thể nhận thêm những bài hát của mình trong phần bình luận.",
+    "Các bạn có thể nhận thêm thông tin về các bài hát của chúng tôi trên "
+    "kênh youtube của chúng tôi.",
+    "Các bạn có thể nhận thêm thông tin về các bài hát của chúng tôi trong "
+    "phần bình luận.",
+    "Các bạn có thể nhìn thấy các bài tập này ở phần bình luận.",
+    "Các bạn có thể nhận được những bài hát của tôi.",
+    "Các bạn có thể nhận thêm thông tin về các bài học của chúng tôi.",
+    "Cảm ơn quý vị đã theo dõi.",
+])
+def test_the_channel_pitches_of_the_september_meetings_are_blocked(text):
+    """Over twenty times across the 09-16 and 09-17 runs, all over Japanese
+    speakers whose running text had been forced into Vietnamese."""
+    assert Hallucinations().is_invented(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Các bạn có thể nhìn thấy các tài liệu ở đây.",
+    "Các bạn có thể xem phần review này",
+    "Các bạn có thể gửi thông tin của mình cho tôi",
+    "Các bạn có thể tìm ra những gì bạn muốn làm trong lúc này không?",
+    "Cảm ơn quý vị đã tham gia cuộc họp hôm nay.",
+])
+def test_meeting_talk_that_resembles_them_is_kept(text):
+    assert not Hallucinations().is_invented(text)
