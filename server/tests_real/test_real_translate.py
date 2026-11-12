@@ -1,6 +1,7 @@
 """REAL TEST - translation through a running vLLM server.
 
-MUST RUN ON: the GPU Server pod, with vLLM already serving.
+MUST RUN ON: the Windows machine that runs the pipeline, with vLLM serving on
+the GPU pod and port 8001 forwarded (gpu_server/README.md).
 DO NOT RUN ON: the Dev PC agent loop.
 
 ``DESIGN.md`` section 3.8. As with the ASR, a machine cannot tell you whether
@@ -20,9 +21,10 @@ is everything around that:
 
 Starting the server
 -------------------
-    python3.11 server/launch_vllm.py
+    On the GPU pod, as written in gpu_server/README.md. On Windows,
+    ``py -3.11 server/launch_vllm.py --print`` prints the same command
 
-which runs, from ``server/config.py``::
+built from ``server/config.py``::
 
     python3.11 -m vllm.entrypoints.openai.api_server \\
         --model google/gemma-4-12b-it --port 8001 --dtype bfloat16 \\

@@ -1,6 +1,8 @@
 """REAL TEST - the whole server pipeline on a recorded meeting, as streamed.
 
-MUST RUN ON: the GPU Server pod.
+MUST RUN ON: the Windows machine that runs the pipeline (CPU). Whisper and
+Gemma are called on the GPU pod over HTTP, so a test that needs them needs
+the pod running and its ports forwarded (gpu_server/README.md).
 DO NOT RUN ON: the Dev PC agent loop.
 
 ``test_real_asr.py`` puts Whisper to one sentence at a time. This replays a
@@ -128,7 +130,7 @@ def read_pcm(path: Path, limit_seconds: float = 0.0) -> bytes:
 
 def load_stages(args) -> tuple:
     """The real models, each reported as it loads."""
-    from server.pipeline.asr import Transcriber, WhisperDecoder
+    from server.pipeline.asr import Transcriber, make_decoder
     from server.pipeline.diarization import SpeakerIdentifier
     from server.pipeline.lid import LanguageIdentifier
     from server.pipeline.overlap import OverlapResolver
@@ -149,8 +151,9 @@ def load_stages(args) -> tuple:
     attempt("overlap", OverlapResolver)
     attempt("speaker", SpeakerIdentifier)
     attempt("language", LanguageIdentifier)
-    attempt("asr", lambda: Transcriber(decoder=WhisperDecoder(
-        model_id=args.model, device=args.device)))
+    attempt("asr", lambda: Transcriber(decoder=make_decoder(
+        args.backend, model_id=args.model, url=args.asr_url,
+        device=args.device)))
     if args.translate:
         from server.pipeline.translate import Translator
         attempt("translate", Translator)
@@ -324,7 +327,14 @@ def main() -> int:
     parser.add_argument("--translate", action="store_true",
                         help="translate as well; vLLM must be running")
     parser.add_argument("--model", default="", help="Whisper checkpoint")
-    parser.add_argument("--device", default="", help='"cuda" or "cpu"')
+    parser.add_argument("--backend", default="",
+                        help='"remote" (Whisper on the pod) or "local"; '
+                             "default ASR_BACKEND")
+    parser.add_argument("--asr-url", default="",
+                        help="whisper_server.py on the pod; default "
+                             "ASR_SERVER_URL")
+    parser.add_argument("--device", default="",
+                        help='"cuda" or "cpu", local backend only')
     args = parser.parse_args()
 
     print("=" * 72)

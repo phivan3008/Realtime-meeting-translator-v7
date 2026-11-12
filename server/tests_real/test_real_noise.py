@@ -1,6 +1,8 @@
 """REAL TEST - the Deep Noise Filter (AST) on real recorded audio.
 
-MUST RUN ON: the GPU Server pod.
+MUST RUN ON: the Windows machine that runs the pipeline (CPU). Whisper and
+Gemma are called on the GPU pod over HTTP, so a test that needs them needs
+the pod running and its ports forwarded (gpu_server/README.md).
 DO NOT RUN ON: the Dev PC agent loop.
 
 Silero removes silence but not noise: it is a voice activity detector, and it

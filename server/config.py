@@ -307,10 +307,25 @@ LANGUAGE_SPLIT_SNAP_MS = 200.0
 LANGUAGE_SPLIT_MAX_STEPS = 3
 
 # --- 7. ASR (DESIGN.md section 3.7) -----------------------------------------
+# Where Whisper runs. "remote": faster-whisper on the GPU pod behind
+# gpu_server/whisper_server.py, over HTTP - the pod may only serve models, so
+# this is the default. "local": faster-whisper inside this process, which the
+# Windows machine has no GPU for; kept for a machine that has one.
+ASR_BACKEND = os.environ.get("ASR_BACKEND", "remote")
+# whisper_server.py on the pod, reached through a port-forward or SSH tunnel.
+ASR_SERVER_URL = os.environ.get("ASR_SERVER_URL", "http://127.0.0.1:8002")
+# One decode is a few hundred milliseconds. Every one runs on the thread that
+# reads the audio socket, so a server that has gone away must not hold it for
+# long; three failures in a row switch the ASR off for the meeting.
+ASR_TIMEOUT_S = float(os.environ.get("ASR_TIMEOUT_S", "10"))
+# The checkpoint. With the remote backend it must match what the pod serves:
+# the pipeline checks at startup and refuses a server serving another one.
 ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
+# The local backend only.
 ASR_DEVICE = os.environ.get("ASR_DEVICE", "")
 # float16 halves the memory and the latency on an H100 and costs nothing that
-# survives being turned back into text. CPU falls back to int8.
+# survives being turned back into text. CPU falls back to int8. Local backend
+# only; the pod's server is started with float16.
 ASR_COMPUTE_TYPE = os.environ.get("ASR_COMPUTE_TYPE", "")
 ASR_CACHE_DIR = os.environ.get("ASR_CACHE_DIR", "models/whisper")
 

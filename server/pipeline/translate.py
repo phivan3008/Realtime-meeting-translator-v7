@@ -635,7 +635,7 @@ class VllmClient:
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             raise TranslationError(
                 f"No translation server at {self.base_url}: {exc}. Start vLLM "
-                "with `python3.11 server/launch_vllm.py`."
+                "on the pod (gpu_server/README.md) and check the port-forward."
             ) from exc
         cards = [entry for entry in (payload.get("data") or [])
                  if isinstance(entry, dict)]

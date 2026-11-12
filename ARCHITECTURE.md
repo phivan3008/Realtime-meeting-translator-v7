@@ -10,25 +10,32 @@ Toàn bộ mã nguồn là Python 3.11.
 
 | Thành phần | Chạy trên | Vai trò |
 |---|---|---|
-| `client/` | Windows Client PC | Thu âm loopback, chuyển về 16 kHz mono, stream lên server |
-| `server/` | GPU Pod (H100 80GB) | VAD, tách câu, lọc nhiễu, nhận diện người nói và ngôn ngữ, ASR, điều phối dịch |
-| vLLM | Cùng GPU Pod, tiến trình riêng | Phục vụ `google/gemma-4-12b-it` qua API OpenAI-compatible |
-| `common/protocol.py` | Cả hai phía | Định nghĩa duy nhất của giao thức và định dạng audio |
+| `client/` | Windows Client PC | Thu âm loopback, chuyển về 16 kHz mono, stream sang pipeline |
+| `server/` | Cùng máy Windows, tiến trình riêng, CPU | VAD, tách câu, lọc nhiễu, nhận diện người nói và ngôn ngữ, chính sách streaming ASR, điều phối dịch |
+| `gpu_server/whisper_server.py` | GPU Pod (H100 80GB) | Phục vụ faster-whisper large-v3 float16 qua HTTP, cổng 8002. Không có logic pipeline |
+| vLLM | GPU Pod | Phục vụ `google/gemma-4-12b-it` qua API OpenAI-compatible, cổng 8001 |
+| `common/protocol.py` | Client và pipeline | Định nghĩa duy nhất của giao thức và định dạng audio |
+
+Pod chỉ được chứa model và server phục vụ model, nên mọi code quyết định nằm ở
+Windows. Hai cổng của pod được nối về `127.0.0.1` của máy Windows bằng SSH
+tunnel hoặc port-forward.
 
 ```mermaid
 flowchart LR
-    subgraph WIN["Windows Client PC"]
+    subgraph WIN["Windows Client PC (CPU)"]
         APP["Ứng dụng họp<br/>(Zoom, Teams...)"] --> CAP["WASAPI Loopback"]
         CAP --> RS["Resample<br/>16 kHz mono int16"]
         RS --> WS["StreamClient"]
+        SRV["Pipeline<br/>uvicorn 127.0.0.1:8000"]
+        WS -- "WebSocket /ws/stream<br/>PCM 200 ms/chunk" --> SRV
+        SRV -- "JSON: vad, utterance, partial,<br/>final, translation, speakers" --> WS
     end
-    subgraph POD["GPU Pod"]
-        SRV["Audio server<br/>uvicorn :8000"]
+    subgraph POD["GPU Pod — chỉ model"]
+        WH["whisper_server.py :8002<br/>faster-whisper large-v3"]
         LLM["vLLM :8001<br/>gemma-4-12b-it"]
-        SRV -- "HTTP /v1/chat/completions" --> LLM
     end
-    WS -- "WebSocket /ws/stream<br/>PCM 200 ms/chunk" --> SRV
-    SRV -- "JSON: vad, utterance, partial,<br/>final, translation, speakers" --> WS
+    SRV -- "HTTP POST /v1/decode<br/>PCM16 + tham số" --> WH
+    SRV -- "HTTP /v1/chat/completions" --> LLM
 ```
 
 ## 2. Giao thức (`common/protocol.py`)
@@ -111,7 +118,7 @@ Client không lọc audio, kể cả khoảng lặng (~256 kbps) và không ch�
 
 ### 4.1 Tiến trình và vòng đời
 
-- `server/app.py` (FastAPI) nạp mọi model một lần lúc khởi động: Silero, ECAPA, VoxLingua, Whisper, và kết nối vLLM. AST chỉ nạp khi `ENABLE_NOISE_FILTER=1`, và chạy CPU.
+- `server/app.py` (FastAPI) nạp mọi model một lần lúc khởi động: Silero, ECAPA, VoxLingua chạy CPU tại chỗ; Whisper và Gemma là kết nối tới pod (kiểm `/health` và model đang phục vụ, rồi giải mã thử một giây). AST chỉ nạp khi `ENABLE_NOISE_FILTER=1`, và chạy CPU.
 - Silero bắt buộc: nạp lỗi thì server không khởi động. Các model còn lại nạp lỗi thì server vẫn chạy, chỉ thiếu tầng đó; mọi tầng đều được thử nạp. `/health` báo trạng thái và lỗi của từng model, interpreter (`python`, `in_venv`) và các biến môi trường đang đặt (`overrides`).
 - `server/net/session.py` (`ServerSession`) chứa toàn bộ logic phiên, đồng bộ. Mỗi hàm trả về danh sách message cần gửi, nên unit test chạy được mà không cần socket hay GPU.
 
@@ -127,9 +134,24 @@ stateDiagram-v2
     CLOSED --> [*]
 ```
 
-Thứ tự khởi động trên pod: **vLLM trước** (`python3.11 server/launch_vllm.py`),
-sau đó audio server (`python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000`).
-Lý do: vLLM giữ 85% bộ nhớ GPU ngay lúc khởi động.
+Thứ tự khởi động: trên pod **vLLM trước**, rồi `whisper_server.py` (xem
+`gpu_server/README.md`) — vLLM giữ 85% bộ nhớ GPU ngay lúc khởi động. Rồi trên
+Windows: tunnel, pipeline
+(`py -3.11 -m uvicorn server.app:app --host 127.0.0.1 --port 8000`), client.
+
+### 4.1b Whisper qua HTTP (`server/pipeline/asr_remote.py`)
+
+`RemoteWhisperDecoder` thoả cùng giao diện `Decoder` mà `WhisperDecoder` (chạy
+trong tiến trình) thoả, nên `StreamingTranscriber` không phân biệt được hai
+cái. `ASR_BACKEND` chọn: `remote` (mặc định) hoặc `local`.
+
+- Gửi đúng các tham số faster-whisper từng nhận trong tiến trình: ngôn ngữ,
+  beam, prompt, `temperature=0`, `condition_on_previous_text`, ba ngưỡng.
+  Server cố định `word_timestamps=True`, `vad_filter=False`.
+- Audio là PCM16 — đổi ngược từ float32 là chính xác, vì mẫu vốn là PCM16/32768.
+- Lúc khởi động: `/health` phải nói `api_version` 1 và đúng `ASR_MODEL`.
+- Một kết nối giữ sống; rớt thì mở lại một lần, timeout (`ASR_TIMEOUT_S`) thì
+  không thử lại. Lỗi thành `AsrError`, tầng ASR đếm như mọi lỗi tầng khác.
 
 ### 4.2 Pipeline xử lý
 
@@ -298,7 +320,9 @@ Lúc kết nối, client đọc `/v1/models` và từ chối nếu server không
 
 ## 5. Triển khai vLLM
 
-`server/launch_vllm.py` dựng lệnh khởi động từ `server/config.py`:
+vLLM chạy trên pod. `server/launch_vllm.py --print` (chạy ở Windows) dựng lệnh
+từ `server/config.py` để dán lên pod; `gpu_server/README.md` ghi sẵn lệnh đó,
+và một unit test giữ hai nơi khớp nhau:
 
 ```bash
 python3.11 -m vllm.entrypoints.openai.api_server \
@@ -310,13 +334,15 @@ python3.11 -m vllm.entrypoints.openai.api_server \
 |---|---|---|
 | `dtype` | `bfloat16` | Gemma chạy float16 cho ra output rác hoặc NaN |
 | `max_model_len` | 4096 | Prompt chỉ vài trăm token; context nhỏ tiết kiệm KV cache |
-| `gpu_memory_utilization` | 0.85 | Phần còn lại dành cho Whisper, AST, ECAPA, VoxLingua |
+| `gpu_memory_utilization` | 0.85 | Phần còn lại dành cho `whisper_server.py` (Whisper large-v3 float16) |
 | `trust_remote_code` | `True` | |
 
 Phiên bản ghim: `vllm==0.26.0`, `torch==2.11.0`, `transformers==5.14.1`.
 `transformers` từ 5.15 chuyển `head_dim` của Gemma 4 thành thuộc tính riêng
 từng layer, và vLLM trước 0.28 không đọc được dạng này.
-`server/tests/test_requirements_unit.py` chặn cặp phiên bản lệch đó.
+`server/tests/test_requirements_unit.py` chặn cặp phiên bản lệch đó trong
+`gpu_server/requirements*.txt`, và kiểm `server/requirements*.txt` (Windows)
+không kéo vLLM hay faster-whisper.
 
 ## 6. Cấu trúc thư mục
 
@@ -334,13 +360,17 @@ server/
   config.py                 Mọi tham số của pipeline, và các biến môi trường
   wordlists.py              Đọc server/data
   data/                     Danh sách chặn/giữ, từ vựng mồi
-  launch_vllm.py            Khởi động vLLM
+  launch_vllm.py            In lệnh vLLM để chạy trên pod
   net/session.py            Máy trạng thái phiên và điều phối pipeline
   pipeline/                 vad, buffer, language_split, noise, overlap,
-                            diarization, reclustering, lid, asr,
+                            diarization, reclustering, lid, asr, asr_remote,
                             translation_queue, translate, textdiff
   analysis/                 Đọc và so nhật ký gỡ lỗi của client
-  tests/, tests_real/       Unit test; real test chạy trên GPU Pod
+  tests/, tests_real/       Unit test; real test chạy trên Windows, gọi pod
+gpu_server/                 Thứ duy nhất trên pod
+  whisper_server.py         faster-whisper sau HTTP, không import gì của repo
+  requirements*.txt         vLLM + faster-whisper, pin như pod cũ
+  tests/                    Unit test (model giả)
 docs/TUNING.md              Mỗi tham số, phép đo đã chọn ra nó
 ```
 
@@ -348,8 +378,9 @@ docs/TUNING.md              Mỗi tham số, phép đo đã chọn ra nó
 
 | Loại | Vị trí | Chạy trên |
 |---|---|---|
-| Unit test (model được stub) | `client/tests`, `server/tests`, `common/tests` | Dev PC: `.venv\Scripts\python.exe -m pytest` |
-| Real test từng module (có sẵn smoke test cho chính script) | `server/tests_real/test_real_*.py` | GPU Pod |
-| Real test cả pipeline trên bản ghi cuộc họp | `server/tests_real/test_real_streaming.py` | GPU Pod |
+| Unit test (model được stub) | `client/tests`, `server/tests`, `common/tests`, `gpu_server/tests` | Dev PC: `.venv\Scripts\python.exe -m pytest` |
+| Real test kết nối tới hai model trên pod | `server/tests_real/test_real_remote_models.py` | Windows, pod đang chạy |
+| Real test từng module (có sẵn smoke test cho chính script) | `server/tests_real/test_real_*.py` | Windows (CPU), ASR/dịch gọi pod |
+| Real test cả pipeline trên bản ghi cuộc họp | `server/tests_real/test_real_streaming.py` | Windows, pod đang chạy |
 | Real test thu âm và end-to-end | `client/tests_real/test_real_audio_capture.py`, `test_real_stream.py`, `python -m client.ui.main` | Windows Client PC |
 | So nhật ký của các lần chạy cùng cuộc họp | `python -m server.analysis.compare_logs <log>...` | Máy nào cũng được |

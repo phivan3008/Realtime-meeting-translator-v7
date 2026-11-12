@@ -1,19 +1,23 @@
-"""Start the vLLM translation server with the engine arguments in config.py.
+"""Build the vLLM command for the translation model from config.py.
 
-MUST RUN ON: the GPU Server pod, BEFORE the audio server.
+vLLM runs on the GPU Server pod, and the pod may not hold this repository's
+pipeline code - so this script is run on the Windows machine with
+``--print``, and the line it prints is what gets pasted on the pod. The same
+command is written out in ``gpu_server/README.md``; a unit test keeps the
+two in step.
 
-vLLM claims ``VLLM_GPU_MEMORY_UTILIZATION`` of the whole card at start-up and
-refuses to start if that much is not free. Started after the audio server has
-loaded Whisper, AST, ECAPA and VoxLingua, it can fail for want of memory that
-it would have fitted around had it gone first.
+Start vLLM BEFORE ``gpu_server/whisper_server.py``. vLLM claims
+``VLLM_GPU_MEMORY_UTILIZATION`` of the whole card at start-up and refuses to
+start if that much is not free; started after Whisper, it can fail for want
+of memory that it would have fitted around had it gone first.
 
 Usage
 -----
-    python3.11 server/launch_vllm.py              # start it
-    python3.11 server/launch_vllm.py --print      # show the command, start nothing
-    python3.11 server/launch_vllm.py -- --host 127.0.0.1
+    py -3.11 server/launch_vllm.py --print              # show the command
+    py -3.11 server/launch_vllm.py --print -- --host 127.0.0.1
 
-Anything after ``--`` is passed to vLLM unchanged.
+Anything after ``--`` is passed to vLLM unchanged. Without ``--print`` the
+command is started here, which only works on a machine that has vLLM.
 """
 
 from __future__ import annotations
@@ -35,6 +39,10 @@ from server.config import (  # noqa: E402
     VLLM_PORT,
     VLLM_TRUST_REMOTE_CODE,
 )
+
+
+#: The interpreter on the pod, for the printed command.
+POD_PYTHON = "python3.11"
 
 
 def command(model: str = TRANSLATE_MODEL, extra: Iterable[str] = (),
@@ -61,10 +69,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="checkpoint id or local path")
     parser.add_argument("--print", action="store_true", dest="print_only",
                         help="print the command and exit")
+    parser.add_argument("--python", default="",
+                        help="interpreter in the printed command; default "
+                             "python3.11 with --print, this one otherwise")
     parser.add_argument("extra", nargs="*", help="passed to vLLM after --")
     args = parser.parse_args(argv)
 
-    cmd = command(args.model, args.extra)
+    # Printed for the pod, where this machine's interpreter path means
+    # nothing.
+    python = args.python or (POD_PYTHON if args.print_only else sys.executable)
+    cmd = command(args.model, args.extra, python=python)
     print(shlex.join(cmd), flush=True)
     if args.print_only:
         return 0

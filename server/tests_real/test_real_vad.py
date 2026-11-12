@@ -1,6 +1,7 @@
-"""REAL TEST - Silero VAD on the GPU pod, driven by real recorded audio.
+"""REAL TEST - Silero VAD on CPU, driven by real recorded audio.
 
-MUST RUN ON: the GPU Server pod (real Silero model, real meeting audio).
+MUST RUN ON: the Windows machine that runs the pipeline (real Silero model on
+CPU, real meeting audio).
 DO NOT RUN ON: the Dev PC agent loop.
 
 The pod has no sound card, so the audio comes from WAV files recorded on the

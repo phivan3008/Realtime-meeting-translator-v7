@@ -1,7 +1,7 @@
 """REAL TEST - the Overlap Resolver on real recorded voices.
 
-MUST RUN ON: the GPU Server pod (or anywhere with the server requirements -
-this stage needs no GPU).
+MUST RUN ON: the Windows machine that runs the pipeline (or anywhere with the
+server requirements - this stage needs no GPU).
 
 ``DESIGN.md`` section 3.4 asks for the louder voice to be favoured and the
 quieter one squashed. This checks that on real speech rather than on tones,

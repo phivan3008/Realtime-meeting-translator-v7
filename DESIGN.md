@@ -1,7 +1,8 @@
 # Thiết kế: Phiên dịch cuộc họp VI ↔ JA thời gian thực
 
-Phiên dịch hai chiều Việt–Nhật cho họp online. Âm thanh thu ở máy Windows, xử
-lý trên GPU server, trả về phụ đề kèm bản dịch.
+Phiên dịch hai chiều Việt–Nhật cho họp online. Âm thanh thu **và xử lý** ở máy
+Windows; GPU server chỉ phục vụ hai model lớn — Whisper và Gemma 4 — qua HTTP.
+Kết quả là phụ đề kèm bản dịch.
 
 Tài liệu này mô tả **các module và ranh giới giữa chúng**. Con số cụ thể và
 phép đo đã chọn ra chúng nằm ở [`docs/TUNING.md`](docs/TUNING.md); cách chạy
@@ -13,10 +14,34 @@ nằm ở [`README.md`](README.md); sơ đồ và tham số theo code hiện t�
 | Máy | Vai trò |
 | --- | --- |
 | Dev PC | Viết code, chạy unit test, push lên GitHub |
-| Windows Client PC | Thu WASAPI loopback, gửi lên server, hiển thị |
-| GPU Server (pod H100) | Toàn bộ pipeline xử lý |
+| Windows Client PC (chỉ CPU) | Thu WASAPI loopback, **chạy toàn bộ pipeline** (`server/`), hiển thị |
+| GPU Server (pod H100) | **Chỉ phục vụ model**: vLLM (Gemma 4, cổng 8001) và `gpu_server/whisper_server.py` (Whisper, cổng 8002) |
 
-Python **3.11** ở cả ba. Máy test pull code từ GitHub.
+Python **3.11** ở cả ba. Máy Windows pull code từ GitHub. Pod **không được giữ
+code pipeline**: chỉ hai file của `gpu_server/` được chép lên đó.
+
+Client và pipeline là **hai tiến trình trên cùng máy Windows**, nói chuyện qua
+WebSocket ở `127.0.0.1:8000` đúng như trước khi pipeline rời pod — protocol,
+client và toàn bộ test giữ nguyên. Pipeline gọi hai model trên pod qua HTTP,
+nối về máy này bằng SSH tunnel hoặc port-forward.
+
+### Ranh giới với pod
+
+Pod chỉ **giải mã**, không **quyết định**. `whisper_server.py` nhận audio và
+tham số, gọi faster-whisper bằng đúng lời gọi pipeline từng gọi trong tiến
+trình (cùng model, float16, beam, word timestamps, tắt VAD lặp), và trả về
+**mọi** đoạn và từ kèm điểm. Mọi chính sách — chốt từ, chặn câu bịa, chọn
+ngôn ngữ — nằm ở Windows. Vì thế kết quả nhận dạng **giống hệt** lúc chạy
+chung tiến trình; cái thay đổi là độ trễ mạng của mỗi lần gọi.
+
+Không dùng endpoint transcription của vLLM cho Whisper: nó giải mã tham lam và
+không trả thời điểm từng từ, mà chính sách streaming ở tầng 7 dựng trên đúng
+hai thứ đó.
+
+Audio gửi lên là **PCM16**, không phải float32: mẫu trong pipeline vốn là
+PCM16 chia 32768, nên đổi ngược là chính xác, và nhẹ bằng nửa (~128 KB cho
+cửa sổ 4 s). Một kết nối HTTP giữ sống cho mọi lần gọi; rớt thì mở lại **một
+lần**, nhưng timeout thì không thử lại — thử lại giữ luồng đọc audio gấp đôi.
 
 ## 2. Client
 
@@ -53,10 +78,11 @@ Mỗi cuộc họp ghi ra **hai file**: biên bản (câu đã chốt kèm bản
 dịch tới muộn và nhãn người nói được sửa đều làm biên bản **viết lại**, nên nó
 không bao giờ lệch với màn hình.
 
-## 3. Server — tám tầng
+## 3. Pipeline — tám tầng
 
-Mỗi tầng một file trong `server/pipeline/`. Mọi tầng chạy trên **luồng đọc
-socket**, trừ tầng dịch.
+Mỗi tầng một file trong `server/pipeline/`. Chạy trên máy Windows, CPU; tầng 7
+và 8 gọi model trên pod qua HTTP. Mọi tầng chạy trên **luồng đọc socket**, trừ
+tầng dịch.
 
 Một tầng ném lỗi thì **chỉ tầng đó** mất, câu vẫn đi tiếp qua các tầng còn lại
 — `Analysis` giữ giá trị mặc định, mà mặc định chính là hành vi khi thiếu tầng
@@ -66,22 +92,24 @@ giết tiến trình. Client được báo bằng `error` không fatal.
 
 | # | Tầng | Model / kỹ thuật | Việc |
 | --- | --- | --- | --- |
-| 1 | VAD | Silero (CPU) | Cắt stream thành đoạn có tiếng nói, giữ pre-roll để không cụt phụ âm đầu |
+| 1 | VAD | Silero (CPU, Windows) | Cắt stream thành đoạn có tiếng nói, giữ pre-roll để không cụt phụ âm đầu |
 | 2 | Buffer Manager | — | Gom thành câu, chốt khi ngắt hoặc quá dài |
 | 3 | Noise Filter | AST (AudioSet, CPU) | Bỏ tiếng gõ phím, tiếng ho — **mặc định tắt** |
 | 4 | Overlap Resolver | `pedalboard` gate + compressor | Hạ giọng nhỏ khi chồng lấn |
-| 5 | Diarization | ECAPA-TDNN (SpeechBrain) | Ai đang nói |
+| 5 | Diarization | ECAPA-TDNN (SpeechBrain, CPU) | Ai đang nói |
 | 5b | Reclustering | agglomerative, cosine | Gom cụm lại cả cuộc họp, **sửa nhãn đã gửi** |
-| 6 | Language ID | VoxLingua107 ECAPA | `vi`, `ja`, hoặc rỗng |
+| 6 | Language ID | VoxLingua107 ECAPA (CPU) | `vi`, `ja`, hoặc rỗng |
 | 6b | Language split | LID trên hai đầu câu | Cắt câu chứa **hai** ngôn ngữ |
-| 7 | ASR | faster-whisper large-v3, streaming | Chuyển thành chữ, chốt dần từng từ |
-| 8 | Translation | gemma-4-12b-it qua vLLM | Dịch, **ngoài luồng audio** |
+| 7 | ASR | faster-whisper large-v3 **trên pod**, chính sách streaming ở Windows | Chuyển thành chữ, chốt dần từng từ |
+| 8 | Translation | gemma-4-12b-it qua vLLM **trên pod** | Dịch, **ngoài luồng audio** |
 
 ### Ghi chú từng tầng
 
-**1. VAD ở server, không ở client.** `silero-vad` kéo theo `torch` lên Windows
-và `torchaudio` fail ABI ở đó. Ngoài ra Buffer Manager cần biết các khoảng
-ngắt, mà đặt VAD cạnh nó thì protocol phụ báo ngắt biến mất.
+**1. VAD ở pipeline, không ở client.** Buffer Manager cần biết các khoảng
+ngắt, mà đặt VAD cạnh nó thì protocol phụ báo ngắt biến mất. Client vẫn không
+chạy ML: `torch` chỉ nằm trong tiến trình pipeline. Từng có lần `torchaudio`
+fail ABI trên máy Windows này, nên real test của VAD, người nói và LID chạy
+trên Windows là thứ chứng minh bộ thư viện CPU nạp được ở đây.
 
 **2. Buffer Manager.** Ranh giới câu: **ngắt** (VAD đóng đoạn) hoặc **quá dài**
 (>7 s). Cắt vì quá dài thì lùi về khung 32 ms yên tĩnh nhất gần đó — Whisper
@@ -203,9 +231,9 @@ trong phần "các câu trước" thì trả lại nguyên văn. Câu bị trả
 
 Gemma không có role `system`: toàn bộ chỉ dẫn nằm trong một message `user`.
 
-vLLM chạy **tiến trình riêng** sau API OpenAI-compatible. Nó giữ trước một phần
-GPU lúc nạp; tách ra thì mỗi bên nhìn thấy một GPU lập luận được, và LLM restart
-được mà không rớt cuộc họp.
+vLLM chạy **trên pod**, sau API OpenAI-compatible. Nó giữ trước 85% GPU lúc
+nạp, nên khởi động **trước** `whisper_server.py`; phần còn lại đủ cho Whisper.
+LLM restart được mà không rớt cuộc họp.
 
 Model được yêu cầu dịch sẽ **cố trò chuyện** — "Sure! Here is the translation:",
 ghi chú, ngoặc kép. Câu trả lời bị bóc sạch rồi kiểm tra; trả lời dài gấp nhiều
@@ -241,7 +269,8 @@ trạng thái ẩn thuộc về đúng một luồng audio. Kết nối thứ ha
 | Nơi | Chạy ở đâu | Cần gì |
 | --- | --- | --- |
 | `server/tests/`, `client/tests/` | Dev PC | Không GPU, không sound card |
-| `server/tests_real/` | GPU pod | Model thật |
+| `server/tests_real/` | Windows (pipeline), gọi model thật trên pod | Model thật, pod đang chạy |
+| `gpu_server/` | GPU pod | Chỉ khởi động và `curl` hai server |
 | `client/tests_real/` | Windows Client PC | Sound card thật |
 
 Mỗi tầng tách làm **lớp policy thuần Python** (test được ở Dev PC) và **lớp bọc
@@ -254,7 +283,8 @@ một cuộc họp** — kiểm tra là cùng cuộc họp trước khi so bất
 
 ```
 client/          thu âm, WebSocket, UI
-server/          8 tầng + FastAPI
+server/          8 tầng + FastAPI, chạy ở Windows
+gpu_server/      whisper_server.py + requirements, thứ duy nhất trên pod
   analysis/      đọc và so nhật ký gỡ lỗi, không cần GPU
   data/          danh sách chặn/giữ và từ vựng, sửa được không cần code
   pipeline/      một file mỗi tầng

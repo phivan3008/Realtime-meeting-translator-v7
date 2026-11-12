@@ -63,3 +63,12 @@ def test_print_only_starts_nothing(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "--dtype bfloat16" in out
     assert "--max-model-len 4096" in out
+
+
+def test_the_pod_readme_carries_the_same_command():
+    """The pod holds no pipeline code, so the command is pasted from
+    gpu_server/README.md; it must be the one this script builds."""
+    readme = (Path(__file__).resolve().parents[2] / "gpu_server"
+              / "README.md").read_text(encoding="utf-8")
+    cmd = launch_vllm.command(python=launch_vllm.POD_PYTHON)
+    assert " ".join(cmd) in readme

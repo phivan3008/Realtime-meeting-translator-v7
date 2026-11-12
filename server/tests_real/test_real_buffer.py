@@ -1,6 +1,8 @@
 """REAL TEST - VAD + Stream Buffer Manager on real recorded audio.
 
-MUST RUN ON: the GPU Server pod.
+MUST RUN ON: the Windows machine that runs the pipeline (CPU). Whisper and
+Gemma are called on the GPU pod over HTTP, so a test that needs them needs
+the pod running and its ports forwarded (gpu_server/README.md).
 DO NOT RUN ON: the Dev PC agent loop.
 
 Module 4 sits between the VAD and everything expensive, so its output is what

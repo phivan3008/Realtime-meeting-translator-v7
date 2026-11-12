@@ -291,7 +291,7 @@ def test_the_guards_stop_invented_text_reaching_the_transcript():
 # main()
 # ---------------------------------------------------------------------------
 def run_main(monkeypatch, tmp_path, with_silence: bool = True) -> int:
-    monkeypatch.setattr(harness, "WhisperDecoder", lambda **k: StubDecoder())
+    monkeypatch.setattr(harness, "make_decoder", lambda *a, **k: StubDecoder())
     monkeypatch.setattr(harness, "SileroVAD", lambda **k: ScriptedVAD([0.9]))
     monkeypatch.setattr(harness, "PedalboardProcessor", Passthrough)
     argv = ["x",
@@ -323,10 +323,10 @@ def test_main_needs_at_least_one_recording(monkeypatch, capsys):
 
 
 def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
-    def explode(**_kwargs):
+    def explode(*_args, **_kwargs):
         raise harness.AsrError("Could not load Whisper 'large-v3'")
 
-    monkeypatch.setattr(harness, "WhisperDecoder", explode)
+    monkeypatch.setattr(harness, "make_decoder", explode)
     monkeypatch.setattr(
         sys, "argv", ["x", "--vi", str(write_wav(tmp_path / "vi.wav", 2.0))])
     assert harness.main() == 2

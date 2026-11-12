@@ -1,8 +1,14 @@
-"""FastAPI application: the WebSocket front door of the GPU server.
+"""FastAPI application: the WebSocket front door of the meeting pipeline.
 
-Run on the pod::
+Runs on the Windows machine, next to the client::
 
-    python3.11 -m uvicorn server.app:app --host 0.0.0.0 --port 8000
+    py -3.11 -m uvicorn server.app:app --host 127.0.0.1 --port 8000
+
+The GPU pod only serves models: Whisper behind
+``gpu_server/whisper_server.py`` and Gemma 4 behind vLLM. Everything else -
+VAD, sentence boundaries, speakers, language ID, the streaming ASR policy and
+the translation prompt - runs in this process, on CPU, and calls the pod over
+HTTP for the two models.
 
 The heavy lifting lives elsewhere - this module only owns the socket, the
 model's lifetime and the single-session rule.
@@ -12,8 +18,8 @@ belongs to one audio stream.  Sharing a single model instance across two
 concurrent meetings would mix their states and quietly degrade both, so a
 second connection is refused rather than served badly.  Loading a model per
 connection instead would cost ~1.4 s on every reconnect, which a flaky
-network makes routine.  One meeting per pod is the current scope; when that
-changes, the fix is a pool of pre-loaded models, not a shared one.
+network makes routine.  One meeting per process is the current scope; when
+that changes, the fix is a pool of pre-loaded models, not a shared one.
 """
 
 from __future__ import annotations
@@ -104,7 +110,7 @@ class AppState:
                 "Not running in a virtual environment. The pipeline will "
                 "start anyway from whatever this interpreter has, which is "
                 "not the set of versions this project pins. Activate it: "
-                "source .venv/bin/activate")
+                r".venv\Scripts\activate")
         if self.vad is None:
             log.info("Loading Silero VAD ...")
             self.vad = SileroVAD()
@@ -215,10 +221,20 @@ def health() -> dict:
         "language_model_error": state.language_error,
         "asr_loaded": state.transcriber is not None,
         "asr_error": state.asr_error,
+        "asr_source": _source(state.transcriber),
         "translation_loaded": state.translator is not None,
         "translation_error": state.translate_error,
+        "translation_source": _source(state.translator),
         "session_active": state.active_session_id is not None,
     }
+
+
+def _source(stage) -> str:
+    """Where a stage's model runs, e.g. the pod URL behind the ASR."""
+    if stage is None:
+        return ""
+    holder = getattr(stage, "decoder", None) or getattr(stage, "backend", None)
+    return str(getattr(holder, "source", "") or getattr(stage, "source", ""))
 
 
 async def _send(socket: WebSocket, response: Response) -> None:

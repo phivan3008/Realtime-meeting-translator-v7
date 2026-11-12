@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# GPU Server pod (H100 80GB) - Python 3.11 + CUDA
+#
+#     python3.11 -m pip install -r gpu_server/requirements.lock.txt
+#
+# The pod serves two models and runs nothing else: vLLM for Gemma 4 and
+# gpu_server/whisper_server.py for Whisper. The meeting pipeline runs on the
+# Windows machine (server/requirements.txt).
+#
+# These are the direct dependencies only. gpu_server/requirements.lock.txt
+# holds the full resolved set for linux x86_64 / cp311. Every version here is
+# the one the pod ran before the pipeline moved off it, so the models are
+# served by the same libraries they were measured with.
+# ---------------------------------------------------------------------------
+
+# --- Translation LLM ---
+vllm==0.26.0
+
+# Held at 5.14.1 for vLLM 0.26.0 and Gemma 4. Transformers 5.15.0 made Gemma
+# 4's head_dim a per-layer attribute (256 on sliding layers, 512 on full
+# attention), and reading it from the global config now raises
+# AmbiguousGlobalPerLayerAttributeError. vLLM 0.26.0 reads it globally, so it
+# cannot even build the model config; per-layer reading arrived in vLLM
+# 0.28.0, which needs torch 2.13. 5.14.1 is the last release before the change,
+# the one vLLM 0.26.0 shipped against, and has identical dependencies.
+transformers==5.14.1
+
+# vLLM decides the torch minor. Pinned explicitly so a resolver cannot pick a
+# torch the vLLM build was not compiled against.
+torch==2.11.0
+
+# --- ASR: gpu_server/whisper_server.py ---
+# faster-whisper runs on CTranslate2, which needs cuBLAS 12 and cuDNN 9. The
+# torch wheel above already brings both (nvidia-cublas-cu12,
+# nvidia-cudnn-cu12), which is why the two share one environment.
+faster-whisper==1.2.1
+fastapi==0.136.3
+uvicorn[standard]==0.52.4
+numpy==2.3.5
+
+# ---------------------------------------------------------------------------
+# What binds what
+#
+#   vllm >= 0.26  ->  transformers >= 5.5.3
+#   vllm <  0.28  ->  transformers <  5.15    (Gemma 4 per-layer head_dim)
+#   vllm          ->  a specific torch minor
+#
+# Change vllm or torch first, re-resolve the whole file, and never pin a
+# single line to fix one error:
+#   uv pip compile --python-version 3.11 \
+#       --python-platform x86_64-unknown-linux-gnu \
+#       gpu_server/requirements.txt -o gpu_server/requirements.lock.txt
+# ---------------------------------------------------------------------------

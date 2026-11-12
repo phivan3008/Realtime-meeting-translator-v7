@@ -57,6 +57,7 @@ from typing import Iterable, Literal, Optional, Protocol, Union
 import numpy as np
 
 from server.config import (
+    ASR_BACKEND,
     ASR_BEAM_SIZE_FINAL,
     ASR_BEAM_SIZE_PARTIAL,
     ASR_CACHE_DIR,
@@ -443,7 +444,7 @@ class StreamingTranscriber:
         if min_agreement < 2:
             raise ValueError("min_agreement must be at least 2")
 
-        self.decoder = decoder if decoder is not None else WhisperDecoder()
+        self.decoder = decoder if decoder is not None else make_decoder()
 
         self.no_speech_threshold = no_speech_threshold
         self.log_prob_threshold = log_prob_threshold
@@ -1341,8 +1342,9 @@ class WhisperDecoder:
             from faster_whisper import WhisperModel
         except ImportError as exc:  # pragma: no cover
             raise AsrError(
-                "faster-whisper is not installed. Run "
-                "`python3.11 -m pip install -r server/requirements.txt`."
+                "faster-whisper is not installed here. The pipeline calls "
+                "Whisper on the GPU pod by default (ASR_BACKEND=remote); "
+                "ASR_BACKEND=local needs `pip install faster-whisper==1.2.1`."
             ) from exc
 
         self.model_id = model_id or ASR_MODEL
@@ -1455,6 +1457,24 @@ class WhisperDecoder:
             f"whisper {self.model_id} on "
             f"{self.device} ({self.compute_type})"
         )
+
+
+def make_decoder(backend: str = "", model_id: str = "", url: str = "",
+                 device: str = "") -> Decoder:
+    """The decoder ASR_BACKEND names.
+
+    ``remote`` is faster-whisper on the GPU pod over HTTP
+    (:class:`server.pipeline.asr_remote.RemoteWhisperDecoder`), at ``url`` or
+    ASR_SERVER_URL; ``local`` is :class:`WhisperDecoder` in this process, on
+    ``device``.
+    """
+    chosen = (backend or ASR_BACKEND).strip().lower()
+    if chosen == "remote":
+        from server.pipeline.asr_remote import RemoteWhisperDecoder
+        return RemoteWhisperDecoder(base_url=url, model_id=model_id)
+    if chosen == "local":
+        return WhisperDecoder(model_id=model_id, device=device)
+    raise AsrError(f"ASR_BACKEND must be 'remote' or 'local', not {chosen!r}")
 
 
 def pcm_seconds(pcm: bytes) -> float:

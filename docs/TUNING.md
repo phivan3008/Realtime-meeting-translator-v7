@@ -627,7 +627,10 @@ chất và phải nghĩ lại.
 
 | Thông số | Mặc định | Ý nghĩa |
 | --- | --- | --- |
-| `ASR_MODEL` | `large-v3` | Checkpoint faster-whisper |
+| `ASR_BACKEND` | `remote` | `remote`: Whisper chạy trên GPU pod sau `gpu_server/whisper_server.py`, gọi qua HTTP. `local`: faster-whisper trong tiến trình — máy Windows không có GPU cho việc này |
+| `ASR_SERVER_URL` | `http://127.0.0.1:8002` | `whisper_server.py` trên pod, qua port-forward hoặc SSH tunnel |
+| `ASR_TIMEOUT_S` | `10` | Mỗi lần giải mã chạy trên luồng đọc socket; server mất thì không được giữ luồng đó lâu. Ba lần hỏng liên tiếp là tắt ASR cho cả cuộc họp |
+| `ASR_MODEL` | `large-v3` | Checkpoint faster-whisper. Với `remote` phải trùng với cái pod đang phục vụ — pipeline kiểm tra lúc khởi động và từ chối nếu khác |
 | `ASR_BEAM_SIZE_PARTIAL` | `1` | Chữ mờ giải mã tham lam |
 | `ASR_BEAM_SIZE_FINAL` | `5` | Câu chốt được beam search |
 | `ASR_NO_SPEECH_THRESHOLD` | `0.6` | Coi là im lặng — **cần thêm điều kiện logprob** |
@@ -897,13 +900,13 @@ Phần đáng giá nhất là **tên người và tên dự án** — Whisper kh
 | `TRANSLATION_MAX_LAG_SECONDS` | `10.0` | Chờ quá lâu thì bỏ dịch |
 | `TRANSLATION_QUEUE_DEPTH` | `16` | Trần hàng đợi |
 
-**vLLM** được khởi động bởi `server/launch_vllm.py` từ các số sau:
+**vLLM** chạy trên GPU pod. `server/launch_vllm.py --print` (chạy ở máy Windows) in ra lệnh dựng từ các số sau, để dán vào pod — xem [`gpu_server/README.md`](../gpu_server/README.md):
 
 | Thông số | Mặc định | Ý nghĩa |
 | --- | --- | --- |
 | `VLLM_DTYPE` | `bfloat16` | Gemma chạy float16 ra rác hoặc NaN, không ra lỗi |
 | `VLLM_MAX_MODEL_LEN` | `4096` | Prompt chỉ vài trăm token; phần context không dùng là KV cache không phải cấp |
-| `VLLM_GPU_MEMORY_UTILIZATION` | `0.85` | Phần của **cả card**; vLLM phải khởi động trước server âm thanh |
+| `VLLM_GPU_MEMORY_UTILIZATION` | `0.85` | Phần của **cả card**; vLLM phải khởi động trước `whisper_server.py`, phần còn lại (~12 GB trên H100 80 GB) đủ cho Whisper large-v3 float16 |
 | `VLLM_TRUST_REMOTE_CODE` | `True` | |
 | `VLLM_PORT` | `8001` | |
 

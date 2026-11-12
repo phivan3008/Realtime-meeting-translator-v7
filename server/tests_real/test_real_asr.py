@@ -1,6 +1,8 @@
 """REAL TEST - Whisper large-v3 on real Vietnamese and Japanese speech.
 
-MUST RUN ON: the GPU Server pod.
+MUST RUN ON: the Windows machine that runs the pipeline (CPU). Whisper and
+Gemma are called on the GPU pod over HTTP, so a test that needs them needs
+the pod running and its ports forwarded (gpu_server/README.md).
 DO NOT RUN ON: the Dev PC agent loop.
 
 ``DESIGN.md`` section 3.7. Machine checks cannot tell you whether a
@@ -46,7 +48,7 @@ from server.config import (  # noqa: E402
     SAMPLE_RATE,
     SAMPLE_WIDTH,
 )
-from server.pipeline.asr import AsrError, Transcriber, WhisperDecoder, pcm_seconds  # noqa: E402
+from server.pipeline.asr import AsrError, Transcriber, make_decoder, pcm_seconds  # noqa: E402
 from server.pipeline.buffer import BufferManager, FinalizeReason, Utterance  # noqa: E402
 from server.pipeline.overlap import OverlapResolver, PedalboardProcessor  # noqa: E402
 from server.pipeline.vad import SileroVAD, VADError, VADSegmenter  # noqa: E402
@@ -287,7 +289,14 @@ def main() -> int:
     parser.add_argument("--silence", type=Path, default=None,
                         help="WAV of a quiet room, to catch invented text")
     parser.add_argument("--model", default="", help=f"default: {ASR_MODEL}")
-    parser.add_argument("--device", default="", help='"cuda" or "cpu"')
+    parser.add_argument("--backend", default="",
+                        help='"remote" (Whisper on the pod) or "local"; '
+                             "default ASR_BACKEND")
+    parser.add_argument("--asr-url", default="",
+                        help="whisper_server.py on the pod; default "
+                             "ASR_SERVER_URL")
+    parser.add_argument("--device", default="",
+                        help='"cuda" or "cpu", local backend only')
     args = parser.parse_args()
 
     if not args.vi and not args.ja:
@@ -303,10 +312,11 @@ def main() -> int:
     try:
         print("\n  Loading Whisper ...")
         started = time.perf_counter()
-        decoder = WhisperDecoder(model_id=args.model, device=args.device)
+        decoder = make_decoder(args.backend, model_id=args.model,
+                               url=args.asr_url, device=args.device)
         print(f"  Ready in {time.perf_counter() - started:.1f} s "
               f"from {decoder.source}")
-        report.add("Whisper loads on the pod", True, decoder.source)
+        report.add("Whisper answers", True, decoder.source)
 
         transcriber = Transcriber(decoder=decoder)
         vad = SileroVAD()
