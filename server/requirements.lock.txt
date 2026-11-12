@@ -220,7 +220,7 @@ soundfile==0.14.0
     #   speechbrain
 soxr==1.1.0
     # via -r server/requirements.txt
-speechbrain==1.1.0
+speechbrain==1.1.2
     # via -r server/requirements.txt
 starlette==1.6.0
     # via

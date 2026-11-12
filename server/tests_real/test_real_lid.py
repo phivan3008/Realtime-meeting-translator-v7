@@ -278,7 +278,7 @@ def main() -> int:
         classifier = VoxLinguaClassifier(device=args.device)
         print(f"  Ready in {time.perf_counter() - started:.1f} s "
               f"from {classifier.source}")
-        report.add("The language model loads on the pod", True, classifier.source)
+        report.add("The language model loads", True, classifier.source)
         report.add("It knows both meeting languages",
                    set(classifier.index_of) == set(LID_LANGUAGES),
                    f"{sorted(classifier.index_of)}")

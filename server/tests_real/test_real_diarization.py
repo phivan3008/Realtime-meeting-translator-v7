@@ -392,7 +392,7 @@ def main() -> int:
         embedder = EcapaEmbedder(device=args.device)
         print(f"  Ready in {time.perf_counter() - started:.1f} s "
               f"from {embedder.source}")
-        report.add("The embedding model loads on the pod", True, embedder.source)
+        report.add("The embedding model loads", True, embedder.source)
 
         vad = SileroVAD()
         resolver = OverlapResolver(processor=PedalboardProcessor())

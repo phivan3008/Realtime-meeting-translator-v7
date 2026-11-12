@@ -63,7 +63,10 @@ pedalboard==0.9.24
 # --- 4. Speaker Diarization / voiceprint, and 5. Language ID ---
 # Both stages use SpeechBrain checkpoints. Voiceprints are ECAPA-TDNN
 # (speechbrain/spkrec-ecapa-voxceleb), language ID is VoxLingua107.
-speechbrain==1.1.0
+# 1.1.2, not the 1.1.0 the pod ran: 1.1.0 recognises inspect.py only by a
+# "/inspect.py" suffix, so on Windows inspect's module scan triggers its lazy
+# k2_fsa import and VoxLingua fails to load. 1.1.2 compares the basename.
+speechbrain==1.1.2
 
 # --- 6. ASR and 7. Translation ---------------------------------------------
 # Nothing to install: both are HTTP calls to the GPU pod, made with the

@@ -240,7 +240,7 @@ def main() -> int:
               f"from {classifier.source}")
         print(f"  {len(classifier.labels)} classes, "
               f"e.g. {classifier.labels[:3]}")
-        report.add("The classifier loads on the pod", True, classifier.source)
+        report.add("The classifier loads", True, classifier.source)
         report.add("The label set looks like AudioSet",
                    len(classifier.labels) >= 500,
                    f"{len(classifier.labels)} labels")

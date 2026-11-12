@@ -187,7 +187,7 @@ class EcapaEmbedder:
     ``DESIGN.md`` names pyannote.audio for this stage, and pyannote does ship
     a wrapper - ``PretrainedSpeakerEmbedding`` - around this very checkpoint.
     It cannot be used here: pyannote 4.0.7 calls SpeechBrain with ``token``,
-    ``huggingface_cache_dir`` and ``revision``, and SpeechBrain 1.1.0 accepts
+    ``huggingface_cache_dir`` and ``revision``, and SpeechBrain 1.1 accepts
     none of the three, so the wrapper raises before it ever loads a model.
     pyannote declares no version bound on SpeechBrain either, so no resolver
     and no ``pip check`` can see the mismatch - only running it does.
