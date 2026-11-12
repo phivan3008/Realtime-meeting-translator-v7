@@ -419,3 +419,17 @@ def test_embed_all_keeps_a_raw_copy_of_every_sentence(tmp_path):
                               make_resolver())
     assert len(voice.raw_utterances) == len(voice.utterances)
     assert len(voice.raw_embeddings) == len(voice.embeddings)
+
+
+def test_the_cost_budget_follows_the_device():
+    """GPU keeps the old 5%; the CPU-only Windows machine gets 15%."""
+    assert harness.max_ratio("cuda:0") == harness.MAX_EMBED_RATIO == 0.05
+    assert harness.max_ratio("cpu") == harness.MAX_EMBED_RATIO_CPU == 0.15
+    report = harness.Report()
+    voice = voice_of([ALICE, ALICE])
+    voice.embed_seconds = 0.09 * voice.audio_seconds
+    harness.check_embeddings(voice, report, harness.max_ratio("cpu"))
+    assert not report.failed
+    harness.check_embeddings(voice, report, harness.max_ratio("cuda:0"))
+    assert [c.name for c in report.failed] == [
+        f"{voice.path.name} embedding is cheap"]

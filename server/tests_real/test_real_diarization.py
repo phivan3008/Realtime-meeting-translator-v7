@@ -70,6 +70,15 @@ from server.pipeline.vad import SileroVAD, VADError, VADSegmenter  # noqa: E402
 
 # Embedding one sentence must stay cheap next to transcribing it.
 MAX_EMBED_RATIO = 0.05
+#: The same budget on a CPU. The pipeline moved to a CPU-only Windows machine
+#: (2026-11-12), where one pass costs 0.07-0.10 of the audio. Whether the
+#: stages together still fit is test_real_streaming.py's call.
+MAX_EMBED_RATIO_CPU = 0.15
+
+
+def max_ratio(device: str) -> float:
+    """The cost budget for the device the model actually loaded on."""
+    return MAX_EMBED_RATIO if str(device).startswith("cuda") else MAX_EMBED_RATIO_CPU
 
 
 @dataclass
@@ -273,7 +282,8 @@ def check_shaping(shaped: list[float], raw: list[float],
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
-def check_embeddings(voice: Voice, report: Report) -> None:
+def check_embeddings(voice: Voice, report: Report,
+                     limit: float = MAX_EMBED_RATIO) -> None:
     name = voice.path.name
     report.add(f"{name} produced sentences to identify",
                len(voice.embeddings) >= 2,
@@ -285,8 +295,8 @@ def check_embeddings(voice: Voice, report: Report) -> None:
                f"{sorted(sizes)}")
     report.add(f"{name} voiceprints are finite",
                all(bool(np.all(np.isfinite(e))) for e in voice.embeddings), "")
-    report.add(f"{name} embedding is cheap", voice.embed_ratio < MAX_EMBED_RATIO,
-               f"ratio {voice.embed_ratio:.4f} < {MAX_EMBED_RATIO}")
+    report.add(f"{name} embedding is cheap", voice.embed_ratio < limit,
+               f"ratio {voice.embed_ratio:.4f} < {limit}")
 
 
 def check_separation(same: list[float], different: list[float],
@@ -427,7 +437,7 @@ def main() -> int:
         print()
         print("Checks:")
         for voice in voices:
-            check_embeddings(voice, report)
+            check_embeddings(voice, report, max_ratio(getattr(embedder, "device", "")))
         report.add("At least two voices to compare", len(voices) >= 2,
                    f"{len(voices)} recording(s)")
         check_separation(same, different, report)

@@ -187,3 +187,9 @@ def test_the_replay_keeps_the_servers_own_log(monkeypatch, tmp_path, capsys):
     import logging
     assert not any(isinstance(handler, logging.FileHandler)
                    for handler in logging.getLogger("server").handlers)
+
+
+def test_time_waiting_for_the_pod_is_not_charged_to_this_cpu():
+    """With Whisper on the pod, its two stages are reported apart."""
+    assert harness.pod_stages("remote") == {"partial_asr", "asr"}
+    assert harness.pod_stages("local") == set()

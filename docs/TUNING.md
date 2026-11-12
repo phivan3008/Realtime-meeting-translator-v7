@@ -191,7 +191,7 @@ quạt — và tầng này bỏ được chúng.
 
 | Thông số | Mặc định | Ý nghĩa |
 | --- | --- | --- |
-| `ENABLE_NOISE_FILTER` | `False` | Biến môi trường `=1` để bật tầng này |
+| `ENABLE_NOISE_FILTER` | `False` | Biến môi trường `=1` để bật tầng này. **Giữ tắt trên máy Windows CPU**: đo ngày 2026-11-12, AST trên CPU tốn 0.40–0.43 thời lượng audio (trên GPU dưới 0.1), một mình nó đã vượt ngân sách CPU 35% của cả pipeline |
 | `NOISE_MIN_SPEECH_SCORE` | `0.2` | Dưới ngưỡng này mới xét bỏ |
 | `NOISE_MIN_NOISE_SCORE` | `0.3` | ...và chỉ bỏ khi model chắc chắn nghe thấy thứ khác |
 | `NOISE_WINDOW_SECONDS` | `10.0` | Cửa sổ AST đọc mỗi lần |

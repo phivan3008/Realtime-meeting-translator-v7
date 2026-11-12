@@ -278,3 +278,9 @@ def test_main_reports_a_model_that_will_not_load(monkeypatch, tmp_path, capsys):
     )
     assert harness.main() == 2
     assert "Could not load" in capsys.readouterr().out
+
+
+def test_the_cost_budget_follows_the_device():
+    """GPU keeps the old 5%; the CPU-only Windows machine gets 15%."""
+    assert harness.max_ratio("cuda:0") == harness.MAX_LID_RATIO == 0.05
+    assert harness.max_ratio("cpu") == harness.MAX_LID_RATIO_CPU == 0.15

@@ -51,6 +51,7 @@ import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -62,12 +63,24 @@ from server.analysis.debuglog import (  # noqa: E402
     parse,
     same_meeting,
 )
-from server.config import CHANNELS, CHUNK_BYTES, SAMPLE_RATE, SAMPLE_WIDTH  # noqa: E402
+from server.config import (  # noqa: E402
+    ASR_BACKEND,
+    CHANNELS,
+    CHUNK_BYTES,
+    SAMPLE_RATE,
+    SAMPLE_WIDTH,
+)
 from server.net.session import ServerSession, Stages  # noqa: E402
 
-#: A replay faster than this share of real time leaves the live pipeline
-#: room to breathe. The last trustworthy baseline spent 18.5%.
+#: The stages this machine computes itself, as a share of the audio. Under
+#: this the live pipeline has room to breathe. The last trustworthy baseline,
+#: everything on the pod's GPU, spent 18.5% in total.
 MAX_PIPELINE_SHARE = 0.35
+#: Stages that only wait for the GPU pod. Their time is the network plus the
+#: pod, not this CPU, so it is reported apart and gated by the replay itself
+#: keeping up with real time and by MAX_PARTIAL_SECONDS. Translation is not
+#: among them: it runs on its own worker thread, outside the timed stages.
+POD_STAGES_REMOTE_ASR = ("partial_asr", "asr")
 #: The running text runs every 600 ms; one pass longer than this is a stall
 #: the reader sees.
 MAX_PARTIAL_SECONDS = 1.5
@@ -199,8 +212,16 @@ def replay(pcm: bytes, loaded: dict, recorder: LogWriter,
     return session
 
 
+def pod_stages(backend: str) -> set[str]:
+    """The stages whose time is spent waiting for the GPU pod."""
+    if (backend or ASR_BACKEND) == "remote":
+        return set(POD_STAGES_REMOTE_ASR)
+    return set()
+
+
 def check(session: ServerSession, debug_path: Path, audio_seconds: float,
-          args, report: Report) -> None:
+          args, report: Report,
+          replay_seconds: Optional[float] = None) -> None:
     run = parse(debug_path)
     found = measure(run)
     stats = session.stats
@@ -278,11 +299,22 @@ def check(session: ServerSession, debug_path: Path, audio_seconds: float,
                found["update_survival"] >= MIN_UPDATE_SURVIVAL,
                f"{found['update_survival']:.1%} kept per update, "
                f"{found['updates_wiping_half']:.1%} wipe over half")
-    spent = sum(stats.stage_seconds.values())
-    report.add("The pipeline keeps well inside real time",
-               spent <= MAX_PIPELINE_SHARE * audio_seconds,
-               f"{spent:.1f} s for {audio_seconds:.1f} s "
-               f"({spent / max(audio_seconds, 1e-9):.1%})")
+    remote = pod_stages(args.backend)
+    local = sum(v for k, v in stats.stage_seconds.items() if k not in remote)
+    waited = sum(v for k, v in stats.stage_seconds.items() if k in remote)
+    share = 1 / max(audio_seconds, 1e-9)
+    report.add("This machine's own stages keep well inside real time",
+               local <= MAX_PIPELINE_SHARE * audio_seconds,
+               f"{local:.1f} s for {audio_seconds:.1f} s "
+               f"({local * share:.1%}, limit {MAX_PIPELINE_SHARE:.0%})")
+    report.note("waiting for the pod",
+                f"{waited:.1f} s ({waited * share:.1%}) in "
+                f"{', '.join(sorted(remote & set(stats.stage_seconds))) or 'none'}")
+    if replay_seconds is not None:
+        report.add("The replay keeps up with real time",
+                   replay_seconds < audio_seconds,
+                   f"{replay_seconds:.1f} s for {audio_seconds:.1f} s "
+                   f"({replay_seconds * share:.1%})")
     report.add("No running text stalls the socket",
                stats.slowest_partial_seconds <= MAX_PARTIAL_SECONDS,
                f"slowest {stats.slowest_partial_seconds:.2f} s, "
@@ -380,10 +412,11 @@ def main() -> int:
             recorder.close()
             server_logger.removeHandler(handler)
             handler.close()
-        print(f"  done in {time.perf_counter() - started:.1f} s; "
-              f"log at {args.out}")
+        replay_seconds = time.perf_counter() - started
+        print(f"  done in {replay_seconds:.1f} s; log at {args.out}")
 
-        check(session, args.out, audio_seconds, args, report)
+        check(session, args.out, audio_seconds, args, report,
+              replay_seconds=replay_seconds)
 
         if args.baseline:
             print("\nSide by side (the baselines cover the whole meeting; "
