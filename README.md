@@ -59,8 +59,8 @@ git clone <repo>; cd Realtime-meeting-translator-v7
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python --version                      # phải in 3.11.x
-py -3.11 -m pip install -r server\requirements.lock.txt
-py -3.11 -m pip install -r client\requirements.lock.txt
+python -m pip install -r server\requirements.lock.txt
+python -m pip install -r client\requirements.lock.txt
 ```
 
 `server\requirements.lock.txt` là pipeline chạy CPU: torch CPU, Silero,
@@ -97,14 +97,14 @@ Hoặc dùng tab **Ports** của VSCode Remote-SSH: forward cổng 8001 và 8002
 Kiểm tra pod trả lời được từ Windows trước khi chạy gì khác:
 
 ```powershell
-py -3.11 server\tests_real\test_real_remote_models.py
+python server\tests_real\test_real_remote_models.py
 ```
 
 **Terminal 2 (Windows) — pipeline:**
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-py -3.11 -m uvicorn server.app:app --host 127.0.0.1 --port 8000
+python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
 ```
 
 Chờ `Application startup complete`, rồi kiểm tra:
@@ -146,7 +146,7 @@ lại pipeline sau khi pod sẵn sàng.
 **Terminal 3 (Windows) — cửa sổ phiên dịch:**
 
 ```powershell
-py -3.11 -m client.ui.main --url ws://127.0.0.1:8000
+python -m client.ui.main --url ws://127.0.0.1:8000
 ```
 
 Bấm **Bắt đầu**, rồi phát âm thanh cuộc họp. Chữ mờ nghiêng là dự đoán đang
@@ -175,7 +175,7 @@ So các lần chạy của **cùng một cuộc họp** (kiểm tra là cùng cu
 in số nào):
 
 ```powershell
-py -3.11 -m server.analysis.compare_logs recordings\meeting-A.debug.txt recordings\meeting-B.debug.txt
+python -m server.analysis.compare_logs recordings\meeting-A.debug.txt recordings\meeting-B.debug.txt
 ```
 
 Hoặc chạy bằng script kiểm thử, không giao diện:

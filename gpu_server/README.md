@@ -68,7 +68,7 @@ python3.11 -m vllm.entrypoints.openai.api_server --model google/gemma-4-12b-it -
 ```
 
 Lệnh này sinh từ `server/config.py` — ở máy Windows chạy
-`py -3.11 server\launch_vllm.py --print` để in lại, và một unit test giữ hai
+`python server\launch_vllm.py --print` để in lại, và một unit test giữ hai
 nơi khớp nhau.
 
 Chờ `Application startup complete`, rồi:

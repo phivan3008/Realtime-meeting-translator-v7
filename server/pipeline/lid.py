@@ -218,6 +218,7 @@ class VoxLinguaClassifier:
         try:
             import torch
             from speechbrain.inference.classifiers import EncoderClassifier
+            from speechbrain.utils.fetching import LocalStrategy
         except ImportError as exc:                      # pragma: no cover
             raise LanguageIdError(
                 "speechbrain / torch are not installed. Run "
@@ -234,6 +235,10 @@ class VoxLinguaClassifier:
             self._model = EncoderClassifier.from_hparams(
                 source=self.model_id,
                 savedir=str(Path(LID_CACHE_DIR) / self.model_id.replace("/", "_")),
+                # Copy out of the Hugging Face cache, never symlink: Windows
+                # refuses a symlink without admin rights or Developer Mode
+                # (WinError 1314), and the pipeline runs there now.
+                local_strategy=LocalStrategy.COPY,
                 run_opts={"device": self.device},
             )
         except Exception as exc:                        # pragma: no cover

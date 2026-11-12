@@ -109,7 +109,7 @@ flowchart LR
 | `config.py` | Re-export hợp đồng audio từ `common/protocol.py`. |
 | `ui/transcript.py` | Nội dung màn hình, thuần Python. Hàng khoá theo `sentence_id`; `translation` và `speakers` cập nhật tại chỗ; `partial` rỗng xoá chữ mờ. |
 | `ui/session.py` | Thu âm và socket trên thread riêng với asyncio loop riêng, chạm Qt chỉ qua signal. |
-| `ui/window.py`, `ui/main.py` | Cửa sổ PySide6: `py -3.11 -m client.ui.main --url ws://127.0.0.1:8000`. |
+| `ui/window.py`, `ui/main.py` | Cửa sổ PySide6: `python -m client.ui.main --url ws://127.0.0.1:8000`. |
 | `record.py` | Ghi `recordings/meeting-<ngày>-<giờ>.txt` (biên bản) và `.debug.txt` (mọi message theo thứ tự tới), UTF-8, flush từng dòng. |
 
 Client không lọc audio, kể cả khoảng lặng (~256 kbps) và không chứa ML.
@@ -137,7 +137,7 @@ stateDiagram-v2
 Thứ tự khởi động: trên pod **vLLM trước**, rồi `whisper_server.py` (xem
 `gpu_server/README.md`) — vLLM giữ 85% bộ nhớ GPU ngay lúc khởi động. Rồi trên
 Windows: tunnel, pipeline
-(`py -3.11 -m uvicorn server.app:app --host 127.0.0.1 --port 8000`), client.
+(`python -m uvicorn server.app:app --host 127.0.0.1 --port 8000`), client.
 
 ### 4.1b Whisper qua HTTP (`server/pipeline/asr_remote.py`)
 

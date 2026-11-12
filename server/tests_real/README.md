@@ -21,15 +21,20 @@ py -3.11 -m venv .venv
 python --version          # must print 3.11.x
 
 # The lock is the exact resolved set for Windows x86_64 / cp311, CPU torch.
-py -3.11 -m pip install -r server\requirements.lock.txt
-py -3.11 -m pip install -r client\requirements.lock.txt
+python -m pip install -r server\requirements.lock.txt
+python -m pip install -r client\requirements.lock.txt
 ```
 
 Check the resolution before committing to the download:
 
 ```powershell
-py -3.11 -m pip install --dry-run -r server\requirements.lock.txt
+python -m pip install --dry-run -r server\requirements.lock.txt
 ```
+
+Once the venv is active, run everything with `python`, not `py -3.11`:
+the launcher given an explicit version ignores the active venv and runs the
+system interpreter. Check with `python -c "import sys; print(sys.prefix)"`,
+which must end in `.venv`.
 
 Never install into the system interpreter. That downgrades numpy and protobuf
 underneath anything else sharing it, which is how this project lost an
@@ -38,7 +43,7 @@ afternoon once already.
 ## First: can this machine reach the pod?
 
 ```powershell
-py -3.11 server\tests_real\test_real_remote_models.py --wav recordings\meeting_speech.wav
+python server\tests_real\test_real_remote_models.py --wav recordings\meeting_speech.wav
 ```
 
 Both servers answer and serve the expected checkpoints, Whisper returns words
@@ -62,18 +67,18 @@ one translation comes back. Everything below depends on this passing.
 | `test_real_streaming.py` | yes | The whole pipeline on a recorded meeting, fed in 200 ms chunks exactly as the client sends it: Japanese without spaces between characters, no word shown twice at a join, running text that does not rewrite what is being read, no stage failures, inside real time |
 
 ```powershell
-py -3.11 server\tests_real\test_real_vad.py `
+python server\tests_real\test_real_vad.py `
     --speech recordings\meeting_speech.wav `
     --silence recordings\quiet_room.wav
 
-py -3.11 server\tests_real\test_real_buffer.py `
+python server\tests_real\test_real_buffer.py `
     --speech recordings\meeting_speech.wav
 ```
 
 Add `--onnx` to either one to run the ONNX model instead of the torch jit one.
 
 ```powershell
-py -3.11 server\tests_real\test_real_noise.py `
+python server\tests_real\test_real_noise.py `
     --speech recordings\meeting_speech.wav `
     --noise recordings\keyboard.wav `
     --noise recordings\cough.wav
@@ -81,7 +86,7 @@ py -3.11 server\tests_real\test_real_noise.py `
 
 ```powershell
 # Start with three minutes. --translate needs vLLM on the pod.
-py -3.11 server\tests_real\test_real_streaming.py --wav recordings\meeting_30min.wav --limit-seconds 180 `
+python server\tests_real\test_real_streaming.py --wav recordings\meeting_30min.wav --limit-seconds 180 `
     --baseline recordings\meeting-20260911-144023.debug.txt `
     --baseline recordings\meeting-20260910-144120.debug.txt
 ```
@@ -91,7 +96,7 @@ py -3.11 server\tests_real\test_real_streaming.py --wav recordings\meeting_30min
 
 `test_real_streaming.py` writes `server/tests_real/output/streaming.debug.txt`
 in the client's own format, so it can be compared with any client log of the
-same meeting (`py -3.11 -m server.analysis.compare_logs ...`). The logs and
+same meeting (`python -m server.analysis.compare_logs ...`). The logs and
 the replay are on the same machine now, so `--baseline` needs no copying.
 
 `recordings/` is not in git. The WAV must be 16 kHz mono 16-bit; convert with
@@ -107,7 +112,7 @@ vLLM runs on the pod and is started there (`gpu_server/README.md`). The
 command is built from `server/config.py`; print it here with:
 
 ```powershell
-py -3.11 server\launch_vllm.py --print
+python server\launch_vllm.py --print
 ```
 
 `bfloat16` is required for Gemma: float16 gives garbage or NaN, not an error.
@@ -130,7 +135,7 @@ Start the pipeline, then run `client/tests_real/test_real_stream.py` or the
 meeting window against it, on the same machine.
 
 ```powershell
-py -3.11 -m uvicorn server.app:app --host 127.0.0.1 --port 8000
+python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
 ```
 
 Check it first:

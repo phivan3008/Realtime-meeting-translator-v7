@@ -1050,7 +1050,7 @@ cuộc họp là phần trăm thời gian pipeline chặn đường vào.
 So nhật ký client của các lần chạy **cùng một cuộc họp**:
 
 ```powershell
-py -3.11 -m server.analysis.compare_logs recordings\meeting-A.debug.txt recordings\meeting-B.debug.txt
+python -m server.analysis.compare_logs recordings\meeting-A.debug.txt recordings\meeting-B.debug.txt
 ```
 
 Nó kiểm tra hai nhật ký là cùng cuộc họp (bỏ phiếu độ lệch thời gian trên
