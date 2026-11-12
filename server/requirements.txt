@@ -23,6 +23,10 @@
 fastapi==0.136.3
 uvicorn[standard]==0.52.4
 websockets==17.0.1
+# Model downloads verify HTTPS against the Windows certificate store, not
+# certifi's bundle: on a network that inspects HTTPS only the system store
+# holds the root that signs huggingface.co. See server/tls.py.
+truststore==0.10.4
 
 # --- DSP / array math ---
 numpy==2.3.5

@@ -256,6 +256,10 @@ transformers==5.14.1
     # via
     #   -c gpu_server/requirements.lock.txt
     #   -r server/requirements.txt
+truststore==0.10.4
+    # via
+    #   -c gpu_server/requirements.lock.txt
+    #   -r server/requirements.txt
 typer==0.27.1
     # via
     #   -c gpu_server/requirements.lock.txt

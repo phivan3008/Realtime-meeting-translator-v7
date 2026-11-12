@@ -60,6 +60,10 @@ ngưỡng trong dự án này đều nghiêng về phía giữ lại.
 **Ngưỡng phải nằm giữa hai vùng đo được, không nằm sát mép.** Cửa sổ giữa
 "đúng" và "sai" chỉ hẹp đi khi có thêm dữ liệu, không bao giờ rộng ra.
 
+| Thông số | Mặc định | Ý nghĩa |
+| --- | --- | --- |
+| `SYSTEM_CERTS` | `1` | Tải model (ECAPA, VoxLingua, AST) thì kiểm chứng chỉ HTTPS bằng kho chứng chỉ của Windows (`truststore`, xem `server/tls.py`), không phải bộ `certifi`. Mạng công ty soi HTTPS ký lại huggingface.co bằng gốc chỉ Windows có, nên `certifi` báo `CERTIFICATE_VERIFY_FAILED`. Vẫn kiểm chứng chỉ, chỉ đổi nguồn tin cậy. `0` quay về `certifi` |
+
 ---
 
 ## 1. VAD — phát hiện tiếng nói

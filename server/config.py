@@ -21,6 +21,13 @@ def _flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default) not in ("", "0")
 
 
+# --- Outgoing HTTPS -----------------------------------------------------------
+# Model downloads verify against the operating system's certificate store
+# (server/tls.py), because a network that inspects HTTPS signs huggingface.co
+# with a root only the system store holds. 0 falls back to certifi's bundle.
+SYSTEM_CERTS = _flag("SYSTEM_CERTS", "1")
+
+
 # --- Audio contract ----------------------------------------------------------
 # Defined once in common/protocol.py and re-exported here, because a mismatch
 # between the two sides corrupts audio silently rather than raising.
